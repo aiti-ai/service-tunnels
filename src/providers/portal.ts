@@ -40,6 +40,8 @@ interface PortalUserRecord {
   displayName: string;
   salt: string;
   hash: string;
+  /** Base32 TOTP secret (RFC 6238) when the user has 2FA enrolled. */
+  totpSecret?: string;
 }
 
 export class PortalAuthProvider implements AuthProvider, UserManager {
@@ -244,12 +246,66 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     await this.#writeDb(rows);
     this.#ctx.log(`portal: user ${name} removed`);
   }
+
+  // —— TOTP 2FA management ——
+
+  /** Enroll TOTP for a user. Returns the base32 secret + otpauth URL. */
+  async totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }> {
+    const rows = await this.#readDb();
+    const rec = rows.get(name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    const secret = base32Encode(randomBytes(20));
+    rec.totpSecret = secret;
+    await this.#writeDb(rows);
+    const label = encodeURIComponent(`${name}@service-tunnels`);
+    this.#ctx.log(`portal: TOTP enrolled for ${name}`);
+    return {
+      secret,
+      otpauthUrl: `otpauth://totp/${label}?secret=${secret}&issuer=service-tunnels&algorithm=SHA1&digits=6&period=30`,
+    };
+  }
+
+  /** Disable TOTP for a user. */
+  async totpDisable(name: string): Promise<void> {
+    const rows = await this.#readDb();
+    const rec = rows.get(name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    if (!rec.totpSecret) throw new Error(`user ${name} has no TOTP enrolled`);
+    delete rec.totpSecret;
+    await this.#writeDb(rows);
+    this.#ctx.log(`portal: TOTP disabled for ${name}`);
+  }
+
+  /** Whether a user has TOTP enrolled. */
+  async totpStatus(name: string): Promise<{ enrolled: boolean }> {
+    const rows = await this.#readDb();
+    const rec = rows.get(name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    return { enrolled: Boolean(rec.totpSecret) };
+  }
 }
 
 // —— helpers shared with the generated server script ——
 
 export function hashPassword(password: string, salt: string): string {
   return scryptSync(password, salt, 64).toString("hex");
+}
+
+const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function base32Encode(buf: Buffer): string {
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of buf) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
 }
 
 function readSecret(file: string): string {
@@ -316,7 +372,7 @@ function waitTcp(port: number, timeoutMs: number): Promise<void> {
 /** The generated portal server (ESM, written to cacheDir/tmp/portal/server.mjs). */
 function writeServerScript(file: string, basePath: string): void {
   const script = `import { createServer } from "http";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants } from "crypto";
 
 const PORT = Number(process.env.PORT);
@@ -339,13 +395,15 @@ function sign(payload) {
   return createHmac("sha256", SECRET).update(payload).digest("base64url");
 }
 
-function issueSession(name) {
-  const payload = String(Date.now() + TTL_MS) + "." + name;
+function issueSession(name, cookieName = COOKIE, ttl = TTL_MS) {
+  // cookieName is mixed into the payload so a 2FA ticket can never be
+  // replayed as a full session cookie (or vice versa)
+  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name;
   const body = Buffer.from(payload).toString("base64url");
   return body + "." + sign(body);
 }
 
-function verifySession(token) {
+function verifySession(token, cookieName = COOKIE) {
   const i = token.lastIndexOf(".");
   if (i < 0) return null;
   const body = token.slice(0, i);
@@ -355,18 +413,112 @@ function verifySession(token) {
   const b = Buffer.from(expect);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
   const payload = Buffer.from(body, "base64url").toString("utf8");
-  const dot = payload.indexOf(".");
-  const expiry = Number(payload.slice(0, dot));
+  const parts = payload.split(".");
+  const expiry = Number(parts[0]);
   if (!expiry || expiry < Date.now()) return null;
-  return payload.slice(dot + 1);
+  if (parts[1] !== cookieName) return null;
+  return parts.slice(2).join(".");
 }
 
-const rate = new Map();
-function rateLimited(ip) {
+// —— TOTP (RFC 6238, SHA-1, 30s steps, ±1 window) ————————————————
+function base32Decode(s) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of String(s).toUpperCase().replace(/=+$/, "")) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) return null;
+    value = (value << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function verifyTotp(secretB32, code) {
+  if (!/^\\d{6}$/.test(code)) return false;
+  const key = base32Decode(secretB32);
+  if (!key || !key.length) return false;
+  const step = Math.floor(Date.now() / 30_000);
+  for (let off = -1; off <= 1; off++) {
+    const counter = Buffer.alloc(8);
+    counter.writeBigUInt64BE(BigInt(step + off));
+    const hmac = createHmac("sha1", key).update(counter).digest();
+    const o = hmac[hmac.length - 1] & 0x0f;
+    const num = ((hmac[o] & 0x7f) << 24) | (hmac[o + 1] << 16) | (hmac[o + 2] << 8) | hmac[o + 3];
+    const otp = String(num % 1_000_000).padStart(6, "0");
+    if (timingSafeEqual(Buffer.from(otp), Buffer.from(code))) return true;
+  }
+  return false;
+}
+
+function totpPage(next, error) {
+  const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  return '<!doctype html><html><head><meta charset="utf-8"><title>Two-factor</title>'
+    + '<style>body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7}'
+    + 'form{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem}'
+    + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .6rem}'
+    + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px;letter-spacing:.35em;text-align:center}'
+    + 'button{margin-top:1.2rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}</style>'
+    + '</head><body><form method="post" action="' + BASE + '/login/2fa">'
+    + '<h1>Two-factor authentication</h1>'
+    + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
+    + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err
+    + '<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>'
+    + '<button type="submit">Verify</button></form></body></html>';
+}
+
+// —— brute-force protection (authelia-style) ————————————————
+// Per-account AND per-IP sliding window: FIND_MS (5 min) window, MAX_RETRIES
+// (5) failures → banned for BAN_MS (15 min); repeated bans escalate 2x/4x.
+// State persists to BRUTE_FILE so bans survive process restarts.
+const BRUTE_FILE = USERS_FILE.replace(/users\.json$/, "brute.json");
+const FIND_MS = 5 * 60_000;
+const MAX_RETRIES = 5;
+const BAN_MS = 15 * 60_000;
+function loadBrute() {
+  try { return JSON.parse(readFileSync(BRUTE_FILE, "utf8")); } catch { return { accounts: {}, ips: {} }; }
+}
+function saveBrute(b) {
+  try { writeFileSync(BRUTE_FILE, JSON.stringify(b)); } catch { /* best-effort */ }
+}
+function sweepFailures(list, now) {
+  return (list || []).filter((t) => now - t < FIND_MS);
+}
+function banState(account, ip) {
   const now = Date.now();
-  const win = (rate.get(ip) || []).filter((t) => now - t < 60_000);
-  rate.set(ip, win);
-  return win.length >= 5;
+  const b = loadBrute();
+  const acct = b.accounts[account];
+  const addr = b.ips[ip];
+  const acctUntil = acct && acct.bannedUntil > now ? acct.bannedUntil : 0;
+  const ipUntil = addr && addr.bannedUntil > now ? addr.bannedUntil : 0;
+  return Math.max(acctUntil, ipUntil);
+}
+function recordFailure(account, ip) {
+  const now = Date.now();
+  const b = loadBrute();
+  const acct = b.accounts[account] || (b.accounts[account] = { fails: [], strikes: 0, bannedUntil: 0 });
+  const addr = b.ips[ip] || (b.ips[ip] = { fails: [], strikes: 0, bannedUntil: 0 });
+  for (const t of [acct, addr]) {
+    t.fails = sweepFailures(t.fails, now);
+    t.fails.push(now);
+    if (t.fails.length >= MAX_RETRIES) {
+      const factor = Math.pow(2, Math.min(t.strikes, 4));
+      t.bannedUntil = now + BAN_MS * factor;
+      t.strikes += 1;
+      t.fails = [];
+    }
+  }
+  saveBrute(b);
+}
+function clearFailures(account, ip) {
+  const b = loadBrute();
+  if (b.accounts[account]) b.accounts[account].fails = [];
+  if (b.ips[ip]) b.ips[ip].fails = [];
+  saveBrute(b);
 }
 
 // —— login password transport: RSA-OAEP front-end encryption ————————
@@ -441,11 +593,11 @@ function html(next, error, keyId, publicKey) {
     + '<button type="submit">Sign in</button></form></body></html>';
 }
 
-function setSession(res, name, next) {
-  const token = issueSession(name);
+function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS) {
+  const token = issueSession(name, cookieName, ttl);
   res.writeHead(302, {
     Location: next || "/",
-    "Set-Cookie": COOKIE + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
+    "Set-Cookie": cookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
       + (SECURE ? "; Secure" : ""),
   });
   res.end();
@@ -481,14 +633,19 @@ createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
-      if (rateLimited(ip)) {
-        res.writeHead(429, { "Content-Type": "text/html" });
-        res.end(html("", "Too many attempts — try again in a minute."));
-        return;
-      }
       const params = new URLSearchParams(body);
       const name = params.get("username") || "";
       const next = params.get("next") || "/";
+      // brute-force gate: account/IP banned → 429 with Retry-After
+      const bannedUntil = banState(name, ip);
+      if (bannedUntil > Date.now()) {
+        res.writeHead(429, {
+          "Content-Type": "text/html",
+          "Retry-After": String(Math.ceil((bannedUntil - Date.now()) / 1000)),
+        });
+        res.end(html(next, "Too many failed attempts — account is temporarily locked."));
+        return;
+      }
       let password = params.get("password") || "";
       // RSA-OAEP path (browser): decrypt with the one-time private key
       const keyId = params.get("keyId") || "";
@@ -504,18 +661,55 @@ createServer((req, res) => {
       }
       const users = loadUsers();
       const rec = users[name];
-      if (!rec) {
+      const expect = rec ? Buffer.from(rec.hash, "hex") : null;
+      const got = expect ? scryptSync(password, rec.salt, expect.length) : null;
+      const bad = !expect || expect.length !== got.length || !timingSafeEqual(expect, got);
+      if (bad) {
+        recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
         res.end(html(next, "Invalid username or password."));
         return;
       }
-      const expect = Buffer.from(rec.hash, "hex");
-      const got = scryptSync(password, rec.salt, expect.length);
-      if (expect.length !== got.length || !timingSafeEqual(expect, got)) {
-        res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(html(next, "Invalid username or password."));
+      clearFailures(name, ip);
+      // TOTP second factor when the user has one enrolled
+      if (rec.totpSecret) {
+        const tmp = issueSession(name, "st_portal_2fa", 5 * 60_000);
+        res.writeHead(200, {
+          "Content-Type": "text/html; charset=utf-8",
+          "Set-Cookie": "st_portal_2fa=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
+        });
+        res.end(totpPage(next));
         return;
       }
+      setSession(res, name, next);
+    });
+    return;
+  }
+
+  // TOTP second-factor step
+  if (url.pathname === BASE + "/login/2fa" && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const params = new URLSearchParams(body);
+      const next = params.get("next") || "/";
+      const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
+        .find((c) => c.startsWith("st_portal_2fa="));
+      const name = cookie ? verifySession(cookie.slice("st_portal_2fa=".length), "st_portal_2fa") : null;
+      if (!name) {
+        res.writeHead(401, { "Content-Type": "text/html" });
+        res.end(totpPage(next, "Session expired — please sign in again."));
+        return;
+      }
+      const users = loadUsers();
+      const rec = users[name];
+      if (!rec || !rec.totpSecret || !verifyTotp(rec.totpSecret, params.get("code") || "")) {
+        recordFailure(name, ip);
+        res.writeHead(401, { "Content-Type": "text/html" });
+        res.end(totpPage(next, "Invalid code."));
+        return;
+      }
+      clearFailures(name, ip);
       setSession(res, name, next);
     });
     return;

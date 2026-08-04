@@ -109,6 +109,27 @@ const methods = new Map<string, Handler>([
   ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
   ["auth.user.managers", () => authRegistry.userManagers()],
+  ["auth.totp.enroll", (params) => {
+    const p = params as { name?: string; provider?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+      totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }>;
+    };
+    return mgr.totpEnroll(p.name ?? "");
+  }],
+  ["auth.totp.disable", (params) => {
+    const p = params as { name?: string; provider?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+      totpDisable(name: string): Promise<void>;
+    };
+    return mgr.totpDisable(p.name ?? "").then(() => ({ ok: true }));
+  }],
+  ["auth.totp.status", (params) => {
+    const p = params as { name?: string; provider?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+      totpStatus(name: string): Promise<{ enrolled: boolean }>;
+    };
+    return mgr.totpStatus(p.name ?? "");
+  }],
   ["auth.user.list", (params) => {
     const provider = (params as { provider?: string } | undefined)?.provider;
     const targets = resolveDaemonUserTargets(authRegistry, provider);

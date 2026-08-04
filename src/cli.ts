@@ -409,8 +409,20 @@ async function main(): Promise<void> {
         const name = cmd[3] ?? "";
         const providers = await st.auth.removeUser(name, args.provider);
         jsonOut({ removed: name, providers });
+      } else if (op === "totp" && cmd[2] === "enroll") {
+        const name = cmd[3];
+        if (!name) {
+          console.error("auth totp enroll <name> [--provider portal]");
+          process.exit(2);
+        }
+        jsonOut(await st.auth.totpEnroll(name, args.provider));
+      } else if (op === "totp" && cmd[2] === "disable") {
+        await st.auth.totpDisable(cmd[3] ?? "", args.provider);
+        jsonOut({ disabled: cmd[3] });
+      } else if (op === "totp" && cmd[2] === "status") {
+        jsonOut(await st.auth.totpStatus(cmd[3] ?? "", args.provider));
       } else {
-        console.error("auth providers list | auth user list|add|set-password|remove [--provider ...]");
+        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--provider ...]");
         process.exit(2);
       }
       break;

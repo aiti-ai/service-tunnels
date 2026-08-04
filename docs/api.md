@@ -88,6 +88,13 @@ removeUser(name, provider?): Promise<string[]>
   前端 WebCrypto RSA-OAEP-SHA256 加密密码后提交——**密码明文永不出浏览器**
   （隧道边缘如 cloudflared/Cloudflare 只见密文）；keyId 单次使用，抓包重放
   直接 401；无 JS 客户端（curl/API）走明文 `password` 字段兼容路径；
+- **portal 防爆破**（authelia 语义）：账号+IP 双维度滑动窗口（5 分钟窗口内
+  5 次失败）→ 封禁 15 分钟，重复封禁 2x/4x 指数递增；状态持久化
+  `cacheDir/tmp/portal/brute.json`（重启保留）；封禁返回 429 + Retry-After
+- **portal TOTP 2FA**：`auth totp enroll <name>` 返回 base32 secret +
+  otpauth URL（扫码）；已绑定用户登录时密码通过后进入第二步 6 位码验证
+  （±1 时间窗口）；2FA 临时票 5 分钟 TTL 且与正式会话 cookie 签名用途隔离
+  （不能复用）；`totp disable|status` 管理
 - 仅当 provider 运行中才 validate+重启，未运行时文件写入下次启动生效；
 - CLI：`auth user list|add|set-password|remove <name> [--provider basic|authelia|all] [--password] [--display-name]`
   （未给 --password 时自动生成并在返回中输出一次；返回含 providers 列表）；

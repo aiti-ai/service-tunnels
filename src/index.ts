@@ -157,6 +157,12 @@ export interface ServiceTunnels {
     removeUser(name: string, provider?: string | string[]): Promise<string[]>;
     /** Provider types with local user databases (e.g. ["authelia","basic"]). */
     userManagers(): string[];
+    /** Enroll TOTP 2FA for a user (portal) — returns secret + otpauth URL. */
+    totpEnroll(name: string, provider?: string): Promise<{ secret: string; otpauthUrl: string }>;
+    /** Disable TOTP 2FA for a user (portal). */
+    totpDisable(name: string, provider?: string): Promise<void>;
+    /** TOTP enrollment status for a user (portal). */
+    totpStatus(name: string, provider?: string): Promise<{ enrolled: boolean }>;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -328,6 +334,24 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
             log: () => {},
           }),
         userManagers: () => registry.userManagers(),
+        totpEnroll: async (name: string, provider?: string) => {
+          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+            totpEnroll(n: string): Promise<{ secret: string; otpauthUrl: string }>;
+          };
+          return mgr.totpEnroll(name);
+        },
+        totpDisable: async (name: string, provider?: string) => {
+          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+            totpDisable(n: string): Promise<void>;
+          };
+          await mgr.totpDisable(name);
+        },
+        totpStatus: async (name: string, provider?: string) => {
+          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+            totpStatus(n: string): Promise<{ enrolled: boolean }>;
+          };
+          return mgr.totpStatus(name);
+        },
         users: async (provider = "all") => {
           const targets = resolveUserTargets(registry, provider);
           const out: { provider: string; users: AuthUser[] }[] = [];

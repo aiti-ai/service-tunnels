@@ -186,3 +186,108 @@ test("portal login password transport: RSA-OAEP front-end encryption", { timeout
   //    encrypted path carried only ciphertext (assert the form had no password)
   await provider.stop();
 });
+
+test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", { timeout: 40_000 }, async () => {
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir, base } = tempDirs();
+  const pickPort = async () => {
+    const { createServer } = await import("net");
+    return new Promise((resolve) => {
+      const srv = createServer();
+      srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+    });
+  };
+  const provider = new PortalAuthProvider(
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider.prepare();
+  await provider.start();
+  const port = provider.port;
+
+  // ── brute force: 5 bad passwords → locked out (429) ──
+  for (let i = 0; i < 5; i++) {
+    const r = await postForm("/portal/login", port, { username: "admin", password: "wrong" });
+    assert.equal(r.status, 401, `attempt ${i + 1} should be 401`);
+  }
+  const locked = await postForm("/portal/login", port, { username: "admin", password: "pw" });
+  assert.equal(locked.status, 429, "correct password still locked after 5 failures");
+  assert.ok(locked.headers["retry-after"], "429 should carry Retry-After");
+  // other account unaffected by account-level lock (IP shares the lock though —
+  // verify the account dimension by using a different client IP is not possible
+  // here; assert the account lock file exists with state)
+  const { readFileSync } = await import("node:fs");
+  const brute = JSON.parse(readFileSync(join(cacheDir, "tmp", "portal", "brute.json"), "utf8"));
+  assert.ok(brute.accounts.admin.bannedUntil > Date.now(), "admin account banned in state");
+
+  // ── TOTP 2FA (fresh provider — the same IP is banned by the lockout
+  //    test above, and IP+account lockout is by design) ──
+  const { PortalAuthProvider: P2 } = await import("../src/providers/portal.ts");
+  const d2 = tempDirs();
+  const provider2 = new P2(
+    { configDir: d2.configDir, cacheDir: d2.cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider2.prepare();
+  await provider2.start();
+  const port2 = provider2.port;
+  await provider2.addUser("alice", "alice-pw");
+  const { secret, otpauthUrl } = await provider2.totpEnroll("alice");
+  assert.match(otpauthUrl, /^otpauth:\/\/totp\//);
+  assert.equal((await provider2.totpStatus("alice")).enrolled, true);
+  assert.equal((await provider2.totpStatus("admin")).enrolled, false);
+
+  // password step → 200 + pending 2FA cookie (no session cookie yet)
+  const step1 = await postForm("/portal/login", port2, { username: "alice", password: "alice-pw" });
+  assert.equal(step1.status, 200, "password ok but 2FA pending");
+  const tmpCookie = String(step1.headers["set-cookie"]).match(/st_portal_2fa=([^;]+)/)?.[1];
+  assert.ok(tmpCookie, "must set pending-2fa cookie");
+
+  // wrong code → 401
+  const badCode = await postForm("/portal/login/2fa", port2, { code: "000000" }, { cookie: `st_portal_2fa=${tmpCookie}` });
+  assert.equal(badCode.status, 401);
+  const badCode2 = await postForm("/portal/login/2fa", port2, { code: "000000" }, { cookie: `st_portal_2fa=${tmpCookie}` });
+  assert.equal(badCode2.status, 401);
+
+  // correct TOTP code → 302 + real session cookie (fresh ticket for alice)
+  const { createHmac } = await import("node:crypto");
+  function base32Decode(s) {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits = 0, value = 0;
+    const out = [];
+    for (const ch of s.toUpperCase().replace(/=+$/, "")) {
+      const v = alphabet.indexOf(ch);
+      if (v < 0) return null;
+      value = (value << 5) | v;
+      bits += 5;
+      if (bits >= 8) { out.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+    }
+    return Buffer.from(out);
+  }
+  function totp(secretB32, offset = 0) {
+    const key = base32Decode(secretB32);
+    const step = BigInt(Math.floor(Date.now() / 30_000) + offset);
+    const counter = Buffer.alloc(8);
+    counter.writeBigUInt64BE(step);
+    const h = createHmac("sha1", key).update(counter).digest();
+    const o = h[h.length - 1] & 0x0f;
+    const num = ((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3];
+    return String(num % 1_000_000).padStart(6, "0");
+  }
+  const code = totp(secret);
+  const ok2fa = await postForm("/portal/login/2fa", port2, { code }, { cookie: `st_portal_2fa=${tmpCookie}` });
+  assert.equal(ok2fa.status, 302, "valid TOTP completes login");
+  assert.match(String(ok2fa.headers["set-cookie"]), /st_portal_session=/);
+
+  // 2FA ticket can't be reused as a session cookie
+  const probe = await get("/portal/api/authz/auth-request", port2, { cookie: `st_portal_session=${tmpCookie}` });
+  assert.equal(probe.status, 401, "2FA ticket must not work as session cookie");
+
+  // session cookie works
+  const sessionCookie = String(ok2fa.headers["set-cookie"]).match(/st_portal_session=([^;]+)/)?.[1];
+  const authed = await get("/portal/api/authz/auth-request", port2, { cookie: `st_portal_session=${sessionCookie}` });
+  assert.equal(authed.status, 200);
+
+  await provider.stop();
+  await provider2.stop();
+});
