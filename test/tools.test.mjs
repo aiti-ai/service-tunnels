@@ -323,3 +323,38 @@ z.close()`, zipPath, script], { stdio: "ignore" });
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("Gitee-style full URL template mirrors expand placeholders", async () => {
+  const { candidateUrls } = await loadSubject();
+  const def = {
+    name: "frpc",
+    version: "0.61.1",
+    platforms: ["linux", "darwin", "win32"],
+    download: {
+      official: "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
+      kind: "tar.gz",
+    },
+  };
+  const urls = candidateUrls(def, {
+    cacheDir: "/tmp/x",
+    toolMirrors: {
+      frpc: ["https://gitee.com/justdb-mirrors/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}"],
+    },
+  });
+  const mirror = urls.find((u) => u.label === "mirror#1");
+  const expectedExt = process.platform === "win32" ? "zip" : "tgz";
+  assert.ok(
+    mirror.url.startsWith("https://gitee.com/justdb-mirrors/frp/releases/download/v0.61.1/"),
+    `gitee template: ${mirror.url}`,
+  );
+  assert.ok(mirror.url.endsWith(`.${expectedExt}`), `ext: ${mirror.url}`);
+  assert.ok(!mirror.url.includes("{"), "all placeholders filled");
+  // ghproxy prefix form still works
+  const urls2 = candidateUrls(def, { cacheDir: "/tmp/x", toolMirrors: { frpc: ["https://mirror.ghproxy.com/{official}"] } });
+  const gh = urls2.find((u) => u.label === "mirror#1");
+  assert.ok(gh.url.startsWith("https://mirror.ghproxy.com/https://github.com/"), gh.url);
+  // bare prefix form appends
+  const urls3 = candidateUrls(def, { cacheDir: "/tmp/x", toolMirrors: { frpc: ["https://cdn.example.com/"] } });
+  const bare = urls3.find((u) => u.label === "mirror#1");
+  assert.ok(bare.url.startsWith("https://cdn.example.com/https://github.com/"), bare.url);
+});

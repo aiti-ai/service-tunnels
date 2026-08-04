@@ -96,6 +96,44 @@
 - 进程退出时清理；`stop-all` 等价；
 - **脱敏**：不存任何 secret（密钥只在 config.json，0600）。
 
+## 国内镜像方案（Gitee，可控可自建）
+
+ghproxy 类公共加速（`mirror.ghproxy.com` 等）不稳定且流量过第三方。**推荐
+Gitee 镜像仓库**——GitHub 与 Gitee 的 release URL **结构同构**：
+
+```
+GitHub: https://github.com/fatedier/frp/releases/download/v0.61.1/frp_0.61.1_linux_amd64.tar.gz
+Gitee:  https://gitee.com/<你>/frp/releases/download/v0.61.1/frp_0.61.1_linux_amd64.tar.gz
+```
+
+**落地步骤**：
+1. 注册 [gitee.com](https://gitee.com)，个人令牌：
+   https://gitee.com/profile/personal_access_tokens（需 releases 权限）
+2. 在 Gitee 用「新建仓库 → 从 GitHub 导入」建镜像仓库（代码自动同步）：
+   `frp` ← fatedier/frp、`cloudflared` ← cloudflare/cloudflared、
+   `authelia` ← authelia/authelia、`oauth2-proxy` ← oauth2-proxy/oauth2-proxy
+3. 同步 release 资产（Gitee 导入不自动带资产）：
+   - 手动：`GITEE_OWNER=<你> GITEE_REPO=frp GITEE_TOKEN=<token> \
+     GH_REPO=fatedier/frp GH_TAG=v0.61.1 scripts/mirror-to-gitee.sh`
+   - 自动：把 `.github/workflows/sync-gitee.yml.example` 放入源仓库，发布即同步
+4. 配置下载走 Gitee（**完整 URL 模板**，占位符自动填充）：
+
+```jsonc
+{
+  "preferMirrors": true,     // 国内：镜像优先
+  "toolMirrors": {
+    "frp": ["https://gitee.com/<你>/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}"],
+    "cloudflared": ["https://gitee.com/<你>/cloudflared/releases/download/latest/cloudflared-{platform}-{arch}{exe}"],
+    "authelia": ["https://gitee.com/<你>/authelia/releases/download/v{version}/authelia-v{version}-{platform}-{arch}.tar.gz"],
+    "oauth2-proxy": ["https://gitee.com/<你>/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz"]
+  }
+}
+```
+
+> 镜像支持三种形态（`candidateUrls` 自动识别）：① 含 `{official}` → ghproxy
+> 前缀包裹；② 含版本/平台占位符 → **完整模板**（Gitee 等）；③ 裸前缀 → 拼接。
+> `preferMirrors: true` 时镜像排在官方前（国内网络）。
+
 ## 工具解析优先级（所有命令统一）
 
 ```

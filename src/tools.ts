@@ -102,11 +102,25 @@ export function candidateUrls(
   const mirrors = configured ?? spec.mirrors ?? [];
 
   const official = { url: fill(spec.official), kind: spec.kind, label: "official" };
-  const mirrorUrls = mirrors.map((m, i) => ({
-    url: fill(m.includes("{official}") ? m : m.endsWith("/") ? `${m}${spec.official}` : `${m}/${spec.official}`),
-    kind: spec.kind,
-    label: `mirror#${i + 1}`,
-  }));
+  const mirrorUrls = mirrors.map((m, i) => {
+    // three mirror forms:
+    //   1. "{official}" placeholder → ghproxy-style prefix wrapping
+    //   2. full URL template with placeholders (Gitee etc.) → fill directly
+    //   3. bare prefix → official URL appended
+    const isTemplate =
+      m.includes("{official}") ||
+      m.includes("{version}") ||
+      m.includes("{platform}") ||
+      m.includes("{arch}") ||
+      m.includes("{ext}") ||
+      m.includes("{exe}");
+    const url = isTemplate
+      ? m.replaceAll("{official}", spec.official)
+      : m.endsWith("/")
+        ? `${m}${spec.official}`
+        : `${m}/${spec.official}`;
+    return { url: fill(url), kind: spec.kind, label: `mirror#${i + 1}` };
+  });
 
   return opts.preferMirrors ? [...mirrorUrls, official] : [official, ...mirrorUrls];
 }
