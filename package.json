@@ -1,0 +1,40 @@
+{
+  "name": "service-tunnels",
+  "version": "0.1.0",
+  "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
+  "type": "module",
+  "bin": {
+    "service-tunnels": "./bin/service-tunnels.mts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "tunnel",
+    "ngrok",
+    "frp",
+    "authelia",
+    "nginx",
+    "port-discovery",
+    "reverse-proxy"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^5.8.3"
+  }
+}

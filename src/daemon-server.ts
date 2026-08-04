@@ -1,0 +1,158 @@
+#!/usr/bin/env node
+/**
+ * Daemon server — the long-lived process that owns framework helpers
+ * (nginx/authelia/redis) and tunnel processes in CLI mode.
+ *
+ * Detached by `daemon start` (setsid/detached:true); exposes newline-delimited
+ * JSON-RPC over a unix socket (TCP on Windows) whose address is written to
+ * cacheDir/state.json so every CLI invocation can find it.
+ *
+ * This file is spawned directly by Node (node daemon-server.ts ...) — it is
+ * NOT a library entry point.
+ */
+import { createServer, type Socket } from "net";
+import { existsSync, unlinkSync } from "fs";
+import type { Server as HttpServer } from "http";
+import { InternalRegistry } from "./internal.ts";
+import { getServicePorts } from "./discovery.ts";
+import { readState, writeState } from "./state.ts";
+
+// argv: <stateFile> <sockPath>
+const [, , stateFile = "", sockPath = ""] = process.argv;
+if (!stateFile || !sockPath) {
+  console.error("daemon-server: usage: daemon-server <stateFile> <sockPath>");
+  process.exit(1);
+}
+
+const internal = new InternalRegistry();
+
+// Rehydrate the internal registry from state.json (survives daemon restart).
+for (const entry of readState(stateFile).internal) {
+  internal.register(entry.role, {
+    port: entry.port,
+    pid: entry.pid,
+    process: entry.role,
+    cmdline: entry.role,
+    addresses: entry.addresses,
+  });
+}
+
+type Handler = (params: unknown) => unknown | Promise<unknown>;
+
+const methods = new Map<string, Handler>([
+  ["ping", () => ({ pong: true, pid: process.pid })],
+  [
+    "discover",
+    (params) => {
+      const opts = (params ?? {}) as { force?: boolean };
+      return getServicePorts(internal, { force: opts.force });
+    },
+  ],
+  ["internal.list", () => internal.list()],
+  [
+    "shutdown",
+    () => {
+      setTimeout(() => process.exit(0), 50);
+      return { ok: true };
+    },
+  ],
+]);
+
+/** Newline-delimited JSON-RPC over a unix socket. */
+function serveSocket(socket: Socket): void {
+  socket.setEncoding("utf8");
+  let buf = "";
+  socket.on("data", (chunk: string) => {
+    buf += chunk;
+    let nl = buf.indexOf("\n");
+    while (nl >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) void handleLine(socket, line);
+      nl = buf.indexOf("\n");
+    }
+  });
+  socket.on("error", () => socket.destroy());
+}
+
+async function handleLine(socket: Socket, line: string) {
+  let req: { id: number; method: string; params?: unknown };
+  try {
+    req = JSON.parse(line) as { id: number; method: string; params?: unknown };
+  } catch {
+    socket.write(`${JSON.stringify({ id: null, error: "invalid request" })}\n`);
+    return;
+  }
+  const handler = methods.get(req.method);
+  if (!handler) {
+    socket.write(`${JSON.stringify({ id: req.id, error: `unknown method: ${req.method}` })}\n`);
+    return;
+  }
+  try {
+    const result = await handler(req.params);
+    socket.write(`${JSON.stringify({ id: req.id, result })}\n`);
+  } catch (err) {
+    socket.write(`${JSON.stringify({ id: req.id, error: String(err) })}\n`);
+  }
+}
+
+async function listen(): Promise<string> {
+  if (process.platform === "win32") {
+    const { createServer: createHttp } = await import("http");
+    const httpServer: HttpServer = createHttp((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        void (async () => {
+          try {
+            const reqObj = JSON.parse(body || "{}") as { id: number; method: string; params?: unknown };
+            const handler = methods.get(reqObj.method);
+            if (!handler) {
+              res.writeHead(400, { "content-type": "application/json" });
+              res.end(JSON.stringify({ error: `unknown method: ${reqObj.method}` }));
+              return;
+            }
+            const result = await handler(reqObj.params);
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ id: reqObj.id, result }));
+          } catch (err) {
+            res.writeHead(500, { "content-type": "application/json" });
+            res.end(JSON.stringify({ error: String(err) }));
+          }
+        })();
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once("error", reject);
+      httpServer.listen(0, "127.0.0.1", () => resolve());
+    });
+    const addr = httpServer.address();
+    if (!addr || typeof addr === "string") throw new Error("no tcp addr");
+    return `tcp://127.0.0.1:${addr.port}`;
+  }
+
+  if (existsSync(sockPath)) {
+    try {
+      unlinkSync(sockPath); // stale socket from a crashed daemon
+    } catch {
+      // ignore
+    }
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(sockPath, () => resolve());
+  });
+  return `unix://${sockPath}`;
+}
+
+const server = createServer(serveSocket);
+const ipc = await listen();
+writeState(stateFile, { ...readState(stateFile), daemon: { pid: process.pid, ipc } });
+console.log(`daemon ready ${ipc}`);
+
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+process.on("uncaughtException", (err) => {
+  console.error("daemon-server uncaught:", err);
+  process.exit(1);
+});
