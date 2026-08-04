@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import type { ServicePortInfo } from "./discovery.ts";
 import { readState } from "./state.ts";
 import { cachePaths } from "./config.ts";
+import { killRoleProcesses } from "./cleanup.ts";
 
 /**
  * Daemon controller — CLI-mode process model.
@@ -157,6 +158,9 @@ export async function stopDaemon(cacheDir: string): Promise<boolean> {
   while (Date.now() < deadline && daemonStatus(cacheDir).running) {
     spawnSync("sleep", ["0.1"], { stdio: "ignore" });
   }
+  // Safety net: if the daemon was SIGKILLed before its own cleanup finished,
+  // kill any remaining framework helpers by role marker.
+  await killRoleProcesses();
   return !daemonStatus(cacheDir).running;
 }
 

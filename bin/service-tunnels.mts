@@ -18,6 +18,7 @@ function usage(): void {
   tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
          start|stop|remove <name>
   expose <port> [--tunnel <t>] [--auth [<provider>]] [--name <n>] [--nginx-port <p>]
+  stop-all
   status [--json]
   config path | show
 
@@ -342,6 +343,17 @@ async function main(): Promise<void> {
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
       });
       jsonOut(res);
+      break;
+    }
+
+    case "stop-all": {
+      // stop the daemon (which kills nginx/authelia/redis/tunnels via role
+      // markers), then remove the state file
+      const stopped = await st.daemon.stop();
+      const { rmSync } = await import("node:fs");
+      const { cachePaths } = await import("../src/config.ts");
+      rmSync(cachePaths(st.dirs.cacheDir).stateFile, { force: true });
+      jsonOut({ stopped, cleaned: true });
       break;
     }
 

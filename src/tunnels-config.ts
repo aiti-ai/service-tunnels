@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import type { TunnelConfig } from "./tunnels.ts";
 
@@ -28,5 +28,6 @@ export function writeTunnelConfigs(configDir: string, cfgs: TunnelConfig[]): voi
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(cfgs, null, 2) + "\n", "utf8");
+  chmodSync(tmp, 0o600); // config may hold frp tokens etc.
   renameSync(tmp, file);
 }

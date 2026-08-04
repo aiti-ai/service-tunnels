@@ -19,6 +19,7 @@ import { readState, writeState } from "./state.ts";
 import { TunnelManager } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
+import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 
@@ -121,8 +122,12 @@ const methods = new Map<string, Handler>([
   ],
   [
     "shutdown",
-    () => {
-      setTimeout(() => process.exit(0), 50);
+    async () => {
+      // kill every framework helper we spawned (nginx/authelia/redis/tunnels
+      // carry SERVICE_TUNNELS_ROLE) so nothing becomes an orphan
+      await tunnels.stopAll();
+      await killRoleProcesses();
+      setTimeout(() => process.exit(0), 100);
       return { ok: true };
     },
   ],
@@ -213,6 +218,12 @@ async function listen(): Promise<string> {
     server.once("error", reject);
     server.listen(sockPath, () => resolve());
   });
+  try {
+    const { chmodSync } = await import("fs");
+    chmodSync(sockPath, 0o600); // IPC is privileged
+  } catch {
+    // socket chmod is best-effort
+  }
   return `unix://${sockPath}`;
 }
 
@@ -221,8 +232,19 @@ const ipc = await listen();
 writeState(stateFile, { ...readState(stateFile), daemon: { pid: process.pid, ipc } });
 console.log(`daemon ready ${ipc}`);
 
-process.on("SIGTERM", () => process.exit(0));
-process.on("SIGINT", () => process.exit(0));
+process.once("exit", () => {
+  try {
+    unlinkSync(sockPath); // remove the IPC socket so a fresh daemon can bind
+  } catch {
+    // already gone
+  }
+});
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.once(sig, () => {
+    killRoleProcessesSync(); // safety net even on hard kills
+    process.exit(0);
+  });
+}
 process.on("uncaughtException", (err) => {
   console.error("daemon-server uncaught:", err);
   process.exit(1);

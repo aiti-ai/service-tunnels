@@ -470,14 +470,17 @@ await st.shutdown();                          // 清理全部子进程
 
 ## 10. 里程碑
 
-1. **M1 骨架**：包结构、目录解析、CLI 框架、daemon（后台常驻 + socket IPC +
+1. ✅ **M1 骨架**：包结构、目录解析、CLI 框架、daemon（后台常驻 + socket IPC +
    state.json 定位）、`discover`（Linux 优先，含辅助进程角色标记排除）+ 测试。
-2. **M2 proxy**：泛域名反代 + 白名单 + SSE/WS + `discover` 跨平台。
-3. **M3 tunnels**：隧道管理器 + ngrok/frpc/ssh/cloudflared + URL 解析 + 状态。
-4. **M4 auth**：AuthProvider 接口 + nginx 网关 + **authelia provider**（绿色启动 +
-   动态登记 + Redis）+ `expose` 一键流程（对接调研认证架构）；`basic` provider。
-5. **M5 打磨**：生命周期/清理、安全加固、文档、pi-web 集成示例。
-6. **M6 插件**：oauth2-proxy / basic provider 完善 + 插件加载机制（providers
+2. ✅ **M2 proxy**：泛域名反代 + 白名单 + SSE/WS + stripBasePath + Basic 密码。
+3. ✅ **M3 tunnels**：隧道管理器 + ngrok/frpc/ssh/cloudflared/localtunnel/command
+   + URL 解析 + state.json 镜像（daemon 持有，跨 CLI 调用可见）。
+4. ✅ **M4 auth**：AuthProvider 接口 + nginx 网关（随机端口）+ **authelia provider**
+   （绿色启动 + 动态登记 + Redis）+ `expose` 一键流程——**端到端验证**：未认证
+   401、门户 200、host 动态登记、全组件随机端口内部互知。
+5. ✅ **M5 打磨**：daemon shutdown 角色标记清理（防孤儿进程）、config/socket 0600、
+   `stop-all`、README、pi-web 集成示例。
+6. ⏳ **M6 插件**：oauth2-proxy / basic provider 完善 + 插件加载机制（providers
    目录 / npm 包）+ 可选边缘型插件（ngrok edge-oidc、Cloudflare Access）。
 
 ## 11. 参考
