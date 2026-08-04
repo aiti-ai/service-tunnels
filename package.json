@@ -11,10 +11,13 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./src/index.ts": "./src/index.ts",
+    "./src/*.ts": "./src/*.ts",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
+    "src",
     "docs",
     "examples",
     "README.md",
