@@ -480,8 +480,11 @@ await st.shutdown();                          // 清理全部子进程
    401、门户 200、host 动态登记、全组件随机端口内部互知。
 5. ✅ **M5 打磨**：daemon shutdown 角色标记清理（防孤儿进程）、config/socket 0600、
    `stop-all`、README、pi-web 集成示例。
-6. ⏳ **M6 插件**：oauth2-proxy / basic provider 完善 + 插件加载机制（providers
-   目录 / npm 包）+ 可选边缘型插件（ngrok edge-oidc、Cloudflare Access）。
+6. ✅ **M6 插件**：插件加载机制（configDir/providers/*.js ESM + authPlugins 注入 +
+   `st.auth.registerProvider`）+ **basic provider**（nginx auth_basic + APR1 htpasswd，
+   免进程免 Redis，端到端 401/200 验证）+ **oauth2-proxy provider**（OIDC 侧车，
+   二进制自动下载）+ 边缘型扩展点（renderTunnelAuth，ngrok edge-oidc 预留）。
+   `auth provider list` / `expose --auth basic`。
 
 ## 11. 参考
 

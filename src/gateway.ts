@@ -29,11 +29,18 @@ export interface GatewayHost {
   port: number;
 }
 
+export type GatewayAuthMode = "forward-auth" | "basic";
+
 export interface GatewayConfig {
   nginxPort: number;
-  autheliaPort: number;
-  /** Provider base path (e.g. /authelia). */
+  /** Backend port for forward-auth (authelia/oauth2-proxy) mode. */
+  authPort: number;
+  /** Provider base path (e.g. /authelia) for forward-auth mode. */
   basePath: string;
+  /** "forward-auth" (auth_request → provider) or "basic" (auth_basic). */
+  authMode?: GatewayAuthMode;
+  /** htpasswd file for basic mode. */
+  htpasswdFile?: string;
   hosts: GatewayHost[];
   /** Directory for pid/conf/logs (cacheDir/tmp/nginx). */
   nginxRoot: string;
@@ -41,9 +48,11 @@ export interface GatewayConfig {
 
 /** Generate the full gateway nginx.conf. */
 export function generateGatewayNginx(cfg: GatewayConfig): string {
-  const { nginxPort, autheliaPort, basePath, hosts, nginxRoot } = cfg;
+  const { nginxPort, authPort, basePath, hosts, nginxRoot } = cfg;
+  const authMode = cfg.authMode ?? "forward-auth";
   const portal = `${basePath}/`;
   const authz = `${basePath}/api/authz/auth-request`;
+  const htpasswdFile = cfg.htpasswdFile ?? "";
 
   const defaultServer = hosts.length
     ? ""
@@ -58,13 +67,16 @@ export function generateGatewayNginx(cfg: GatewayConfig): string {
       const escaped = h.host.replace(/\./g, "\\.");
       const authzPath = authz.replace(/^\//, "");
       const portalPath = portal.replace(/^\//, "");
-      return `  server {
-    listen 127.0.0.1:${nginxPort};
-    server_name ${escaped};
-
-    location = /${authzPath} {
+      const authLine =
+        authMode === "basic"
+          ? `      auth_basic "service-tunnels";\n      auth_basic_user_file ${htpasswdFile};`
+          : `      auth_request /${authzPath};`;
+      const authzBlock =
+        authMode === "basic"
+          ? ""
+          : `    location = /${authzPath} {
       internal;
-      proxy_pass http://127.0.0.1:${autheliaPort}/${authzPath};
+      proxy_pass http://127.0.0.1:${authPort}/${authzPath};
       proxy_set_header Host $host;
       # the tunnel edge terminates TLS; authelia refuses http target URLs
       proxy_set_header X-Original-URL https://$host$request_uri;
@@ -74,16 +86,21 @@ export function generateGatewayNginx(cfg: GatewayConfig): string {
       proxy_set_header X-Forwarded-Host $host;
     }
 
-    location /${portalPath} {
-      proxy_pass http://127.0.0.1:${autheliaPort}/${portalPath};
+`;
+      return `  server {
+    listen 127.0.0.1:${nginxPort};
+    server_name ${escaped};
+
+${authzBlock}${authMode === "basic" ? "" : `    location /${portalPath} {
+      proxy_pass http://127.0.0.1:${authPort}/${portalPath};
       proxy_set_header Host $host;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
       proxy_set_header X-Forwarded-Host $host;
     }
 
-    location / {
-      auth_request /${authzPath};
+`}    location / {
+${authLine}
       proxy_pass http://127.0.0.1:${h.port};
       proxy_set_header Host $host;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -169,6 +186,8 @@ export interface GatewayControllerOptions {
   nginxBin?: string;
   /** 0 = random free port (default). */
   port?: number;
+  /** htpasswd file for basic auth mode. */
+  htpasswdFile?: string;
   basePath?: string;
   registerInternal: (role: string, port: number) => void;
   unregisterInternal: (role: string) => void;
@@ -182,10 +201,13 @@ export class GatewayController {
   #pidFile = "";
   #nginxRoot = "";
   #port = 0;
+  #authMode: GatewayAuthMode = "forward-auth";
+  #htpasswdFile = "";
 
   constructor(opts: GatewayControllerOptions) {
     this.#opts = opts;
     this.#port = opts.port ?? 0;
+    this.#htpasswdFile = opts.htpasswdFile ?? "";
     this.#nginxRoot = join(opts.cacheDir, "tmp", "nginx");
     this.#pidFile = join(this.#nginxRoot, "nginx.pid");
   }
@@ -233,7 +255,9 @@ export class GatewayController {
     mkdirSync(this.#nginxRoot, { recursive: true });
     const cfg = generateGatewayNginx({
       nginxPort: this.#port,
-      autheliaPort,
+      authPort: autheliaPort,
+      authMode: this.#authMode,
+      htpasswdFile: this.#htpasswdFile,
       basePath: this.#opts.basePath ?? "/authelia",
       hosts: this.hosts(),
       nginxRoot: this.#nginxRoot,
@@ -265,7 +289,8 @@ export class GatewayController {
   }
 
   /** Green start: pick port, write config, spawn nginx, register internal. */
-  async start(autheliaPort: number): Promise<number> {
+  async start(autheliaPort: number, authMode: GatewayAuthMode = "forward-auth"): Promise<number> {
+    this.#authMode = authMode;
     if (this.#child && alive(this.#child.pid ?? 0) && (await tcpOpen(this.#port))) {
       return this.#port;
     }

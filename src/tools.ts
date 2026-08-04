@@ -480,6 +480,19 @@ export const TOOLS: Record<string, ToolDef> = {
     npmPackage: "localtunnel",
     npmRegistry: "https://registry.npmmirror.com",
   },
+  "oauth2-proxy": {
+    name: "oauth2-proxy",
+    version: "7.6.0",
+    platforms: ["linux", "darwin"],
+    download: {
+      official:
+        "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz",
+      mirrors: GH_MIRRORS,
+      kind: "tar.gz",
+      binPath: "oauth2-proxy",
+    },
+    verifyArgs: ["--version"],
+  },
 };
 
 /** Resolve a tool without downloading (PATH/caller/cache only). Null when absent. */

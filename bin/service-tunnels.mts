@@ -346,6 +346,17 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "auth": {
+      const op = cmd[1] ?? "list";
+      if (op === "provider" && cmd[2] === "list") {
+        jsonOut(st.auth.providers());
+      } else {
+        console.error("auth provider list");
+        process.exit(2);
+      }
+      break;
+    }
+
     case "stop-all": {
       // stop the daemon (which kills nginx/authelia/redis/tunnels via role
       // markers), then remove the state file

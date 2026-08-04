@@ -1,7 +1,7 @@
-import { GatewayController } from "./gateway.ts";
+import { GatewayController, type GatewayAuthMode } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
-import { AutheliaProvider } from "./authelia.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
+import { AuthRegistry } from "./auth-registry.ts";
 import type { TunnelManager } from "./tunnels.ts";
 import { InternalRegistry } from "./internal.ts";
 
@@ -50,8 +50,8 @@ export interface ExposeContext {
   resolveTool: (name: string) => Promise<string>;
   internal: InternalRegistry;
   tunnels: TunnelManager;
-  /** Map provider type → factory (default: built-in authelia). */
-  providers?: Map<string, (ctx: ProviderContext) => AuthProvider>;
+  /** Auth provider registry (built-ins + plugins). */
+  auth?: AuthRegistry;
   log?: (line: string) => void;
 }
 
@@ -93,35 +93,51 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
 
   // ── auth flow: shared infrastructure ──────────────────────────────────────
   const pctx = providerCtx(ctx);
-  const factory = ctx.providers?.get(providerType);
-  const provider: AuthProvider = factory
-    ? factory(pctx)
-    : new AutheliaProvider(pctx, {
-        port: opts.autheliaPort,
-        basePath: opts.basePath,
-        sessionSecret: opts.sessionSecret,
-        policy: opts.policy,
-        user: opts.user,
-        externalReloadCmd: opts.autheliaReloadCmd,
-      });
+  const registry = ctx.auth ?? new AuthRegistry(pctx);
+  const provider: AuthProvider = registry.create(providerType, {
+    port: opts.autheliaPort,
+    basePath: opts.basePath,
+    sessionSecret: opts.sessionSecret,
+    policy: opts.policy,
+    user: opts.user,
+    externalReloadCmd: opts.autheliaReloadCmd,
+  });
 
   const problems = (await provider.validate?.()) ?? [];
   if (problems.length) {
     throw new Error(`auth provider ${providerType} not ready:\n  - ${problems.join("\n  - ")}`);
   }
 
+  // edge-auth providers (ngrok edge-oidc) skip the local gateway entirely
+  if (provider.capabilities.edgeAuth && !provider.capabilities.localGateway) {
+    const name = opts.tunnelName ?? `expose-${port}`;
+    const tunnelAuth = provider.renderTunnelAuth?.() ?? {};
+    ctx.tunnels.add({
+      name,
+      type: (opts.tunnelType as never) ?? "ngrok",
+      target: port,
+      args: (tunnelAuth.args as string[]) ?? [],
+    });
+    await ctx.tunnels.start(name);
+    const url = await waitForUrl(ctx.tunnels, name, 30_000);
+    return { url, tunnel: name, provider: providerType };
+  }
+
   const nginxPort = opts.nginxPort ?? 0; // 0 = random
+  const authMode: GatewayAuthMode = provider.type === "basic" ? "basic" : "forward-auth";
+  const htpasswdFile = (provider as { htpasswdFile?: string }).htpasswdFile;
   const gateway = new GatewayController({
     configDir: ctx.configDir,
     cacheDir: ctx.cacheDir,
     port: nginxPort,
     basePath: opts.basePath,
+    htpasswdFile,
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     unregisterInternal: (role) => ctx.internal.unregister(role),
     log,
   });
 
-  // Redis first (provider may need it for sessions), then authelia, then nginx.
+  // Redis first (provider may need it for sessions), then provider, then nginx.
   let redis: RedisController | null = null;
   if (provider.capabilities.needsSessionStore) {
     redis = new RedisController({
@@ -134,8 +150,8 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   }
 
   await provider.start();
-  const autheliaPort = (provider as AutheliaProvider).port ?? 9091;
-  const gatewayPort = await gateway.start(autheliaPort);
+  const authPort = (provider as unknown as { port?: number }).port ?? 9091;
+  const gatewayPort = await gateway.start(authPort, authMode);
 
   // tunnel pointing at the gateway
   const name = opts.tunnelName ?? `expose-${port}`;
@@ -151,7 +167,7 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const url = await waitForUrl(ctx.tunnels, name, 30_000);
   const publicHost = url ? new URL(url).host : null;
   if (publicHost) {
-    await gateway.registerHost(publicHost, port, autheliaPort);
+    await gateway.registerHost(publicHost, port, authPort);
     await provider.registerHost(publicHost, { policy: opts.policy });
     log(`expose ${port}: ${url} (auth via ${providerType}, host ${publicHost} registered)`);
   }
@@ -160,7 +176,7 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     url,
     tunnel: name,
     provider: providerType,
-    gateway: { nginx: gatewayPort, authelia: autheliaPort, redis: redis?.port ?? 0 },
+    gateway: { nginx: gatewayPort, authelia: authPort, redis: redis?.port ?? 0 },
   };
 }
 

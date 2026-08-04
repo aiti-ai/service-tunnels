@@ -61,7 +61,16 @@ hydrate(): void                                 // 重启后从 state.json 恢�
   pid/url；`extractTunnelUrl` 已知域名（ngrok/trycloudflare/loca.lt/serveo.net/
   wormhole.app/localhost.run/hop.to）+ 非 localhost 兜底。
 
-### st.auth（认证编排）
+### st.auth（认证编排 + 插件）
+
+```ts
+providers(): string[]                          // ["authelia","basic","oauth2-proxy", ...插件]
+registerProvider(factory: AuthProviderFactory) // 注入自定义 provider（type 去重）
+```
+- 内置：authelia（默认）、basic（nginx auth_basic，APR1）、oauth2-proxy（OIDC 侧车）；
+- 插件：configDir/providers/*.js（ESM 导出 factory）+ authPlugins 构造参数；
+- 边缘型扩展点：`renderTunnelAuth()`（ngrok edge-oidc 预留）——edgeAuth 且非
+  localGateway 时跳过本地网关，隧道带认证参数直连应用。
 
 ```ts
 providers(): string[]                                   // 内置/插件 provider 列表

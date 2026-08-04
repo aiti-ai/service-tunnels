@@ -28,7 +28,8 @@ import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } f
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { AutheliaProvider } from "./authelia.ts";
-import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
+import { AuthRegistry, loadProviderPlugins } from "./auth-registry.ts";
+import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -122,6 +123,8 @@ export interface ServiceTunnels {
   auth: {
     /** Built-in + plugin providers. */
     providers(): string[];
+    /** Register an extra provider factory (plugins). */
+    registerProvider(factory: AuthProviderFactory): void;
     /** Expose with optional gateway auth (default provider: authelia). */
     expose(port: number, opts?: ExposeOptions): Promise<ExposeResult>;
   };
@@ -247,20 +250,54 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         hydrate: () => tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels),
       };
     })(),
-    auth: {
-      providers: () => ["authelia"],
-      expose: (port: number, o: Omit<ExposeOptions, "port"> = {}) =>
-        exposeFlow(port, { ...o, port }, {
+    auth: (() => {
+      const registry = new AuthRegistry(
+        {
           configDir: dirs.configDir,
           cacheDir: dirs.cacheDir,
           resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
-          internal,
-          tunnels: tm,
+          registerInternal: (role, port) =>
+            internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+          unregisterInternal: (role) => internal.unregister(role),
+          pickPort,
           log: () => {},
-        }),
-    },
+        },
+        [...(opts.authPlugins as AuthProviderFactory[]) ?? []],
+      );
+      void loadProviderPlugins(dirs.configDir).then((plugins) => {
+        for (const f of plugins) registry.register(f);
+      });
+      return {
+        providers: () => registry.list(),
+        registerProvider: (f: AuthProviderFactory) => registry.register(f),
+        expose: (port: number, o: Omit<ExposeOptions, "port"> = {}) =>
+          exposeFlow(port, { ...o, port }, {
+            configDir: dirs.configDir,
+            cacheDir: dirs.cacheDir,
+            resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+            internal,
+            tunnels: tm,
+            auth: registry,
+            log: () => {},
+          }),
+      };
+    })(),
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
   };
+}
+
+/** Pre-assign a free local port. */
+async function pickPort(): Promise<number> {
+  const { createServer } = await import("net");
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const p = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => resolve(p));
+    });
+  });
 }
 
 // helper: resolve tool via tools.ts (keeps the IIFE below minimal)
