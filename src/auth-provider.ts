@@ -75,3 +75,31 @@ export interface AuthProvider {
 }
 
 export type AuthProviderFactory = (ctx: ProviderContext) => AuthProvider;
+
+/** A registered user (no secrets) — provider-local meaning of displayName/email. */
+export interface AuthUser {
+  name: string;
+  displayName: string;
+  email?: string;
+}
+
+/**
+ * Optional capability: provider keeps a LOCAL user database (authelia
+ * users_database.yml, basic htpasswd, ...). Detect via `typeof provider
+ * .listUsers === "function"` — providers without it simply don't appear in
+ * user-management listings.
+ */
+export interface UserManager {
+  /** Registered users under THIS provider (no secrets). */
+  listUsers(): Promise<AuthUser[]>;
+  /** Add or update (displayName/email only) a user. */
+  addUser(name: string, password: string, displayName?: string, email?: string): Promise<void>;
+  /** Change a user's password. */
+  setUserPassword(name: string, password: string): Promise<void>;
+  /** Remove a user. */
+  removeUser(name: string): Promise<void>;
+}
+
+export function isUserManager(p: AuthProvider): p is AuthProvider & UserManager {
+  return typeof (p as unknown as UserManager).listUsers === "function";
+}

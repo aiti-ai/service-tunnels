@@ -1,7 +1,8 @@
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { pathToFileURL } from "url";
-import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
+import type { AuthProvider, AuthProviderFactory, ProviderContext, UserManager } from "./auth-provider.ts";
+import { isUserManager } from "./auth-provider.ts";
 import { AutheliaProvider, type AutheliaProviderOptions } from "./authelia.ts";
 import { BasicAuthProvider, type BasicAuthProviderOptions } from "./providers/basic.ts";
 import { OAuth2ProxyProvider, type OAuth2ProxyProviderOptions } from "./providers/oauth2-proxy.ts";
@@ -50,6 +51,18 @@ export class AuthRegistry {
 
   list(): string[] {
     return [...this.#factories.keys()];
+  }
+
+  /** Provider types that support local user management (UserManager). */
+  userManagers(): string[] {
+    return [...this.#factories.keys()].filter((t) => isUserManager(this.create(t)));
+  }
+
+  /** Resolve a user-manager instance by type (errors for non-user providers). */
+  userManager(type: string): UserManager {
+    const p = this.create(type);
+    if (!isUserManager(p)) throw new Error(`provider ${type} does not support user management`);
+    return p;
   }
 
   has(type: string): boolean {

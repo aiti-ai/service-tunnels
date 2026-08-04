@@ -63,19 +63,27 @@ hydrate(): void                                 // 重启后从 state.json 恢�
 
 ### st.auth（认证编排 + 插件 + 用户管理）
 
+用户管理是 **provider 能力**（`UserManager` 接口）：任何维护本地用户库的
+provider 都支持（authelia `users_database.yml`、basic `htpasswd`、插件可实现
+同一接口）。`provider` 参数支持 `"all"`（默认，所有支持用户管理的 provider）、
+单个类型或数组。
+
 ```ts
-// —— 用户管理（authelia provider）——
-users(): Promise<AuthUser[]>              // 已注册用户 [{ name, displayName, email? }]（无 secret）
-addUser(name, password, displayName?): Promise<void>   // 新增/更新用户（argon2 hash）
-setUserPassword(name, password): Promise<void>          // 改密码
-removeUser(name): Promise<void>
+userManagers(): string[]                     // 支持用户管理的 provider 类型
+users(provider?: string): Promise<{provider, users: AuthUser[]}[]>
+  // provider="all"（默认）→ 每个支持用户管理的 provider 各一条
+addUser(name, password, { provider?, displayName? }): Promise<string[]>
+  // 返回写入的 providers；provider 缺省 = all
+setUserPassword(name, password, provider?): Promise<string[]>
+removeUser(name, provider?): Promise<string[]>
 ```
-- users_database.yml 持久化（`cacheDir/tmp/authelia/users_database.yml`）；
-  仅当 authelia 运行中才 validate+重启，未运行时文件写入下次启动生效；
-- CLI：`auth user list | add <name> [--password] [--display-name] | set-password <name> | remove <name>`
-  （未给 --password 时自动生成并在返回中输出一次）；
+- 持久化：authelia → `cacheDir/tmp/authelia/users_database.yml`（argon2）；
+  basic → `cacheDir/tmp/basic/htpasswd`（APR1，nginx auth_basic 兼容）；
+- 仅当 provider 运行中才 validate+重启，未运行时文件写入下次启动生效；
+- CLI：`auth user list|add|set-password|remove <name> [--provider basic|authelia|all] [--password] [--display-name]`
+  （未给 --password 时自动生成并在返回中输出一次；返回含 providers 列表）；
 - 初始用户：expose --auth 首次初始化时创建（`auth.user` 配置或 admin+随机密码）；
-- 密码永不落明文/日志（argon2 hash + API 剥离 secret）。
+- 密码永不落明文/日志（hash + API 剥离 secret）。
 
 ### st.auth（认证编排 + 插件）
 

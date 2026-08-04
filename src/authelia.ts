@@ -2,7 +2,7 @@ import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
-import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus } from "./auth-provider.ts";
+import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser } from "./auth-provider.ts";
 
 /**
  * Authelia auth provider (built-in default, design.md §5.3).
@@ -43,13 +43,6 @@ export interface AutheliaProviderOptions {
   policy?: AuthPolicy["policy"];
   user?: { name: string; password: string; displayName?: string };
   externalReloadCmd?: string;
-}
-
-/** A registered authelia user (from users_database.yml) — no secrets. */
-export interface AuthUser {
-  name: string;
-  displayName: string;
-  email?: string;
 }
 
 interface UserRecord {

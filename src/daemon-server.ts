@@ -108,6 +108,49 @@ const methods = new Map<string, Handler>([
   ["tunnel.start", (params) => tunnels.start(String(params)).then((i) => ({ ...i }))],
   ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
+  ["auth.user.managers", () => authRegistry.userManagers()],
+  ["auth.user.list", (params) => {
+    const provider = (params as { provider?: string } | undefined)?.provider;
+    const targets = resolveDaemonUserTargets(authRegistry, provider);
+    return Promise.all(targets.map(async (t) => ({ provider: t, users: await authRegistry.userManager(t).listUsers() })));
+  }],
+  [
+    "auth.user.add",
+    (params) => {
+      const { name, password, displayName, email, provider } = params as {
+        name: string;
+        password: string;
+        displayName?: string;
+        email?: string;
+        provider?: string | string[];
+      };
+      const targets = resolveDaemonUserTargets(authRegistry, provider);
+      return Promise.all(targets.map((t) => authRegistry.userManager(t).addUser(name, password, displayName, email)))
+        .then(() => ({ ok: true, providers: targets }));
+    },
+  ],
+  [
+    "auth.user.set-password",
+    (params) => {
+      const { name, password, provider } = params as {
+        name: string;
+        password: string;
+        provider?: string | string[];
+      };
+      const targets = resolveDaemonUserTargets(authRegistry, provider);
+      return Promise.all(targets.map((t) => authRegistry.userManager(t).setUserPassword(name, password)))
+        .then(() => ({ ok: true, providers: targets }));
+    },
+  ],
+  [
+    "auth.user.remove",
+    (params) => {
+      const p = params as { name?: string; provider?: string | string[] };
+      const targets = resolveDaemonUserTargets(authRegistry, p.provider);
+      return Promise.all(targets.map((t) => authRegistry.userManager(t).removeUser(p.name ?? "")))
+        .then(() => ({ ok: true, providers: targets }));
+    },
+  ],
   [
     "expose",
     (params) => {
@@ -257,6 +300,16 @@ const authRegistry = new AuthRegistry({
   },
   log: (line) => console.error(`[service-tunnels] ${line}`),
 });
+
+function resolveDaemonUserTargets(registry: AuthRegistry, provider?: string | string[]): string[] {
+  const all = registry.userManagers();
+  if (!provider || provider === "all") return all;
+  const targets = Array.isArray(provider) ? provider : [provider];
+  for (const t of targets) {
+    if (!all.includes(t)) throw new Error(`provider ${t} does not support user management`);
+  }
+  return targets;
+}
 
 /** The authelia provider instance (singleton via the registry) — user mgmt. */
 function authelia(): AutheliaProvider {

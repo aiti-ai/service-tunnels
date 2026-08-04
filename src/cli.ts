@@ -49,6 +49,7 @@ interface CliArgs {
   nginxPort?: number;
   auth?: boolean | string;
   displayName?: string;
+  provider?: string;
   [k: string]: unknown;
 }
 
@@ -132,6 +133,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--display-name":
         args.displayName = argv[++i]!;
+        break;
+      case "--provider":
+        args.provider = argv[++i]!;
         break;
       default:
         if (a!.startsWith("-")) {
@@ -378,30 +382,34 @@ async function main(): Promise<void> {
       if (op === "provider" && cmd[2] === "list") {
         jsonOut(st.auth.providers());
       } else if (op === "user" && cmd[2] === "list") {
-        jsonOut(await st.auth.users());
+        jsonOut(await st.auth.users(args.provider));
       } else if (op === "user" && cmd[2] === "add") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth user add <name> [--password <pw>] [--display-name <n>]");
+          console.error("auth user add <name> [--password <pw>] [--display-name <n>] [--provider basic|authelia|all]");
           process.exit(2);
         }
         const password = args.password ?? randomCliPassword();
-        await st.auth.addUser(name, password, args.displayName);
-        jsonOut({ added: name, password: args.password ? undefined : password });
+        const providers = await st.auth.addUser(name, password, {
+          provider: args.provider,
+          displayName: args.displayName,
+        });
+        jsonOut({ added: name, providers, password: args.password ? undefined : password });
       } else if (op === "user" && cmd[2] === "set-password") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth user set-password <name> [--password <pw>]");
+          console.error("auth user set-password <name> [--password <pw>] [--provider ...]");
           process.exit(2);
         }
         const password = args.password ?? randomCliPassword();
-        await st.auth.setUserPassword(name, password);
-        jsonOut({ updated: name, password: args.password ? undefined : password });
+        const providers = await st.auth.setUserPassword(name, password, args.provider);
+        jsonOut({ updated: name, providers, password: args.password ? undefined : password });
       } else if (op === "user" && cmd[2] === "remove") {
-        await st.auth.removeUser(cmd[3] ?? "");
-        jsonOut({ removed: cmd[3] });
+        const name = cmd[3] ?? "";
+        const providers = await st.auth.removeUser(name, args.provider);
+        jsonOut({ removed: name, providers });
       } else {
-        console.error("auth provider list | auth user list|add|set-password|remove");
+        console.error("auth providers list | auth user list|add|set-password|remove [--provider ...]");
         process.exit(2);
       }
       break;

@@ -271,3 +271,52 @@ sleep 30
   assert.deepEqual(users.map((u) => u.name), ["admin"]);
   await assert.rejects(provider.setUserPassword("nobody", "x"), /not registered/);
 });
+
+test("basic user management via htpasswd (openssl apr1)", { timeout: 30_000 }, async () => {
+  const { BasicAuthProvider } = await import("../src/providers/basic.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const provider = new BasicAuthProvider(
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort: async () => 0, log: () => {} },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider.prepare();
+  // bootstrap admin
+  let users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name), ["admin"]);
+
+  await provider.addUser("alice", "alice-pw");
+  users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name).sort(), ["admin", "alice"]);
+
+  // htpasswd file: apr1 hash, no plaintext
+  const ht = readFileSync(provider.htpasswdFile, "utf8");
+  assert.match(ht, /\$apr1\$/);
+  assert.equal(ht.includes("alice-pw"), false);
+
+  // prepare again must NOT wipe users
+  await provider.prepare();
+  users = await provider.listUsers();
+  assert.equal(users.length, 2);
+
+  await provider.setUserPassword("alice", "new-pw");
+  await assert.rejects(provider.setUserPassword("nobody", "x"), /not registered/);
+
+  await provider.removeUser("alice");
+  users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name), ["admin"]);
+});
+
+test("AuthRegistry userManagers() detects UserManager providers", async () => {
+  const { AuthRegistry } = await import("../src/auth-registry.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const reg = new AuthRegistry({
+    configDir, cacheDir,
+    resolveTool: async () => "",
+    registerInternal: () => {},
+    unregisterInternal: () => {},
+    pickPort: async () => 0,
+    log: () => {},
+  });
+  const managers = reg.userManagers().sort();
+  assert.deepEqual(managers, ["authelia", "basic"]);
+});

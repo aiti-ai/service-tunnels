@@ -31,7 +31,7 @@ import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./e
 import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins } from "./auth-registry.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
-import type { AuthUser } from "./authelia.ts";
+import type { AuthUser } from "./auth-provider.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -132,14 +132,31 @@ export interface ServiceTunnels {
     registerProvider(factory: AuthProviderFactory): void;
     /** Expose with optional gateway auth (default provider: authelia). */
     expose(port: number, opts?: Omit<ExposeOptions, "port">): Promise<ExposeResult>;
-    /** Registered authelia users (no secrets). */
-    users(): Promise<AuthUser[]>;
-    /** Add/update an authelia user (restarts authelia if running). */
-    addUser(name: string, password: string, displayName?: string): Promise<void>;
-    /** Change a user's password (restarts authelia if running). */
-    setUserPassword(name: string, password: string): Promise<void>;
-    /** Remove a user (restarts authelia if running). */
-    removeUser(name: string): Promise<void>;
+    /**
+     * Provider-local users (no secrets). `provider` = "all" (default) →
+     * [{provider, users}] for every provider supporting user management.
+     */
+    users(provider?: string): Promise<{ provider: string; users: AuthUser[] }[]>;
+    /**
+     * Add/update a user across `provider` (default "all" → every supporting
+     * provider; also accepts a single type or an array). Returns the
+     * providers the user was written to.
+     */
+    addUser(
+      name: string,
+      password: string,
+      opts?: { provider?: string | string[]; displayName?: string },
+    ): Promise<string[]>;
+    /** Change a user's password across `provider` (default "all"). */
+    setUserPassword(
+      name: string,
+      password: string,
+      provider?: string | string[],
+    ): Promise<string[]>;
+    /** Remove a user across `provider` (default "all"). */
+    removeUser(name: string, provider?: string | string[]): Promise<string[]>;
+    /** Provider types with local user databases (e.g. ["authelia","basic"]). */
+    userManagers(): string[];
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -151,6 +168,19 @@ export interface ServiceTunnels {
  * discovery scopes to its process tree). CLI mode: use `st.daemon.start()`
  * and the daemon owns long-lived processes.
  */
+function resolveUserTargets(
+  registry: AuthRegistry,
+  provider?: string | string[],
+): string[] {
+  const all = registry.userManagers();
+  if (!provider || provider === "all") return all;
+  const targets = Array.isArray(provider) ? provider : [provider];
+  for (const t of targets) {
+    if (!all.includes(t)) throw new Error(`provider ${t} does not support user management (available: ${all.join(", ")})`);
+  }
+  return targets;
+}
+
 export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceTunnels {
   const dirs = resolveDirs(opts);
   ensureMarker(opts.marker);
@@ -296,13 +326,28 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
             auth: registry,
             log: () => {},
           }),
-        users: async () => (registry.create("authelia") as AutheliaProvider).listUsers(),
-        addUser: async (name: string, password: string, displayName?: string) =>
-          (registry.create("authelia") as AutheliaProvider).addUser(name, password, displayName),
-        setUserPassword: async (name: string, password: string) =>
-          (registry.create("authelia") as AutheliaProvider).setUserPassword(name, password),
-        removeUser: async (name: string) =>
-          (registry.create("authelia") as AutheliaProvider).removeUser(name),
+        userManagers: () => registry.userManagers(),
+        users: async (provider = "all") => {
+          const targets = resolveUserTargets(registry, provider);
+          const out: { provider: string; users: AuthUser[] }[] = [];
+          for (const t of targets) out.push({ provider: t, users: await registry.userManager(t).listUsers() });
+          return out;
+        },
+        addUser: async (name: string, password: string, opts: { provider?: string | string[]; displayName?: string } = {}) => {
+          const targets = resolveUserTargets(registry, opts.provider);
+          for (const t of targets) await registry.userManager(t).addUser(name, password, opts.displayName);
+          return targets;
+        },
+        setUserPassword: async (name: string, password: string, provider?: string | string[]) => {
+          const targets = resolveUserTargets(registry, provider);
+          for (const t of targets) await registry.userManager(t).setUserPassword(name, password);
+          return targets;
+        },
+        removeUser: async (name: string, provider?: string | string[]) => {
+          const targets = resolveUserTargets(registry, provider);
+          for (const t of targets) await registry.userManager(t).removeUser(name);
+          return targets;
+        },
       };
     })(),
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
