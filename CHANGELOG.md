@@ -2,7 +2,7 @@
 
 ## 0.1.0 (2026-08-04)
 
-首个完整实现——M1 到 M6 全部落地（`justdb/service-tunnels-internal` 开发中）。
+首个完整实现——M1 到 M6 全部落地。
 
 ### M1 骨架
 - `config.ts` 目录解析（构造参数 > `SERVICE_TUNNELS_CONFIG/CACHE` > XDG 默认）
