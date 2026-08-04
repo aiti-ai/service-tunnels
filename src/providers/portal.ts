@@ -83,6 +83,14 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     return this.#port;
   }
 
+  /** Re-bind base path (registry caches instances per type). */
+  async setBasePath(path: string): Promise<void> {
+    if (path === this.#basePath) return;
+    this.#basePath = path;
+    await this.#restart(); // server script + env use the new base path
+    this.#ctx.log(`portal: base path → ${path}`);
+  }
+
   status(): AuthProviderStatus {
     return { running: this.#proc !== null && this.#proc.exitCode === null, port: this.#port };
   }

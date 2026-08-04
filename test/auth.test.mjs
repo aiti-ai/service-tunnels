@@ -320,3 +320,18 @@ test("AuthRegistry userManagers() detects UserManager providers", async () => {
   const managers = reg.userManagers().sort();
   assert.deepEqual(managers, ["authelia", "basic", "portal"]);
 });
+
+test("defaultBasePath: random memorable name, basic gets none", async () => {
+  const { defaultBasePath, randomName } = await import("../src/expose.ts");
+  // format {provider}-{word}-{word}, no generic /{provider}
+  const p = defaultBasePath("portal");
+  assert.match(p, /^\/portal-[a-z]+-[a-z]+$/);
+  const a = defaultBasePath("authelia");
+  assert.match(a, /^\/authelia-[a-z]+-[a-z]+$/);
+  assert.notEqual(p, a, "two exposes must not collide");
+  assert.equal(defaultBasePath("basic"), "");
+  assert.equal(defaultBasePath("oauth2-proxy"), "/oauth2-proxy", "oauth2-proxy keeps fixed path");
+  // randomName always valid pair, no repeats in a decent sample
+  const names = new Set(Array.from({ length: 50 }, () => randomName()));
+  assert.ok(names.size > 30, "random names should vary");
+});

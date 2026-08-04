@@ -67,6 +67,13 @@ export interface AuthProvider {
 
   /** Local gateway: nginx auth_request snippet (empty for edge providers). */
   renderNginxAuth?(): string;
+  /**
+   * Re-bind the provider's base path (registry instances are cached per type
+   * and may have been created without one — expose() fixes it up so nginx
+   * auth_request and the provider agree). Optional; providers without it keep
+   * a fixed path.
+   */
+  setBasePath?(path: string): Promise<void>;
   /** Edge providers: tunnel auth params (e.g. ngrok traffic policy). */
   renderTunnelAuth?(): Record<string, unknown>;
 

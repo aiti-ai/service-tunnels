@@ -146,6 +146,16 @@ export class AutheliaProvider implements AuthProvider {
     return this.#basePath;
   }
 
+  /** Re-bind base path (registry caches instances per type). */
+  async setBasePath(path: string): Promise<void> {
+    if (path === this.#basePath) return;
+    const wasRunning = this.status().running;
+    this.#basePath = path;
+    await this.prepare(); // regenerate configs with the new base path
+    if (wasRunning) await this.#validateAndRestart();
+    this.#ctx.log(`authelia: base path → ${path}`);
+  }
+
   async #resolveBin(): Promise<string> {
     if (this.#bin) return this.#bin;
     this.#bin = await this.#ctx.resolveTool("authelia");

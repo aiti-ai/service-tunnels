@@ -41,6 +41,8 @@ export interface ExposeResult {
   url: string | null;
   tunnel: string;
   provider?: string;
+  /** Login portal page (provider basePath under the tunnel URL). */
+  loginUrl?: string;
   gateway?: { nginx: number; authelia: number; redis: number };
 }
 
@@ -94,10 +96,11 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   // ── auth flow: shared infrastructure ──────────────────────────────────────
   const pctx = providerCtx(ctx);
   const registry = ctx.auth ?? new AuthRegistry(pctx);
-  // basePath defaults follow the provider type so nginx (auth_request) and
-  // the provider agree even when the caller doesn't pass one (portal → /portal,
-  // authelia → /authelia, ...)
-  const basePath = opts.basePath ?? `/${providerType}`;
+  // basePath defaults to a per-expose random name so nginx (auth_request) and
+  // the provider agree AND generic paths (/{provider}) never collide with app
+  // routes on the same host (portal → /portal-sneaky-capybara). Callers may
+  // pass an explicit opts.basePath to pin it.
+  const basePath = opts.basePath ?? defaultBasePath(providerType);
   const provider: AuthProvider = registry.create(providerType, {
     port: opts.autheliaPort,
     basePath,
@@ -106,6 +109,10 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     user: opts.user,
     externalReloadCmd: opts.autheliaReloadCmd,
   });
+  // the registry caches ONE instance per type — a user-management call may
+  // have created it without a basePath; fix it up so nginx auth_request and
+  // the provider agree
+  if (basePath && provider.setBasePath) await provider.setBasePath(basePath);
 
   const problems = (await provider.validate?.()) ?? [];
   if (problems.length) {
@@ -180,8 +187,40 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     url,
     tunnel: name,
     provider: providerType,
+    loginUrl: url && basePath ? `${url}${basePath}/login` : undefined,
     gateway: { nginx: gatewayPort, authelia: authPort, redis: redis?.port ?? 0 },
   };
+}
+
+/** Random memorable base path: {provider}-{adjective}-{animal} (e.g.
+ *  /portal-sneaky-capybara). Random per expose → unpredictable and collision
+ *  -free against app routes; basic auth needs no base path. */
+export function defaultBasePath(providerType: string): string {
+  if (providerType === "basic") return "";
+  // portal/authelia support dynamic base paths → random memorable name avoids
+  // clashing with app routes. oauth2-proxy has its own fixed /oauth2 endpoints
+  // wired by the gateway, so it keeps a stable path.
+  if (providerType === "portal" || providerType === "authelia") {
+    return `/${providerType}-${randomName()}`;
+  }
+  return `/${providerType}`;
+}
+
+const BASE_ADJECTIVES = [
+  "fuzzy", "wobbly", "sneaky", "cosmic", "jolly", "mellow", "zippy", "quirky",
+  "lucky", "crimson", "brisk", "witty", "dizzy", "spicy", "frosty", "peachy",
+  "snazzy", "twisty", "velvet", "bouncy",
+];
+const BASE_ANIMALS = [
+  "narwhal", "wombat", "capybara", "platypus", "axolotl", "llama", "gecko",
+  "badger", "otter", "moose", "panda", "raccoon", "sloth", "tapir", "lemur",
+  "ferret", "ibex", "kitten", "puffin", "dragon",
+];
+
+export function randomName(): string {
+  const a = BASE_ADJECTIVES[Math.floor(Math.random() * BASE_ADJECTIVES.length)]!;
+  const n = BASE_ANIMALS[Math.floor(Math.random() * BASE_ANIMALS.length)]!;
+  return `${a}-${n}`;
 }
 
 async function waitForUrl(tunnels: TunnelManager, name: string, timeoutMs: number): Promise<string | null> {

@@ -80,6 +80,10 @@ removeUser(name, provider?): Promise<string[]>
 - 持久化：authelia → `cacheDir/tmp/authelia/users_database.yml`（argon2）；
   basic → `cacheDir/tmp/basic/htpasswd`（APR1，nginx auth_basic 兼容）；
   portal → `cacheDir/tmp/portal/users.json`（scrypt）；
+- **basePath 随机趣味名**：默认 `/{provider}-{形容词}-{动物}`（如
+  `/portal-sneaky-capybara`）——不易与后端应用路径冲突；expose 结果返回
+  `loginUrl`（隧道 URL + 登录页路径）；oauth2-proxy 因固定 `/oauth2/*`
+  端点保持稳定路径；可传 `opts.basePath` 固定
 - **portal 登录传输加密**：每次登录页下发一次性 RSA-2048 密钥对（5 分钟 TTL），
   前端 WebCrypto RSA-OAEP-SHA256 加密密码后提交——**密码明文永不出浏览器**
   （隧道边缘如 cloudflared/Cloudflare 只见密文）；keyId 单次使用，抓包重放
