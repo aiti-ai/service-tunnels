@@ -24,6 +24,10 @@ export interface ServiceTunnelsConfigFile {
   basePath?: string;
   /** Per-provider base path override, e.g. { portal: "/login" }. */
   basePathByProvider?: Record<string, string>;
+  /** China-mirror download templates per tool (see src/tools.ts candidateUrls). */
+  toolMirrors?: Record<string, string[]>;
+  /** Try mirrors before official sources (CN networks). CLI-level default; library opts win. */
+  preferMirrors?: boolean;
 }
 
 /** Read configDir/service-tunnels.json (loose: missing/malformed → {}). */

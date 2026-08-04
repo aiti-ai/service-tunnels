@@ -76,6 +76,9 @@ export interface ToolDef {
   npmRegistry?: string;
   /** Sanity check after download (e.g. ["--version"]). */
   verifyArgs?: string[];
+  /** PATH lookup aliases (npm bin names differ from the tool name, e.g.
+   *  localtunnel's binary is `lt`). First hit wins; defaults to [name]. */
+  commands?: string[];
 }
 
 /** Parse SERVICE_TUNNELS_TOOLPATHS (JSON {tool: path}) — env-level defaults. */
@@ -172,6 +175,15 @@ export function findOnPath(name: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Try every PATH alias of a tool (name + commands) — first hit wins. */
+export function findOnPathAll(def: ToolDef): string | null {
+  for (const cmd of def.commands ?? [def.name]) {
+    const hit = findOnPath(cmd);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** Cache location for a downloaded tool. Windows binaries carry .exe. */
@@ -378,8 +390,8 @@ export async function ensureTool(
     if (!existsSync(explicit)) throw new ToolError(`toolPaths.${def.name}=${explicit} does not exist`);
     return explicit;
   }
-  // 2. system PATH
-  const onPath = findOnPath(def.name);
+  // 2. system PATH (name + command aliases)
+  const onPath = findOnPathAll(def);
   if (onPath) return onPath;
   // 3. cached download
   const cached = downloadedPath(opts.cacheDir, def.name);
@@ -527,6 +539,7 @@ export const TOOLS: Record<string, ToolDef> = {
   },
   localtunnel: {
     name: "localtunnel",
+    commands: ["lt", "localtunnel"],
     platforms: ["linux", "darwin", "win32"],
     download: { official: "", kind: "npm" },
     npmPackage: "localtunnel",
@@ -555,7 +568,8 @@ export function resolveToolPath(
 ): string | null {
   const explicit = mergeToolPaths(opts.toolPaths)[name];
   if (explicit && existsSync(explicit)) return explicit;
-  const onPath = findOnPath(name);
+  const def = TOOLS[name];
+  const onPath = def ? findOnPathAll(def) : findOnPath(name);
   if (onPath) return onPath;
   const cached = downloadedPath(opts.cacheDir, name);
   if (existsSync(cached)) return cached;

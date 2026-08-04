@@ -1,4 +1,10 @@
-import { resolveDirs, cachePaths, type DirOptions, type ServiceTunnelsDirs } from "./config.ts";
+import {
+  resolveDirs,
+  cachePaths,
+  readConfigFile,
+  type DirOptions,
+  type ServiceTunnelsDirs,
+} from "./config.ts";
 import { InternalRegistry } from "./internal.ts";
 import {
   discoverServicePorts,
@@ -189,6 +195,8 @@ function resolveUserTargets(
 
 export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceTunnels {
   const dirs = resolveDirs(opts);
+  // CLI/daemon 无代码入口时，从配置文件读镜像设置；库选项优先。
+  const file = readConfigFile(dirs.configDir);
   ensureMarker(opts.marker);
   if (opts.guardian !== false) {
     spawnGuardian(process.pid);
@@ -197,8 +205,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   const toolOpts = {
     cacheDir: dirs.cacheDir,
     toolPaths: mergeToolPaths(opts.toolPaths),
-    toolMirrors: opts.toolMirrors,
-    preferMirrors: opts.preferMirrors,
+    toolMirrors: opts.toolMirrors ?? file.toolMirrors,
+    preferMirrors: opts.preferMirrors ?? file.preferMirrors,
   };
   const tm = new TunnelManager({
     cacheDir: dirs.cacheDir,

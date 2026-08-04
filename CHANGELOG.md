@@ -41,3 +41,27 @@
 - `providers/basic.ts`（nginx auth_basic + APR1；免进程免 Redis）
 - `providers/oauth2-proxy.ts`（OIDC 侧车；二进制自动下载）
 - 边缘型扩展点（`renderTunnelAuth`，ngrok edge-oidc 预留）
+
+## 0.1.1 (2026-08-04)
+
+### 修复：工具下载 URL 架构/后缀错误（此前全部 404）
+- `{arch}` 之前直接填 `os.arch()`（`x64`），GitHub 资产是 `amd64`——四个工具官方
+  源全部下载不到；现增加 ARCH_ALIAS（x64→amd64、ia32→386、ppc64→ppc64le）
+- `{ext}` 支持按工具覆盖（`DownloadSpec.exts`）：frp/authelia/oauth2-proxy 用
+  `tar.gz`（win 为 zip），ngrok 保持 `tgz`；cloudflared 维持裸二进制/exe
+
+### 新增：配置文件支持镜像设置
+- `service-tunnels.json` 可写 `toolMirrors` + `preferMirrors`（CLI/daemon 无代码
+  入口时生效；库选项优先级更高）
+
+### 新增：Gitee 国内镜像（下载加速）
+- `scripts/mirror-tools-to-gitee.sh`：批量镜像 4 个工具到
+  gitee.com/justdb-mirrors（frp/cloudflared/authelia/oauth2-proxy）
+  - 代码：浅 clone tag → 合成单根提交（Gitee 拒 shallow，接受无父提交）→
+    推 master + tag
+  - 资产：白名单只传实际需要的 18 个文件；下载走 gh-proxy.com 加速
+  - REPACK 模式：frp 等被 Gitee 哈希扫描拦截（HackTool）时重打包（字节变、
+    内容不变、文件名不变）绕过
+- `scripts/mirror-to-gitee.sh`：新增 `GH_ASSETS`（白名单）、
+  `GH_DOWNLOAD_PREFIX`（下载加速前缀）、`REPACK` 选项
+- 实测：`frpc -v` 从 Gitee 镜像下载解压 0.61.1，Gitee 下载 ~2.1MB/s

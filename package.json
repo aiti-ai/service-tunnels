@@ -27,7 +27,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
     "prepack": "npm run build",
     "test": "node --test --test-force-exit",
     "typecheck": "tsc --noEmit"

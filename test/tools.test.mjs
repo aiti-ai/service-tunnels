@@ -390,3 +390,24 @@ test("env SERVICE_TUNNELS_TOOLPATHS + mergeToolPaths", async () => {
   assert.equal(ensured, fake);
   delete process.env.SERVICE_TUNNELS_TOOLPATHS;
 });
+
+test("localtunnel resolves via `lt` command alias on PATH", async () => {
+  const { resolveToolPath, TOOLS } = await import("../src/tools.ts");
+  // PATH has `lt` (npm bin) but not `localtunnel` — alias must hit
+  const origPath = process.env.PATH;
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "st-lt-"));
+  const { writeFileSync, chmodSync } = await import("node:fs");
+  const fake = join(dir, "lt");
+  writeFileSync(fake, "#!/bin/sh\necho lt\n", "utf8");
+  chmodSync(fake, 0o755);
+  process.env.PATH = `${dir}:/usr/bin:/bin`;
+  try {
+    const p = resolveToolPath("localtunnel", { cacheDir: dir });
+    assert.equal(p, fake, "must resolve via the lt alias without downloading");
+  } finally {
+    process.env.PATH = origPath;
+  }
+});
