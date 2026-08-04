@@ -557,8 +557,11 @@ function decryptPassword(keyId, encryptedB64) {
 
 function html(next, error, keyId, publicKey) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const noJs = '<noscript><p class="warn">JavaScript is disabled — the password will be sent unencrypted. Enable JavaScript for encrypted sign-in.</p></noscript>'
+    + '<p id="js-warn" class="warn" style="display:none">This browser has no WebCrypto (crypto.subtle) — the password will be sent unencrypted. Use a modern browser for encrypted sign-in.</p>';
   const enc = publicKey
-    ? '<script>'
+    ? '<script>if (!window.crypto || !crypto.subtle) { var w = document.getElementById("js-warn"); if (w) w.style.display = "block"; }</script>'
+      + '<script>'
       + 'const PUB="' + publicKey + '";'
       + 'const KEY_ID="' + keyId + '";'
       + 'function b64ToBuf(b){const bin=atob(b);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}'
@@ -581,11 +584,12 @@ function html(next, error, keyId, publicKey) {
     + 'form{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem}'
     + 'h1{font-size:1.15rem;margin:0 0 1.2rem}label{display:block;font-size:.8rem;color:#666;margin:.8rem 0 .25rem}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px}'
-    + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}</style>'
+    + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
+    + 'p.warn{background:#fdf3e0;border:1px solid #f0c36d;color:#8a6d1a;font-size:.8rem;padding:.5rem .7rem;border-radius:6px;margin:1rem 0 .2rem;line-height:1.4}</style>'
     + '</head><body>' + enc
     + '<form id="login" method="post" action="' + BASE + '/login">'
     + '<h1>Sign in to access this service</h1>'
-    + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err
+    + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err + noJs
     + '<input type="hidden" name="encrypted" id="encrypted">'
     + '<input type="hidden" name="keyId" id="keyId">'
     + '<label>Username</label><input name="username" autocomplete="username" required autofocus>'
