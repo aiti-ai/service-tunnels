@@ -126,7 +126,7 @@ export interface ServiceTunnels {
     /** Register an extra provider factory (plugins). */
     registerProvider(factory: AuthProviderFactory): void;
     /** Expose with optional gateway auth (default provider: authelia). */
-    expose(port: number, opts?: ExposeOptions): Promise<ExposeResult>;
+    expose(port: number, opts?: Omit<ExposeOptions, "port">): Promise<ExposeResult>;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
