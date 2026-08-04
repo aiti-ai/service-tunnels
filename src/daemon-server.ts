@@ -24,6 +24,8 @@ import { spawnGuardian } from "./guardian-spawn.ts";
 import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
+import { AuthRegistry } from "./auth-registry.ts";
+import type { AutheliaProvider } from "./authelia.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
 const [, , stateFile = "", sockPath = "", configDir = "", cacheDir = ""] = process.argv;
@@ -229,6 +231,36 @@ async function listen(): Promise<string> {
     // socket chmod is best-effort
   }
   return `unix://${sockPath}`;
+}
+
+const authRegistry = new AuthRegistry({
+  configDir,
+  cacheDir,
+  resolveTool: async (name: string) => {
+    const def = TOOLS[name];
+    if (!def) throw new Error(`unknown tool: ${name}`);
+    return ensureTool(def, { cacheDir });
+  },
+  registerInternal: (role, port) =>
+    internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+  unregisterInternal: (role) => internal.unregister(role),
+  pickPort: async () => {
+    const { createServer } = await import("net");
+    return new Promise((resolve) => {
+      const srv = createServer();
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address();
+        const p = typeof addr === "object" && addr ? addr.port : 0;
+        srv.close(() => resolve(p));
+      });
+    });
+  },
+  log: (line) => console.error(`[service-tunnels] ${line}`),
+});
+
+/** The authelia provider instance (singleton via the registry) — user mgmt. */
+function authelia(): AutheliaProvider {
+  return authRegistry.create("authelia") as AutheliaProvider;
 }
 
 const server = createServer(serveSocket);

@@ -212,3 +212,62 @@ test("redis: green start reports a port and stops", { timeout: 30_000 }, async (
   await redis.stop();
   rmSync(base, { recursive: true, force: true });
 });
+
+test("authelia user management: add/list/set-password/remove", { timeout: 40_000 }, async () => {
+  const { AutheliaProvider } = await loadAuthelia();
+  const { cacheDir, configDir, base } = tempDirs();
+
+  const fakeAuthelia = fakeBin(base, "authelia", `#!/bin/sh
+echo 'authelia v4.39.20'
+case "$1" in
+  config) [ "$2" = "validate" ] && exit 0 ;;
+  crypto)
+    echo 'Password Hash: $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$abcdef'
+    exit 0
+    ;;
+esac
+sleep 30
+`);
+  const ctx = {
+    configDir,
+    cacheDir,
+    resolveTool: async () => fakeAuthelia,
+    registerInternal: () => {},
+    unregisterInternal: () => {},
+    pickPort: async () => 19140,
+    log: () => {},
+  };
+  const provider = new AutheliaProvider(ctx, { port: 19140, sessionSecret: "s3cret", user: { name: "admin", password: "pw" } });
+  await provider.prepare();
+
+  // initial user registered
+  let users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name), ["admin"]);
+  assert.equal(users[0].displayName, "Administrator");
+
+  // add a user
+  await provider.addUser("alice", "alice-pw", "Alice Wang");
+  users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name).sort(), ["admin", "alice"]);
+  const alice = users.find((u) => u.name === "alice");
+  assert.equal(alice.displayName, "Alice Wang");
+  // secrets never leak through the API
+  assert.equal("password" in alice, false);
+
+  // users_database.yml contains a real argon2 hash for alice
+  const yml = readFileSync(join(cacheDir, "tmp", "authelia", "users_database.yml"), "utf8");
+  assert.match(yml, /\$argon2id\$/);
+  assert.equal(yml.includes("alice-pw"), false, "plaintext password must not appear");
+
+  // set password keeps the user
+  await provider.setUserPassword("alice", "new-pw");
+  users = await provider.listUsers();
+  assert.equal(users.length, 2);
+  assert.equal(users.some((u) => u.name === "alice"), true);
+
+  // remove
+  await provider.removeUser("alice");
+  users = await provider.listUsers();
+  assert.deepEqual(users.map((u) => u.name), ["admin"]);
+  await assert.rejects(provider.setUserPassword("nobody", "x"), /not registered/);
+});

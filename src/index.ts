@@ -31,6 +31,7 @@ import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./e
 import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins } from "./auth-registry.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
+import type { AuthUser } from "./authelia.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -131,6 +132,14 @@ export interface ServiceTunnels {
     registerProvider(factory: AuthProviderFactory): void;
     /** Expose with optional gateway auth (default provider: authelia). */
     expose(port: number, opts?: Omit<ExposeOptions, "port">): Promise<ExposeResult>;
+    /** Registered authelia users (no secrets). */
+    users(): Promise<AuthUser[]>;
+    /** Add/update an authelia user (restarts authelia if running). */
+    addUser(name: string, password: string, displayName?: string): Promise<void>;
+    /** Change a user's password (restarts authelia if running). */
+    setUserPassword(name: string, password: string): Promise<void>;
+    /** Remove a user (restarts authelia if running). */
+    removeUser(name: string): Promise<void>;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -287,6 +296,13 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
             auth: registry,
             log: () => {},
           }),
+        users: async () => (registry.create("authelia") as AutheliaProvider).listUsers(),
+        addUser: async (name: string, password: string, displayName?: string) =>
+          (registry.create("authelia") as AutheliaProvider).addUser(name, password, displayName),
+        setUserPassword: async (name: string, password: string) =>
+          (registry.create("authelia") as AutheliaProvider).setUserPassword(name, password),
+        removeUser: async (name: string) =>
+          (registry.create("authelia") as AutheliaProvider).removeUser(name),
       };
     })(),
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
