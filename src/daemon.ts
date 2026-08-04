@@ -17,10 +17,12 @@ import { killRoleProcesses } from "./cleanup.ts";
  * JSON-RPC over its socket.
  */
 
-const DAEMON_SERVER = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  "daemon-server.ts",
-);
+const DAEMON_SERVER = (() => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  // dev (type-stripped .ts) vs published (compiled .js) layout
+  const ts = resolve(dir, "daemon-server.ts");
+  return existsSync(ts) ? ts : resolve(dir, "daemon-server.js");
+})();
 
 export interface DaemonStatus {
   running: boolean;

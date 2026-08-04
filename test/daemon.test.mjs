@@ -96,7 +96,7 @@ test("stop returns false when no daemon is running", async () => {
 test("CLI status/discover round-trip via bin", { timeout: 30_000 }, async () => {
   const { startDaemon, stopDaemon } = await loadSubject();
   const { cacheDir, configDir, base } = tempDirs();
-  const bin = join(import.meta.dirname, "..", "bin", "service-tunnels.mts");
+  const bin = join(import.meta.dirname, "..", "src", "cli.ts");
   const run = (args) =>
     new Promise((resolve) => {
       import("node:child_process").then(({ execFile }) => {

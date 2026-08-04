@@ -2,10 +2,10 @@
 /**
  * service-tunnels CLI — M1: config/discover/internal/daemon/status.
  */
-import { createServiceTunnels } from "../src/index.ts";
-import { InternalRegistry } from "../src/internal.ts";
-import { cachePaths, resolveDirs } from "../src/config.ts";
-import { readState } from "../src/state.ts";
+import { createServiceTunnels } from "./index.ts";
+import { InternalRegistry } from "./internal.ts";
+import { cachePaths, resolveDirs } from "./config.ts";
+import { readState } from "./state.ts";
 
 function usage(): void {
   console.log(`service-tunnels <command>
@@ -32,6 +32,22 @@ interface CliArgs {
   refresh: boolean;
   foreground: boolean;
   pid?: number;
+  port?: number;
+  suffix?: string;
+  basePath?: string;
+  password?: string;
+  type?: string;
+  target?: number;
+  domain?: string;
+  host?: string;
+  server?: string;
+  token?: string;
+  cmd?: string;
+  tunnelArgs?: string[];
+  tunnel?: string;
+  name?: string;
+  nginxPort?: number;
+  auth?: boolean | string;
   [k: string]: unknown;
 }
 
@@ -57,10 +73,10 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         args.cacheDir = argv[++i];
         break;
       case "--pid":
-        args.pid = Number(argv[++i]);
+        args.pid = Number(argv[++i]!);
         break;
       case "--port":
-        args.port = Number(argv[++i]);
+        args.port = Number(argv[++i]!);
         break;
       case "--suffix":
         args.suffix = argv[++i];
@@ -75,7 +91,7 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         args.type = argv[++i];
         break;
       case "--target":
-        args.target = Number(argv[++i]);
+        args.target = Number(argv[++i]!);
         break;
       case "--domain":
         args.domain = argv[++i];
@@ -93,7 +109,7 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         args.cmd = argv[++i];
         break;
       case "--arg":
-        (args.tunnelArgs ??= []).push(argv[++i]);
+        (args.tunnelArgs ??= []).push(argv[++i]!);
         break;
       case "--auth": {
         const next = argv[i + 1];
@@ -111,14 +127,14 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         args.name = argv[++i];
         break;
       case "--nginx-port":
-        args.nginxPort = Number(argv[++i]);
+        args.nginxPort = Number(argv[++i]!);
         break;
       default:
-        if (a.startsWith("-")) {
+        if (a!.startsWith("-")) {
           console.error(`未知参数: ${a}`);
           process.exit(2);
         }
-        cmd.push(a);
+        cmd.push(a!);
     }
   }
   return { cmd, args };
