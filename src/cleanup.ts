@@ -10,7 +10,20 @@ import { readdirSync, readFileSync } from "fs";
  * Pure function so both the daemon's shutdown handler and CLI clients
  * (stop-all) can call it.
  */
-export async function killRoleProcesses(sig: NodeJS.Signals = "SIGTERM", graceMs = 300): Promise<number> {
+/** True when a process belongs to our instance (marker match). An empty
+ * marker means "unknown owner" — we NEVER clean those (avoids killing a
+ * concurrent instance's helpers). */
+function owns(env: string, marker: string | undefined): boolean {
+  if (!env.includes("SERVICE_TUNNELS_ROLE=")) return false;
+  if (!marker) return false;
+  return env.includes(`SERVICE_TUNNELS_MARKER=${marker}`);
+}
+
+export async function killRoleProcesses(
+  sig: NodeJS.Signals = "SIGTERM",
+  graceMs = 300,
+  marker?: string,
+): Promise<number> {
   if (process.platform !== "linux") return 0;
   let pids: string[];
   try {
@@ -23,7 +36,7 @@ export async function killRoleProcesses(sig: NodeJS.Signals = "SIGTERM", graceMs
     for (const pid of list) {
       try {
         const env = readFileSync(`/proc/${pid}/environ`, "utf8");
-        if (!env.includes("SERVICE_TUNNELS_ROLE=")) continue;
+        if (!owns(env, marker)) continue;
         process.kill(Number(pid), signal);
         n++;
       } catch {
@@ -41,7 +54,7 @@ export async function killRoleProcesses(sig: NodeJS.Signals = "SIGTERM", graceMs
 }
 
 /** Synchronous variant for signal handlers (no await available). */
-export function killRoleProcessesSync(): void {
+export function killRoleProcessesSync(marker?: string): void {
   if (process.platform !== "linux") return;
   let pids: string[];
   try {
@@ -52,7 +65,7 @@ export function killRoleProcessesSync(): void {
   for (const pid of pids) {
     try {
       const env = readFileSync(`/proc/${pid}/environ`, "utf8");
-      if (!env.includes("SERVICE_TUNNELS_ROLE=")) continue;
+      if (!owns(env, marker)) continue;
       process.kill(Number(pid), "SIGKILL");
     } catch {
       // vanished or not ours

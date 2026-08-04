@@ -7,6 +7,7 @@ import type { ServicePortInfo } from "./discovery.ts";
 import { readState } from "./state.ts";
 import { cachePaths } from "./config.ts";
 import { killRoleProcesses } from "./cleanup.ts";
+import { ensureMarker } from "./marker.ts";
 
 /**
  * Daemon controller — CLI-mode process model.
@@ -79,6 +80,7 @@ export function startDaemon(
   const existing = daemonStatus(cacheDir);
   if (existing.running) return existing;
 
+  ensureMarker(); // scope cleanup to this instance (daemon inherits it)
   const { stateFile, daemonSock } = cachePaths(cacheDir);
   const configDir = opts.configDir ?? join(dirname(cacheDir), "config");
   mkdirSync(dirname(stateFile), { recursive: true });
@@ -161,8 +163,8 @@ export async function stopDaemon(cacheDir: string): Promise<boolean> {
     spawnSync("sleep", ["0.1"], { stdio: "ignore" });
   }
   // Safety net: if the daemon was SIGKILLed before its own cleanup finished,
-  // kill any remaining framework helpers by role marker.
-  await killRoleProcesses();
+  // kill any remaining framework helpers by role marker (this instance's).
+  await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "");
   return !daemonStatus(cacheDir).running;
 }
 

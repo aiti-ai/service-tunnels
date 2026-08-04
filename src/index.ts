@@ -23,6 +23,7 @@ import {
 } from "./daemon.ts";
 import { readState } from "./state.ts";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS } from "./tools.ts";
+import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
@@ -67,6 +68,9 @@ export interface ServiceTunnelsOptions extends DirOptions {
   toolMirrors?: Record<string, string[]>;
   /** Try mirrors before official sources (CN networks). */
   preferMirrors?: boolean;
+  /** Spawn a parent-death guardian (default true): if this process exits
+   *  without cleanup, a detached guardian kills our framework helpers. */
+  guardian?: boolean;
 }
 
 export interface ToolResolution {
@@ -141,6 +145,9 @@ export interface ServiceTunnels {
 export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceTunnels {
   const dirs = resolveDirs(opts);
   ensureMarker(opts.marker);
+  if (opts.guardian !== false) {
+    spawnGuardian(process.pid);
+  }
   const internal = new InternalRegistry();
   const toolOpts = {
     cacheDir: dirs.cacheDir,

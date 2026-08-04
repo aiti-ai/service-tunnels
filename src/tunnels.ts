@@ -85,7 +85,7 @@ const OUTPUT_LIMIT = 8192;
 export function extractTunnelUrl(output: string): string | null {
   if (!output) return null;
   const known =
-    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io)|trycloudflare\.com|loca\.lt|serveo\.net|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
+    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
       output,
     );
   if (known && known[1]) return known[1];
@@ -287,8 +287,10 @@ export class TunnelManager {
       case "ssh": {
         const host = cfg.host ?? "serveo.net";
         const args = [
+          "-N",
           "-R", `80:127.0.0.1:${target}`,
           "-o", "StrictHostKeyChecking=accept-new",
+          "-o", "ConnectTimeout=10",
           "-o", "ServerAliveInterval=30",
           "-o", "ExitOnForwardFailure=yes",
           host,

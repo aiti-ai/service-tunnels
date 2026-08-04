@@ -20,6 +20,8 @@ import { TunnelManager } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
+import { spawnGuardian } from "./guardian-spawn.ts";
+import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 
@@ -29,6 +31,8 @@ if (!stateFile || !sockPath || !configDir || !cacheDir) {
   console.error("daemon-server: usage: daemon-server <stateFile> <sockPath> <configDir> <cacheDir>");
   process.exit(1);
 }
+
+ensureMarker(); // this daemon carries its own instance marker (cleanup scoping)
 
 const internal = new InternalRegistry();
 
@@ -126,7 +130,7 @@ const methods = new Map<string, Handler>([
       // kill every framework helper we spawned (nginx/authelia/redis/tunnels
       // carry SERVICE_TUNNELS_ROLE) so nothing becomes an orphan
       await tunnels.stopAll();
-      await killRoleProcesses();
+      await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "");
       setTimeout(() => process.exit(0), 100);
       return { ok: true };
     },
@@ -229,6 +233,9 @@ async function listen(): Promise<string> {
 
 const server = createServer(serveSocket);
 const ipc = await listen();
+// watch ourselves: if this daemon is ever SIGKILLed, the guardian reaps the
+// role-marked helpers (nginx/authelia/redis/tunnels) we spawned
+spawnGuardian(process.pid);
 writeState(stateFile, { ...readState(stateFile), daemon: { pid: process.pid, ipc } });
 console.log(`daemon ready ${ipc}`);
 
@@ -241,7 +248,7 @@ process.once("exit", () => {
 });
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.once(sig, () => {
-    killRoleProcessesSync(); // safety net even on hard kills
+    killRoleProcessesSync(process.env.SERVICE_TUNNELS_MARKER ?? ""); // safety net even on hard kills
     process.exit(0);
   });
 }
