@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "child_process";
 import { connect } from "net";
 import { existsSync, mkdirSync, readFileSync } from "fs";
-import { dirname, resolve } from "path";
+import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import type { ServicePortInfo } from "./discovery.ts";
 import { readState } from "./state.ts";
@@ -71,23 +71,24 @@ function ipcPath(ipc: string): string | null {
  */
 export function startDaemon(
   cacheDir: string,
-  opts: { foreground?: boolean; logFile?: string } = {},
+  opts: { foreground?: boolean; logFile?: string; configDir?: string } = {},
 ): DaemonStatus {
   const existing = daemonStatus(cacheDir);
   if (existing.running) return existing;
 
   const { stateFile, daemonSock } = cachePaths(cacheDir);
+  const configDir = opts.configDir ?? join(dirname(cacheDir), "config");
   mkdirSync(dirname(stateFile), { recursive: true });
 
   if (opts.foreground) {
-    const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock], {
+    const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
       stdio: "inherit",
     });
     return { running: true, pid: child.pid ?? null, ipc: null };
   }
 
   const logPath = opts.logFile ?? `${stateFile}.daemon.log`;
-  const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock], {
+  const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
   });

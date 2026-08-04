@@ -16,15 +16,38 @@ import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
+import { TunnelManager } from "./tunnels.ts";
+import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
+import { ensureTool, TOOLS } from "./tools.ts";
 
-// argv: <stateFile> <sockPath>
-const [, , stateFile = "", sockPath = ""] = process.argv;
-if (!stateFile || !sockPath) {
-  console.error("daemon-server: usage: daemon-server <stateFile> <sockPath>");
+// argv: <stateFile> <sockPath> <configDir> <cacheDir>
+const [, , stateFile = "", sockPath = "", configDir = "", cacheDir = ""] = process.argv;
+if (!stateFile || !sockPath || !configDir || !cacheDir) {
+  console.error("daemon-server: usage: daemon-server <stateFile> <sockPath> <configDir> <cacheDir>");
   process.exit(1);
 }
 
 const internal = new InternalRegistry();
+
+// Tunnel manager owned by the daemon: CLI commands reach it over IPC, so a
+// started tunnel stays visible/controllable across CLI invocations.
+const persistTunnels = () => {
+  writeState(stateFile, {
+    ...readState(stateFile),
+    tunnels: tunnels.persisted(),
+  });
+};
+const tunnels = new TunnelManager({
+  cacheDir,
+  resolveTool: async (name: string) => {
+    const def = TOOLS[name];
+    if (!def) throw new Error(`unknown tool: ${name}`);
+    return ensureTool(def, { cacheDir });
+  },
+  onEvent: () => persistTunnels(),
+});
+for (const cfg of readTunnelConfigs(configDir)) tunnels.add(cfg);
+tunnels.hydrate(readState(stateFile).tunnels);
 
 // Rehydrate the internal registry from state.json (survives daemon restart).
 for (const entry of readState(stateFile).internal) {
@@ -49,6 +72,33 @@ const methods = new Map<string, Handler>([
     },
   ],
   ["internal.list", () => internal.list()],
+  ["tunnel.list", () => tunnels.list()],
+  ["tunnel.configs", () => tunnels.configs],
+  [
+    "tunnel.add",
+    (params) => {
+      const cfg = params as Parameters<TunnelManager["add"]>[0];
+      tunnels.add(cfg);
+      const all = readTunnelConfigs(configDir);
+      const idx = all.findIndex((c) => c.name === cfg.name);
+      if (idx >= 0) all[idx] = cfg;
+      else all.push(cfg);
+      writeTunnelConfigs(configDir, all);
+      return { ok: true };
+    },
+  ],
+  [
+    "tunnel.remove",
+    (params) => {
+      const name = String(params);
+      tunnels.remove(name);
+      writeTunnelConfigs(configDir, readTunnelConfigs(configDir).filter((c) => c.name !== name));
+      return { ok: true };
+    },
+  ],
+  ["tunnel.start", (params) => tunnels.start(String(params)).then((i) => ({ ...i }))],
+  ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
+  ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
   [
     "shutdown",
     () => {

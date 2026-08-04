@@ -42,6 +42,25 @@ parseHost(host): ServiceHostMatch | null   // "<port>.<suffix>" → { port, suff
 白名单 = 发现缓存：未发现的端口 403；SSE/流式天然支持（管道无缓冲）；
 WebSocket upgrade 转发（101 + 数据帧）；Host 保留（应用生成绝对 URL 用虚拟主机名）。
 
+### st.tunnels（隧道管理，daemon 持有）
+
+```ts
+configs(): TunnelConfig[]                       // configDir/tunnels.json 声明式配置
+saveConfigs(cfgs): void
+add(cfg: { name, type, target?, domain?, args?, cmd?, host?, server?, token? }): void
+remove(name): void
+list(): TunnelInfo[]                            // { name, type, running, pid, url, lastOutput }
+get(name): TunnelInfo | undefined
+start(name): Promise<TunnelInfo>                // 工具解析 → spawn(角色标记) → 输出缓冲 → URL
+stop(name): Promise<void>                       // 进程组 SIGTERM → 等待 → SIGKILL 兜底
+stopAll(): Promise<void>
+hydrate(): void                                 // 重启后从 state.json 恢复 URL
+```
+- 隧道是纯透传（认证在 nginx 网关，与隧道解耦，design.md §5）；
+- CLI 模式隧道进程由 daemon 持有（跨 CLI 调用可见/可控），state.json 镜像
+  pid/url；`extractTunnelUrl` 已知域名（ngrok/trycloudflare/loca.lt/serveo.net/
+  wormhole.app/localhost.run/hop.to）+ 非 localhost 兜底。
+
 ### st.discovery
 
 ```ts

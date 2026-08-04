@@ -24,11 +24,15 @@ import {
 import { readState } from "./state.ts";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS } from "./tools.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
+import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } from "./tunnels.ts";
+import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
 export type { DaemonStatus } from "./daemon.ts";
 export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
+export type { TunnelConfig, TunnelInfo, TunnelType } from "./tunnels.ts";
+export { extractTunnelUrl } from "./tunnels.ts";
 
 export {
   expandListeningAddresses,
@@ -93,6 +97,21 @@ export interface ServiceTunnels {
     create(opts?: ProxyOptions): import("http").Server;
     parseHost(host: string | undefined): import("./proxy.ts").ServiceHostMatch | null;
   };
+  tunnels: {
+    /** Declarative configs from configDir/tunnels.json. */
+    configs(): TunnelConfig[];
+    /** Persist the config list to configDir/tunnels.json. */
+    saveConfigs(cfgs: TunnelConfig[]): void;
+    add(cfg: TunnelConfig): void;
+    remove(name: string): void;
+    list(): TunnelInfo[];
+    get(name: string): TunnelInfo | undefined;
+    start(name: string): Promise<TunnelInfo>;
+    stop(name: string): Promise<void>;
+    stopAll(): Promise<void>;
+    /** Restore URLs from state.json after a restart. */
+    hydrate(): void;
+  };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
 }
@@ -130,7 +149,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     },
     daemon: {
       status: () => daemonStatus(dirs.cacheDir),
-      start: (o) => startDaemon(dirs.cacheDir, o),
+      start: (o) => startDaemon(dirs.cacheDir, { ...o, configDir: dirs.configDir }),
       stop: () => stopDaemon(dirs.cacheDir),
       request: <T>(method: string, params?: unknown) => requestDaemon<T>(dirs.cacheDir, method, params),
     },
@@ -168,6 +187,63 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         }),
       parseHost: (host: string | undefined) => parseServiceHost(host, [".pi.localhost"]),
     },
+    tunnels: (() => {
+      const tm = new TunnelManager({
+        cacheDir: dirs.cacheDir,
+        resolveTool: async (name: string) => {
+          const def = TOOLS[name];
+          if (!def) throw new Error(`unknown tool: ${name}`);
+          return ensureTool(def, toolOpts);
+        },
+        log: () => {},
+      });
+      for (const cfg of readTunnelConfigs(dirs.configDir)) tm.add(cfg);
+      tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels);
+      const persistState = () => {
+        const { updateState } = require_state();
+        updateState(cachePaths(dirs.cacheDir).stateFile, (s) => {
+          s.tunnels = tm.persisted();
+        });
+      };
+      return {
+        configs: () => readTunnelConfigs(dirs.configDir),
+        saveConfigs: (cfgs: TunnelConfig[]) => writeTunnelConfigs(dirs.configDir, cfgs),
+        add: (cfg: TunnelConfig) => {
+          tm.add(cfg);
+          const all = readTunnelConfigs(dirs.configDir);
+          const idx = all.findIndex((c) => c.name === cfg.name);
+          if (idx >= 0) all[idx] = cfg;
+          else all.push(cfg);
+          writeTunnelConfigs(dirs.configDir, all);
+        },
+        remove: (name: string) => {
+          tm.remove(name);
+          writeTunnelConfigs(dirs.configDir, readTunnelConfigs(dirs.configDir).filter((c) => c.name !== name));
+        },
+        list: () => tm.list(),
+        get: (name: string) => tm.get(name),
+        start: async (name: string) => {
+          const info = await tm.start(name);
+          persistState();
+          return info;
+        },
+        stop: async (name: string) => {
+          await tm.stop(name);
+          persistState();
+        },
+        stopAll: async () => {
+          await tm.stopAll();
+          persistState();
+        },
+        hydrate: () => tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels),
+      };
+    })(),
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
   };
+}
+
+// lazy helper to avoid a circular import at module top
+import { updateState as _updateState } from "./state.ts";
+function require_state() {
+  return { updateState: _updateState };
 }

@@ -15,6 +15,8 @@ function usage(): void {
   internal list [--json]
   tools list | resolve <name> | download <name> | path <name>
   proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
+  tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
+         start|stop|remove <name>
   status [--json]
   config path | show
 
@@ -66,6 +68,30 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--password":
         args.password = argv[++i];
+        break;
+      case "--type":
+        args.type = argv[++i];
+        break;
+      case "--target":
+        args.target = Number(argv[++i]);
+        break;
+      case "--domain":
+        args.domain = argv[++i];
+        break;
+      case "--host":
+        args.host = argv[++i];
+        break;
+      case "--server":
+        args.server = argv[++i];
+        break;
+      case "--token":
+        args.token = argv[++i];
+        break;
+      case "--cmd":
+        args.cmd = argv[++i];
+        break;
+      case "--arg":
+        (args.tunnelArgs ??= []).push(argv[++i]);
         break;
       default:
         if (a.startsWith("-")) {
@@ -208,6 +234,64 @@ async function main(): Promise<void> {
           // M2 keeps the server in this process.
         }
         await new Promise(() => {});
+      } else {
+        usage();
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "tunnel": {
+      const op = cmd[1] ?? "list";
+      const name = cmd[2];
+      // CLI 模式：隧道进程由 daemon 持有（跨 CLI 调用可见/可控）。
+      // daemon 未运行 → 自动拉起（--auto-daemon 语义：常驻进程归 daemon）。
+      const dstat = st.daemon.status();
+      if (!dstat.running) {
+        st.daemon.start();
+        // wait for IPC socket
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && !st.daemon.status().running) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      const d = st.daemon;
+      if (op === "list") {
+        const infos = await d.request("tunnel.list");
+        jsonOut(infos ?? []);
+      } else if (op === "add") {
+        if (!name || !args.type) {
+          console.error("tunnel add <name> --type <ngrok|frpc|ssh|cloudflared|localtunnel|command>");
+          process.exit(2);
+        }
+        const cfg = {
+          name,
+          type: args.type,
+          target: args.target ? Number(args.target) : undefined,
+          domain: args.domain,
+          args: args.tunnelArgs,
+          cmd: args.cmd,
+          host: args.host,
+          server: args.server,
+          token: args.token,
+        };
+        await d.request("tunnel.add", cfg);
+        jsonOut({ added: name });
+      } else if (op === "start" || op === "stop" || op === "remove") {
+        if (!name) {
+          console.error(`tunnel ${op} <name>`);
+          process.exit(2);
+        }
+        if (op === "start") {
+          const info = await d.request("tunnel.start", name);
+          jsonOut(info ?? { error: "start failed" });
+        } else if (op === "stop") {
+          await d.request("tunnel.stop", name);
+          jsonOut({ stopped: name });
+        } else {
+          await d.request("tunnel.remove", name);
+          jsonOut({ removed: name });
+        }
       } else {
         usage();
         process.exit(2);
