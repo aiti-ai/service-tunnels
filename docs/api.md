@@ -61,6 +61,27 @@ hydrate(): void                                 // 重启后从 state.json 恢�
   pid/url；`extractTunnelUrl` 已知域名（ngrok/trycloudflare/loca.lt/serveo.net/
   wormhole.app/localhost.run/hop.to）+ 非 localhost 兜底。
 
+### st.auth（认证编排）
+
+```ts
+providers(): string[]                                   // 内置/插件 provider 列表
+expose(port: number, opts?: {
+  auth?: boolean;              // 走网关认证（默认 false 直连）
+  provider?: string;           // 默认 "authelia"
+  tunnelType?: string;         // 默认 ngrok
+  tunnelName?: string;
+  policy?: "one_factor"|"two_factor"|"deny";
+  nginxPort?: number;          // 0=随机（默认随机）
+  autheliaPort?: number;       // 0=随机
+  redisPort?: number;          // 0=随机
+  user?: { name, password };
+}): Promise<{ url, tunnel, provider, gateway: { nginx, authelia, redis } }>
+```
+一键流程（design.md §4.7）：provider validate → Redis（needsSessionStore 时）→
+authelia 绿色启动（配置生成/argon2/validate/spawn）→ nginx 网关（随机端口 +
+默认 444 server + 热重载）→ 隧道指向网关端口 → 等公网 URL → **gateway.registerHost
++ authelia.registerHost（动态登记 + 重启）**。所有组件端口随机且内部互知。
+
 ### st.discovery
 
 ```ts

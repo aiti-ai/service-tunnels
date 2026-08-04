@@ -26,6 +26,9 @@ import { ensureTool, resolveToolPath, findOnPath, TOOLS } from "./tools.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
+import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
+import { AutheliaProvider } from "./authelia.ts";
+import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -33,6 +36,10 @@ export type { DaemonStatus } from "./daemon.ts";
 export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
 export type { TunnelConfig, TunnelInfo, TunnelType } from "./tunnels.ts";
 export { extractTunnelUrl } from "./tunnels.ts";
+export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
+export { AutheliaProvider } from "./authelia.ts";
+export { GatewayController, generateGatewayNginx } from "./gateway.ts";
+export { RedisController } from "./redis.ts";
 
 export {
   expandListeningAddresses,
@@ -112,6 +119,12 @@ export interface ServiceTunnels {
     /** Restore URLs from state.json after a restart. */
     hydrate(): void;
   };
+  auth: {
+    /** Built-in + plugin providers. */
+    providers(): string[];
+    /** Expose with optional gateway auth (default provider: authelia). */
+    expose(port: number, opts?: ExposeOptions): Promise<ExposeResult>;
+  };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
 }
@@ -132,6 +145,13 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     toolMirrors: opts.toolMirrors,
     preferMirrors: opts.preferMirrors,
   };
+  const tm = new TunnelManager({
+    cacheDir: dirs.cacheDir,
+    resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+    log: () => {},
+  });
+  for (const cfg of readTunnelConfigs(dirs.configDir)) tm.add(cfg);
+  tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels);
 
   return {
     dirs,
@@ -188,17 +208,6 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       parseHost: (host: string | undefined) => parseServiceHost(host, [".pi.localhost"]),
     },
     tunnels: (() => {
-      const tm = new TunnelManager({
-        cacheDir: dirs.cacheDir,
-        resolveTool: async (name: string) => {
-          const def = TOOLS[name];
-          if (!def) throw new Error(`unknown tool: ${name}`);
-          return ensureTool(def, toolOpts);
-        },
-        log: () => {},
-      });
-      for (const cfg of readTunnelConfigs(dirs.configDir)) tm.add(cfg);
-      tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels);
       const persistState = () => {
         const { updateState } = require_state();
         updateState(cachePaths(dirs.cacheDir).stateFile, (s) => {
@@ -238,8 +247,27 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         hydrate: () => tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels),
       };
     })(),
+    auth: {
+      providers: () => ["authelia"],
+      expose: (port: number, o: Omit<ExposeOptions, "port"> = {}) =>
+        exposeFlow(port, { ...o, port }, {
+          configDir: dirs.configDir,
+          cacheDir: dirs.cacheDir,
+          resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+          internal,
+          tunnels: tm,
+          log: () => {},
+        }),
+    },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
   };
+}
+
+// helper: resolve tool via tools.ts (keeps the IIFE below minimal)
+async function st_tools_ensure(name: string, toolOpts: { cacheDir: string; toolPaths?: Record<string, string> }): Promise<string> {
+  const def = TOOLS[name];
+  if (!def) throw new Error(`unknown tool: ${name}`);
+  return ensureTool(def, toolOpts);
 }
 
 // lazy helper to avoid a circular import at module top

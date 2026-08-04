@@ -17,6 +17,7 @@ function usage(): void {
   proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
   tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
          start|stop|remove <name>
+  expose <port> [--tunnel <t>] [--auth [<provider>]] [--name <n>] [--nginx-port <p>]
   status [--json]
   config path | show
 
@@ -92,6 +93,24 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--arg":
         (args.tunnelArgs ??= []).push(argv[++i]);
+        break;
+      case "--auth": {
+        const next = argv[i + 1];
+        if (next && !next.startsWith("-")) {
+          args.auth = argv[++i];
+        } else {
+          args.auth = true;
+        }
+        break;
+      }
+      case "--tunnel":
+        args.tunnel = argv[++i];
+        break;
+      case "--name":
+        args.name = argv[++i];
+        break;
+      case "--nginx-port":
+        args.nginxPort = Number(argv[++i]);
         break;
       default:
         if (a.startsWith("-")) {
@@ -296,6 +315,33 @@ async function main(): Promise<void> {
         usage();
         process.exit(2);
       }
+      break;
+    }
+
+    case "expose": {
+      const port = Number(cmd[1]);
+      if (!Number.isFinite(port) || port <= 0) {
+        console.error("expose <port>");
+        process.exit(2);
+      }
+      // daemon mode: tunnel processes live in the daemon → expose must too
+      let dstat = st.daemon.status();
+      if (!dstat.running) {
+        st.daemon.start();
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline && !st.daemon.status().running) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      const res = await st.daemon.request("expose", {
+        port,
+        auth: Boolean(args.auth),
+        provider: typeof args.auth === "string" ? args.auth : undefined,
+        tunnelType: args.tunnel,
+        tunnelName: args.name,
+        nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
+      });
+      jsonOut(res);
       break;
     }
 

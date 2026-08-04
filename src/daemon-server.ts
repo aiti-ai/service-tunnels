@@ -19,6 +19,8 @@ import { readState, writeState } from "./state.ts";
 import { TunnelManager } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
+import { expose as exposeFlow } from "./expose.ts";
+import type { ExposeOptions } from "./expose.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
 const [, , stateFile = "", sockPath = "", configDir = "", cacheDir = ""] = process.argv;
@@ -100,6 +102,24 @@ const methods = new Map<string, Handler>([
   ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
   [
+    "expose",
+    (params) => {
+      const o = params as ExposeOptions;
+      return exposeFlow(o.port, o, {
+        configDir,
+        cacheDir,
+        resolveTool: async (name: string) => {
+          const def = TOOLS[name];
+          if (!def) throw new Error(`unknown tool: ${name}`);
+          return ensureTool(def, { cacheDir });
+        },
+        internal,
+        tunnels,
+        log: (line) => console.error(`[service-tunnels] ${line}`),
+      });
+    },
+  ],
+  [
     "shutdown",
     () => {
       setTimeout(() => process.exit(0), 50);
@@ -142,6 +162,7 @@ async function handleLine(socket: Socket, line: string) {
     const result = await handler(req.params);
     socket.write(`${JSON.stringify({ id: req.id, result })}\n`);
   } catch (err) {
+    console.error(`[daemon] ${req.method} failed:`, err);
     socket.write(`${JSON.stringify({ id: req.id, error: String(err) })}\n`);
   }
 }
