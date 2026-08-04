@@ -64,6 +64,24 @@ export interface ToolDef {
   verifyArgs?: string[];
 }
 
+/** Parse SERVICE_TUNNELS_TOOLPATHS (JSON {tool: path}) — env-level defaults. */
+export function readEnvToolPaths(): Record<string, string> {
+  const raw = process.env.SERVICE_TUNNELS_TOOLPATHS;
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, string>;
+  } catch {
+    // ignore malformed env
+  }
+  return {};
+}
+
+/** Merge env defaults with explicit overrides (explicit wins). */
+export function mergeToolPaths(explicit?: Record<string, string>): Record<string, string> {
+  return { ...readEnvToolPaths(), ...(explicit ?? {}) };
+}
+
 export interface ToolRegistryOptions {
   cacheDir: string;
   /** Caller-specified explicit paths: { toolName: "/abs/path" }. */
@@ -336,8 +354,9 @@ export async function ensureTool(
   def: ToolDef,
   opts: ToolRegistryOptions,
 ): Promise<string> {
-  // 1. caller-specified path
-  const explicit = opts.toolPaths?.[def.name];
+  // 1. caller-specified path (CLI/env merged — env SERVICE_TUNNELS_TOOLPATHS)
+  const toolPaths = mergeToolPaths(opts.toolPaths);
+  const explicit = toolPaths[def.name];
   if (explicit) {
     if (!existsSync(explicit)) throw new ToolError(`toolPaths.${def.name}=${explicit} does not exist`);
     return explicit;
@@ -514,7 +533,7 @@ export function resolveToolPath(
   name: string,
   opts: ToolRegistryOptions,
 ): string | null {
-  const explicit = opts.toolPaths?.[name];
+  const explicit = mergeToolPaths(opts.toolPaths)[name];
   if (explicit && existsSync(explicit)) return explicit;
   const onPath = findOnPath(name);
   if (onPath) return onPath;

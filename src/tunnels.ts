@@ -80,17 +80,26 @@ function processAlive(pid: number): boolean {
 
 const OUTPUT_LIMIT = 8192;
 
-/** Public URL inside tunnel output: known tunnel domains first, then any
- *  non-localhost http(s) URL. */
-export function extractTunnelUrl(output: string): string | null {
+/** Public URL inside tunnel output.
+ *
+ * Known tunnel domains always win. For built-in tools (cloudflared, ngrok,
+ * localtunnel, frpc, ssh) output may contain doc/ToS links that are NOT the
+ * tunnel (cloudflared prints "Terms of Use (https://www.cloudflare.com/...)"
+ * and "by following: https://developers.cloudflare.com/..."), so the generic
+ * any-URL fallback applies ONLY to user-supplied command tunnels where the
+ * URL domain cannot be predicted.
+ */
+export function extractTunnelUrl(output: string, type?: string): string | null {
   if (!output) return null;
   const known =
     /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
       output,
     );
   if (known && known[1]) return known[1];
-  const any = /(https?:\/\/[a-z0-9][a-z0-9.-]*(?::\d+)?[^\s"'<>)\]]*)/i.exec(output);
-  if (any && any[1] && !/localhost|127\.0\.0\.1|0\.0\.0\.0|::1?/.test(any[1])) return any[1];
+  if (type !== "command" && type !== "ssh") return null;
+  // command/ssh: any http(s) URL not preceded by "(" and not localhost
+  const any = /(?<![(\w])(https?:\/\/[a-z0-9][a-z0-9.-]*(?::\d+)?[^\s"'<>)\]]*)/i.exec(output);
+  if (any && any[1] && !/localhost|127\.0\.0\.1|0\.0\.0\.0|::1?|cloudflare\.com/.test(any[1])) return any[1];
   return null;
 }
 
@@ -201,7 +210,7 @@ export class TunnelManager {
 
     const append = (chunk: Buffer) => {
       s.output = (s.output + chunk.toString()).slice(-OUTPUT_LIMIT);
-      const url = extractTunnelUrl(s.output);
+      const url = extractTunnelUrl(s.output, cfg.type);
       if (url && url !== s.url) {
         s.url = url;
         this.#opts.onEvent?.({ type: "url", name, url });

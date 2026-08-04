@@ -75,7 +75,7 @@ function ipcPath(ipc: string): string | null {
  */
 export function startDaemon(
   cacheDir: string,
-  opts: { foreground?: boolean; logFile?: string; configDir?: string } = {},
+  opts: { foreground?: boolean; logFile?: string; configDir?: string; env?: Record<string, string> } = {},
 ): DaemonStatus {
   const existing = daemonStatus(cacheDir);
   if (existing.running) return existing;
@@ -96,6 +96,7 @@ export function startDaemon(
   const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
+    env: { ...process.env, ...opts.env },
   });
   child.unref();
   return { running: true, pid: child.pid ?? null, ipc: null };

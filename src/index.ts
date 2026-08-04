@@ -22,7 +22,7 @@ import {
   type DaemonStatus,
 } from "./daemon.ts";
 import { readState } from "./state.ts";
-import { ensureTool, resolveToolPath, findOnPath, TOOLS } from "./tools.ts";
+import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths } from "./tools.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } from "./tunnels.ts";
@@ -95,7 +95,7 @@ export interface ServiceTunnels {
     status(): DaemonStatus;
     start(opts?: { foreground?: boolean; logFile?: string }): DaemonStatus;
     stop(): Promise<boolean>;
-    request<T>(method: string, params?: unknown): Promise<T | null>;
+    request<T>(method: string, params?: unknown, timeoutMs?: number): Promise<T | null>;
   };
   tools: {
     /** Resolve a tool: caller path > PATH > cache; auto-downloads when missing. */
@@ -190,7 +190,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   const internal = new InternalRegistry();
   const toolOpts = {
     cacheDir: dirs.cacheDir,
-    toolPaths: opts.toolPaths,
+    toolPaths: mergeToolPaths(opts.toolPaths),
     toolMirrors: opts.toolMirrors,
     preferMirrors: opts.preferMirrors,
   };
@@ -220,7 +220,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       status: () => daemonStatus(dirs.cacheDir),
       start: (o) => startDaemon(dirs.cacheDir, { ...o, configDir: dirs.configDir }),
       stop: () => stopDaemon(dirs.cacheDir),
-      request: <T>(method: string, params?: unknown) => requestDaemon<T>(dirs.cacheDir, method, params),
+      request: <T>(method: string, params?: unknown, timeoutMs = 5_000) =>
+        requestDaemon<T>(dirs.cacheDir, method, params, timeoutMs),
     },
     tools: {
       ensure: (name: string) => {

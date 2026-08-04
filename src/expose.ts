@@ -94,9 +94,13 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   // ── auth flow: shared infrastructure ──────────────────────────────────────
   const pctx = providerCtx(ctx);
   const registry = ctx.auth ?? new AuthRegistry(pctx);
+  // basePath defaults follow the provider type so nginx (auth_request) and
+  // the provider agree even when the caller doesn't pass one (portal → /portal,
+  // authelia → /authelia, ...)
+  const basePath = opts.basePath ?? `/${providerType}`;
   const provider: AuthProvider = registry.create(providerType, {
     port: opts.autheliaPort,
-    basePath: opts.basePath,
+    basePath,
     sessionSecret: opts.sessionSecret,
     policy: opts.policy,
     user: opts.user,
@@ -130,7 +134,7 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     configDir: ctx.configDir,
     cacheDir: ctx.cacheDir,
     port: nginxPort,
-    basePath: opts.basePath,
+    basePath,
     htpasswdFile,
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     unregisterInternal: (role) => ctx.internal.unregister(role),

@@ -6,6 +6,7 @@ import { isUserManager } from "./auth-provider.ts";
 import { AutheliaProvider, type AutheliaProviderOptions } from "./authelia.ts";
 import { BasicAuthProvider, type BasicAuthProviderOptions } from "./providers/basic.ts";
 import { OAuth2ProxyProvider, type OAuth2ProxyProviderOptions } from "./providers/oauth2-proxy.ts";
+import { PortalAuthProvider, type PortalAuthProviderOptions } from "./providers/portal.ts";
 
 /**
  * Auth provider registry + plugin loading (design.md §5.3).
@@ -21,6 +22,7 @@ export type AnyProviderOptions =
   | AutheliaProviderOptions
   | BasicAuthProviderOptions
   | OAuth2ProxyProviderOptions
+  | PortalAuthProviderOptions
   | Record<string, unknown>;
 
 export class AuthRegistry {
@@ -33,6 +35,7 @@ export class AuthRegistry {
     this.#factories.set("authelia", () => new AutheliaProvider(ctx));
     this.#factories.set("basic", () => new BasicAuthProvider(ctx));
     this.#factories.set("oauth2-proxy", () => new OAuth2ProxyProvider(ctx));
+    this.#factories.set("portal", () => new PortalAuthProvider(ctx));
     for (const f of plugins) {
       const probe = f(ctx);
       this.#factories.set(probe.type, f);

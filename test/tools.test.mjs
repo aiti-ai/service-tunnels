@@ -358,3 +358,35 @@ test("Gitee-style full URL template mirrors expand placeholders", async () => {
   const bare = urls3.find((u) => u.label === "mirror#1");
   assert.ok(bare.url.startsWith("https://cdn.example.com/https://github.com/"), bare.url);
 });
+
+test("env SERVICE_TUNNELS_TOOLPATHS + mergeToolPaths", async () => {
+  const { readEnvToolPaths, mergeToolPaths, resolveToolPath, TOOLS, ensureTool } = await import("../src/tools.ts");
+  const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "st-tools-env-"));
+  const fake = join(dir, "fake-tool");
+  writeFileSync(fake, "#!/bin/sh\necho ok\n", "utf8");
+  chmodSync(fake, 0o755);
+
+  // env-only
+  process.env.SERVICE_TUNNELS_TOOLPATHS = JSON.stringify({ fakeTool: fake });
+  const merged = mergeToolPaths(undefined);
+  assert.equal(merged.fakeTool, fake);
+  // explicit overrides env
+  const merged2 = mergeToolPaths({ fakeTool: "/other" });
+  assert.equal(merged2.fakeTool, "/other");
+  // malformed env ignored
+  process.env.SERVICE_TUNNELS_TOOLPATHS = "not-json";
+  assert.deepEqual(readEnvToolPaths(), {});
+
+  // resolveToolPath honors env (fakeTool in TOOLS? add minimal check with a real tool name)
+  const { ToolDef } = await import("../src/tools.ts");
+  const def = { name: "cloudflared", candidateUrls: [fake], fileName: "cloudflared", version: "0", archive: "plain" };
+  process.env.SERVICE_TUNNELS_TOOLPATHS = JSON.stringify({ cloudflared: fake });
+  const resolved = resolveToolPath("cloudflared", { cacheDir: dir });
+  assert.equal(resolved, fake);
+  const ensured = await ensureTool(def, { cacheDir: dir });
+  assert.equal(ensured, fake);
+  delete process.env.SERVICE_TUNNELS_TOOLPATHS;
+});

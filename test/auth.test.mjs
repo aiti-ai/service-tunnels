@@ -318,5 +318,5 @@ test("AuthRegistry userManagers() detects UserManager providers", async () => {
     log: () => {},
   });
   const managers = reg.userManagers().sort();
-  assert.deepEqual(managers, ["authelia", "basic"]);
+  assert.deepEqual(managers, ["authelia", "basic", "portal"]);
 });

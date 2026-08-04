@@ -6,6 +6,7 @@ import { createServiceTunnels } from "./index.ts";
 import { InternalRegistry } from "./internal.ts";
 import { cachePaths, resolveDirs } from "./config.ts";
 import { readState } from "./state.ts";
+import { readEnvToolPaths } from "./tools.ts";
 
 function usage(): void {
   console.log(`service-tunnels <command>
@@ -372,14 +373,14 @@ async function main(): Promise<void> {
         tunnelType: args.tunnel,
         tunnelName: args.name,
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
-      });
+      }, 90_000);
       jsonOut(res);
       break;
     }
 
     case "auth": {
       const op = cmd[1] ?? "list";
-      if (op === "provider" && cmd[2] === "list") {
+      if ((op === "provider" || op === "providers") && cmd[2] === "list") {
         jsonOut(st.auth.providers());
       } else if (op === "user" && cmd[2] === "list") {
         jsonOut(await st.auth.users(args.provider));

@@ -122,8 +122,10 @@ Gitee:  https://gitee.com/<你>/frp/releases/download/v0.61.1/frp_0.61.1_linux_a
 {
   "preferMirrors": true,     // 国内：镜像优先
   "toolMirrors": {
-    "frp": ["https://gitee.com/<你>/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}"],
-    "cloudflared": ["https://gitee.com/<你>/cloudflared/releases/download/latest/cloudflared-{platform}-{arch}{exe}"],
+    // 键名是工具名：frp 的二进制是 frpc → 键用 "frpc"（勿写 "frp"）
+    "frpc": ["https://gitee.com/<你>/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}"],
+    // Gitee 没有 /releases/latest/download 别名：cloudflared 必须写具体 tag（随更新重镜像）
+    "cloudflared": ["https://gitee.com/<你>/cloudflared/releases/download/2026.7.3/cloudflared-{platform}-{arch}{exe}"],
     "authelia": ["https://gitee.com/<你>/authelia/releases/download/v{version}/authelia-v{version}-{platform}-{arch}.tar.gz"],
     "oauth2-proxy": ["https://gitee.com/<你>/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz"]
   }

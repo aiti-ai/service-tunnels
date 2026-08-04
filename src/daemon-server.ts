@@ -154,17 +154,18 @@ const methods = new Map<string, Handler>([
   [
     "expose",
     (params) => {
-      const o = params as ExposeOptions;
+      const o = params as ExposeOptions & { toolPaths?: Record<string, string> };
       return exposeFlow(o.port, o, {
         configDir,
         cacheDir,
         resolveTool: async (name: string) => {
           const def = TOOLS[name];
           if (!def) throw new Error(`unknown tool: ${name}`);
-          return ensureTool(def, { cacheDir });
+          return ensureTool(def, { cacheDir, toolPaths: o.toolPaths });
         },
         internal,
         tunnels,
+        auth: authRegistry,
         log: (line) => console.error(`[service-tunnels] ${line}`),
       });
     },

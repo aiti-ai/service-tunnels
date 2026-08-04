@@ -146,17 +146,22 @@ function alive(pid: number): boolean {
 }
 
 /** Pre-assign a free local port. */
-async function pickFreePort(): Promise<number> {
+async function pickFreePort(avoid?: number): Promise<number> {
   const { createServer } = await import("net");
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.once("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const p = typeof addr === "object" && addr ? addr.port : 0;
-      srv.close(() => resolve(p));
+  for (;;) {
+    const p = await new Promise<number>((resolve, reject) => {
+      const srv = createServer();
+      srv.once("error", reject);
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address();
+        const port = typeof addr === "object" && addr ? addr.port : 0;
+        srv.close(() => resolve(port));
+      });
     });
-  });
+    if (p !== avoid) return p;
+    // the kernel just released `avoid` — re-pick so a just-started helper
+    // (e.g. portal on authPort) doesn't get squatted by our listener
+  }
 }
 
 /** True when something accepts TCP on 127.0.0.1:port. */
@@ -285,6 +290,9 @@ export class GatewayController {
       const bin = await this.resolveNginx();
       execFileSync(bin, ["-s", "reload", "-c", join(this.#nginxRoot, "nginx.conf")], { stdio: "ignore" });
       this.#opts.log?.(`nginx reload (${this.#hosts.size} hosts)`);
+      // reload is async (master forks new workers); give the new worker a
+      // beat to come up so callers don't hit a mid-reload ECONNRESET
+      await new Promise((r) => setTimeout(r, 300));
     }
   }
 
@@ -294,7 +302,7 @@ export class GatewayController {
     if (this.#child && alive(this.#child.pid ?? 0) && (await tcpOpen(this.#port))) {
       return this.#port;
     }
-    if (!this.#port) this.#port = await pickFreePort();
+    if (!this.#port) this.#port = await pickFreePort(autheliaPort);
     // stale pid file from a crashed/previous nginx would confuse the new one
     rmSync(this.#pidFile, { force: true });
     await this.writeConfig(autheliaPort);
