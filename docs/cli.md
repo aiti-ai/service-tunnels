@@ -87,6 +87,19 @@ oauth2-proxy / basic / 插件），隧道进程本身不参与认证；`none`（
 
 ```bash
 service-tunnels internal list [--json]   # [{role:"nginx",port:4180},{role:"authelia",port:9091},...]
+
+## tools — 工具解析与下载
+
+```bash
+service-tunnels tools list                 # 所有工具 + 解析结果（path/缓存/PATH/-）
+service-tunnels tools resolve frpc         # 不下载，仅查当前解析（PATH/缓存/显式指定）
+service-tunnels tools download ngrok       # 需要时手动下载（官方→镜像回退，缓存到 ~/.cache/bin）
+service-tunnels tools path authelia
+```
+
+解析优先级：`toolPaths` 配置 > 系统 PATH > 缓存 > 自动下载。下载源官方优先，
+失败自动切中国镜像（ghproxy / npmmirror）；`--config-dir` 下配置 `toolMirrors`
+可覆盖。
 ```
 
 - 框架自己拉起的 nginx/authelia/redis 监听端口，**不进入 `discover` 结果**；

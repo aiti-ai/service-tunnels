@@ -20,6 +20,13 @@
   "password": "",                          // proxy 模式的 Basic 密码（空=关闭）
   "proxyPort": 4180,                       // proxy 默认监听端口
   "defaultTunnel": "ngrok",                // expose 默认隧道类型
+  // —— 工具解析与下载 ——
+  "toolPaths": { "ngrok": "/opt/ngrok" },  // 显式指定（最高优先级，跳过 PATH/下载）
+  "toolMirrors": {                          // 中国镜像覆盖（按工具；default 全量）
+    "default": ["https://mirror.ghproxy.com/{official}"],
+    "ngrok": ["https://cdn.my-mirror.com/ngrok/{official}"]
+  },
+  "preferMirrors": false,                  // true=先镜像后官方（CN 网络）
   "auth": {
     "enabled": false,                      // 是否启用认证
     "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|插件名
@@ -88,6 +95,21 @@
 - `internal`：框架辅助端口注册表——`discover` 按它过滤，`internal list` 输出它；
 - 进程退出时清理；`stop-all` 等价；
 - **脱敏**：不存任何 secret（密钥只在 config.json，0600）。
+
+## 工具解析优先级（所有命令统一）
+
+```
+1. toolPaths.<name>           （调用方/配置显式指定）
+2. 系统 PATH 已有              （直接用，不下载）
+3. cacheDir/bin/<name>        （已下载缓存）
+4. 自动下载到 cacheDir/bin    （官方源 → 中国镜像逐个回退）
+```
+
+- **下载源**：官方优先；GitHub-release 工具（frpc/cloudflared/authelia）带
+  ghproxy 镜像（`mirror.ghproxy.com` / `gh-proxy.com` / `github.moeyy.xyz`）；
+  npm 工具（localtunnel）用 npmmirror；ngrok 的下载在 equinox.io（无 GitHub
+  镜像），可经 `toolMirrors.ngrok` 配自建镜像。
+- 下载后 `--version` 校验 + 原子落盘；`tools list` 查看各工具解析状态与来源。
 
 ## 目录覆盖示例（库调用）
 

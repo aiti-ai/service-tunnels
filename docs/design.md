@@ -51,7 +51,7 @@
    │                     │  authelia.ts   绿色启动 + 动态登记 + 重启    │
    │                     │  redis.ts      绿色 redis 启停              │
    │                     │  internal.ts   辅助进程端口注册表（排除发现）│
-   │                     │  download.ts   二进制下载到 cache/bin       │
+   │                     │  tools.ts      工具解析+下载（PATH>缓存>官方>镜像）│
    │                     │  daemon.ts     CLI 常驻 + HTTP/socket IPC   │
    │                     │  lifecycle.ts  编排 + 退出清理              │
    └────────────────────▶└──────────────┬─────────────────────────────┘
@@ -199,7 +199,21 @@
    （若域名固定可保留）
 ```
 
-### 4.8 internal.ts —— 辅助进程端口注册表
+### 4.8 tools.ts —— 工具解析与自动下载
+
+- **解析优先级（所有外部命令统一）**：`toolPaths.<name>`（调用方/配置显式指定）
+  > 系统 PATH（直接用，不下载）> `cacheDir/bin`（已下载）> 自动下载；
+- **下载源**：官方 URL 模板优先（`{version}/{platform}/{arch}` 替换），失败自动
+  切换中国镜像（ghproxy 前缀替换 `{official}`、npm 工具 npmmirror），`preferMirrors`
+  可强制镜像优先（CN 网络）；镜像可按工具在 `toolMirrors` 覆盖；
+- 下载物：单二进制直接落 `cache/bin`；tar.gz 解压 strip 后取 binPath；`--version`
+  校验；原子 rename 防半成品；平台无构建（如 authelia 无 Windows）→ 明确报错并
+  提示 WSL2/Docker/apt；
+- 内置工具表：ngrok（equinox）、frpc/cloudflared/authelia（GitHub + ghproxy）、
+  localtunnel（npm/npmmirror）；nginx/redis 走系统（无下载，apt 提示）；
+- CLI `tools list/resolve/download`；库 `st.tools.ensure/resolve/list`。
+
+### 4.9 internal.ts —— 辅助进程端口注册表
 
 - 框架 spawn 的每个辅助进程（nginx/authelia/redis）成功后，把 `{ role, pid,
   port, addresses }` 写入 `internalPorts`（内存 + state.json）；

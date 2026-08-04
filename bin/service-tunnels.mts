@@ -13,6 +13,7 @@ function usage(): void {
   daemon start [--foreground] | stop | status | logs
   discover [--pid <pid>] [--json] [--refresh]
   internal list [--json]
+  tools list | resolve <name> | download <name> | path <name>
   status [--json]
   config path | show
 
@@ -139,6 +140,32 @@ async function main(): Promise<void> {
         default:
           usage();
           process.exit(2);
+      }
+      break;
+    }
+
+    case "tools": {
+      const op = cmd[1] ?? "list";
+      if (op === "list") {
+        jsonOut(st.tools.list());
+      } else if (op === "resolve" || op === "path") {
+        const name = cmd[2];
+        if (!name) {
+          console.error("tools " + op + " <name>");
+          process.exit(2);
+        }
+        jsonOut({ name, path: st.tools.resolve(name) });
+      } else if (op === "download") {
+        const name = cmd[2];
+        if (!name) {
+          console.error("tools download <name>");
+          process.exit(2);
+        }
+        const path = await st.tools.ensure(name);
+        jsonOut({ name, path });
+      } else {
+        usage();
+        process.exit(2);
       }
       break;
     }
