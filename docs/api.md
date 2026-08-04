@@ -25,6 +25,23 @@ await st.shutdown();  // 清理全部子进程（进程退出时也会自动清�
 
 ## 命名空间
 
+### st.proxy（泛域名反代）
+
+```ts
+create(opts?: {
+  port?: number;              // 监听端口（默认 4180，0=随机）
+  suffixes?: string[];        // 虚拟主机后缀（默认 [".pi.localhost"]）
+  allowedHosts?: string[];    // 公网部署域名（<port>.<域名> 同样接受）
+  basePath?: string;          // 转发前剥离（/dev/foo → /foo）
+  password?: string;          // Basic 密码门（空=关）
+  rootPid?: number;           // 发现根 pid（CLI 场景指定用户 shell/pi 进程）
+  refresh?: boolean;          // 每次白名单检查强制重扫（绕过 TTL）
+}): http.Server
+parseHost(host): ServiceHostMatch | null   // "<port>.<suffix>" → { port, suffix }
+```
+白名单 = 发现缓存：未发现的端口 403；SSE/流式天然支持（管道无缓冲）；
+WebSocket upgrade 转发（101 + 数据帧）；Host 保留（应用生成绝对 URL 用虚拟主机名）。
+
 ### st.discovery
 
 ```ts

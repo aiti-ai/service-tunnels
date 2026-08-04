@@ -14,6 +14,7 @@ function usage(): void {
   discover [--pid <pid>] [--json] [--refresh]
   internal list [--json]
   tools list | resolve <name> | download <name> | path <name>
+  proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
   status [--json]
   config path | show
 
@@ -53,6 +54,18 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--pid":
         args.pid = Number(argv[++i]);
+        break;
+      case "--port":
+        args.port = Number(argv[++i]);
+        break;
+      case "--suffix":
+        args.suffix = argv[++i];
+        break;
+      case "--base-path":
+        args.basePath = argv[++i];
+        break;
+      case "--password":
+        args.password = argv[++i];
         break;
       default:
         if (a.startsWith("-")) {
@@ -163,6 +176,38 @@ async function main(): Promise<void> {
         }
         const path = await st.tools.ensure(name);
         jsonOut({ name, path });
+      } else {
+        usage();
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "proxy": {
+      const op = cmd[1] ?? "";
+      if (op === "start") {
+        const port = Number(args.port ?? 4180);
+        const suffix = args.suffix ?? ".pi.localhost";
+        const basePath = args.basePath ?? "";
+        const password = args.password ?? "";
+        const server = st.proxy.create({
+          port,
+          suffixes: suffix.split(",").map((s2: string) => (s2.startsWith(".") ? s2 : `.${s2}`)),
+          basePath,
+          password,
+          rootPid: args.pid,
+          refresh: args.refresh,
+        });
+        server.once("listening", () => {
+          const addr = server.address();
+          const p = typeof addr === "object" && addr ? addr.port : port;
+          process.stdout.write(`proxy listening on 127.0.0.1:${p} (suffix: ${suffix})\n`);
+        });
+        if (!args.foreground) {
+          // non-foreground: spawn as child of the daemon in a later milestone;
+          // M2 keeps the server in this process.
+        }
+        await new Promise(() => {});
       } else {
         usage();
         process.exit(2);

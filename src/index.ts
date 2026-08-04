@@ -23,6 +23,7 @@ import {
 } from "./daemon.ts";
 import { readState } from "./state.ts";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS } from "./tools.ts";
+import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -38,6 +39,8 @@ export {
   stripBasePath,
 } from "./discovery.ts";
 export { findOnPath } from "./tools.ts";
+export { createProxyServer, parseServiceHost, validBasicAuth, authHeader } from "./proxy.ts";
+export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 
 export { InternalRegistry } from "./internal.ts";
 
@@ -84,6 +87,11 @@ export interface ServiceTunnels {
     resolve(name: string): string | null;
     /** All known tools + current resolution + source. */
     list(): ToolResolution[];
+  };
+  proxy: {
+    /** Create a wildcard-host reverse proxy (allow-list = discovery cache). */
+    create(opts?: ProxyOptions): import("http").Server;
+    parseHost(host: string | undefined): import("./proxy.ts").ServiceHostMatch | null;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -146,6 +154,19 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
                 : null;
           return { name, path: onPath, source };
         }),
+    },
+    proxy: {
+      create: (o: Omit<ProxyOptions, "internal"> = {}) =>
+        createProxyServer({
+          ...o,
+          isPortAllowed:
+            o.isPortAllowed ??
+            ((port: number) =>
+              getServicePorts(internal, { force: o.refresh, rootPid: o.rootPid }).some(
+                (p) => p.port === port,
+              )),
+        }),
+      parseHost: (host: string | undefined) => parseServiceHost(host, [".pi.localhost"]),
     },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
   };
