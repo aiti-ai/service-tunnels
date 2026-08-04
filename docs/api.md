@@ -64,8 +64,8 @@ hydrate(): void                                 // 重启后从 state.json 恢�
 ### st.auth（认证编排 + 插件 + 用户管理）
 
 用户管理是 **provider 能力**（`UserManager` 接口）：任何维护本地用户库的
-provider 都支持（authelia `users_database.yml`、basic `htpasswd`、插件可实现
-同一接口）。`provider` 参数支持 `"all"`（默认，所有支持用户管理的 provider）、
+provider 都支持（authelia `users_database.yml`、basic `htpasswd`、portal
+`users.json`、插件可实现同一接口）。`provider` 参数支持 `"all"`（默认，所有支持用户管理的 provider）、
 单个类型或数组。
 
 ```ts
@@ -79,6 +79,7 @@ removeUser(name, provider?): Promise<string[]>
 ```
 - 持久化：authelia → `cacheDir/tmp/authelia/users_database.yml`（argon2）；
   basic → `cacheDir/tmp/basic/htpasswd`（APR1，nginx auth_basic 兼容）；
+  portal → `cacheDir/tmp/portal/users.json`（scrypt）；
 - 仅当 provider 运行中才 validate+重启，未运行时文件写入下次启动生效；
 - CLI：`auth user list|add|set-password|remove <name> [--provider basic|authelia|all] [--password] [--display-name]`
   （未给 --password 时自动生成并在返回中输出一次；返回含 providers 列表）；
