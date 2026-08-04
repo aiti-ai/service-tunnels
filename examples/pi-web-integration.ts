@@ -60,3 +60,9 @@ export function connectPiWebServices(opts?: {
 // });
 // const ports = services.listServices();          // services dialog
 // const { url } = await services.expose(5173, { auth: true }); // one-click
+//
+// ACTUAL pi-web integration (landed 2026-08-04):
+//   pi-web/lib/service-tunnels-integration.ts  — process-level singleton
+//   pi-web/app/api/service-tunnels/route.ts     — GET status / POST expose
+// pi-web imports the sibling checkout's source directly (next dev SWC
+// compiles the TS); a released integration should use the npm package.
