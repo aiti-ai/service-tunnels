@@ -6,7 +6,13 @@ import {
   readdirSync,
   statSync,
   rmSync,
+  renameSync,
+  symlinkSync,
+  openSync,
+  readSync,
+  closeSync,
 } from "fs";
+import { createRequire } from "module";
 import { execFileSync } from "child_process";
 import { platform, arch, tmpdir } from "os";
 import { join } from "path";
@@ -32,7 +38,8 @@ import { mkdtempSync } from "fs";
 export type ToolKind = "binary" | "tar.gz" | "zip" | "npm";
 
 export interface DownloadSpec {
-  /** Official URL template: {version} {platform} {arch} are substituted. */
+  /** Official URL template: {version} {platform} {arch} {ext} {exe} are
+   *  substituted ({ext} = tgz|zip per platform, {exe} = .exe on win32). */
   official: string;
   /** China-mirror templates. "{official}" expands to the official URL
    *  (ghproxy-style prefixing) — or a plain template as well. */
@@ -77,16 +84,19 @@ export class ToolError extends Error {
 }
 
 /** Official + mirror URLs for the current platform, in attempt order. */
-function candidateUrls(
+export function candidateUrls(
   def: ToolDef,
   opts: ToolRegistryOptions,
 ): Array<{ url: string; kind: ToolKind; label: string }> {
   const spec = def.download;
+  const isWin = platform() === "win32";
   const fill = (t: string) =>
     t
       .replaceAll("{version}", def.version ?? "")
       .replaceAll("{platform}", platform())
-      .replaceAll("{arch}", arch());
+      .replaceAll("{arch}", arch())
+      .replaceAll("{ext}", isWin ? "zip" : "tgz")
+      .replaceAll("{exe}", isWin ? ".exe" : "");
 
   const configured = opts.toolMirrors?.[def.name] ?? opts.toolMirrors?.default;
   const mirrors = configured ?? spec.mirrors ?? [];
@@ -115,8 +125,13 @@ export function findOnPath(name: string): string | null {
   }
 }
 
+/** Cache location for a downloaded tool. Windows binaries carry .exe. */
 function downloadedPath(cacheDir: string, name: string): string {
-  return join(cacheDir, "bin", name);
+  const base = join(cacheDir, "bin");
+  const plain = join(base, name);
+  const exe = join(base, `${name}.exe`);
+  if (process.platform === "win32") return existsSync(plain) ? plain : exe;
+  return plain;
 }
 
 export async function downloadTo(
@@ -156,17 +171,92 @@ export async function downloadTo(
   }
 }
 
-async function extractArchive(
+/** Extract .tar.gz (tar -xzf) or .zip (unzip/tar/PowerShell) into work. */
+export function extractInto(archive: string, work: string, kind: ToolKind): void {
+  if (kind === "tar.gz") {
+    execFileSync("tar", ["-xzf", archive, "-C", work], { stdio: "ignore" });
+    return;
+  }
+  if (kind === "zip") {
+    if (process.platform === "win32") {
+      execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Force -Path '${archive}' -DestinationPath '${work}'`],
+        { stdio: "ignore" },
+      );
+      return;
+    }
+    if (process.platform === "darwin") {
+      execFileSync("ditto", ["-x", "-k", archive, work], { stdio: "ignore" });
+      return;
+    }
+    // Linux: unzip → python3 -m zipfile → bsdtar, whichever exists
+    for (const [cmd, args] of [
+      ["unzip", ["-q", archive, "-d", work]],
+      ["python3", ["-m", "zipfile", "-e", archive, work]],
+      ["tar", ["-xf", archive, "-C", work]],
+    ] as const) {
+      try {
+        execFileSync(cmd, args, { stdio: "ignore" });
+        return;
+      } catch {
+        // try next
+      }
+    }
+    throw new ToolError("zip extraction requires unzip, python3, or bsdtar");
+  }
+  throw new ToolError(`unsupported archive kind: ${kind}`);
+}
+
+/** Sniff the archive type from its magic bytes (PK = zip, 1f8b = gzip). */
+export function detectArchiveKind(archive: string, fallback: ToolKind): ToolKind {
+  try {
+    const fd = openSync(archive, "r");
+    const buf = Buffer.alloc(4);
+    readSync(fd, buf, 0, 4, 0);
+    closeSync(fd);
+    if (buf[0] === 0x50 && buf[1] === 0x4b) return "zip"; // "PK"
+    if (buf[0] === 0x1f && buf[1] === 0x8b) return "tar.gz"; // gzip magic
+  } catch {
+    // unreadable → fallback
+  }
+  return fallback;
+}
+
+/** Copy the tool out of the archive and locate its executable. */
+export async function extractArchive(
   archive: string,
   def: ToolDef,
   destDir: string,
 ): Promise<string> {
   mkdirSync(destDir, { recursive: true });
+  const isWin = platform() === "win32";
+  const kind = detectArchiveKind(archive, def.download.kind);
   const strip = def.download.strip ?? 1;
   const work = mkdtempSync(join(tmpdir(), "st-tool-"));
   try {
-    execFileSync("tar", ["-xzf", archive, "-C", work, `--strip-components=${strip}`], { stdio: "ignore" });
+    extractInto(archive, work, kind);
+    // strip leading components by moving the (single) top-level dir's contents up
+    if (strip > 0) {
+      const top = readdirSync(work)[0];
+      if (top) {
+        const topPath = join(work, top);
+        const st = statSyncSafe(topPath);
+        if (st?.isDirectory()) {
+          for (const entry of readdirSync(topPath)) {
+            const from = join(topPath, entry);
+            const to = join(work, entry);
+            try {
+              renameSync(from, to);
+            } catch {
+              copySync(from, to);
+            }
+          }
+        }
+      }
+    }
     const binName = def.download.binPath ?? def.name;
+    const exeName = isWin ? `${binName}.exe` : binName;
     // find the executable under work (first matching basename)
     const candidates: string[] = [];
     const walk = (dir: string) => {
@@ -178,26 +268,53 @@ async function extractArchive(
       }
       for (const entry of entries) {
         const full = join(dir, entry);
-        let st;
-        try {
-          st = statSync(full);
-        } catch {
+        const st = statSyncSafe(full);
+        if (st?.isDirectory()) {
+          walk(full);
           continue;
         }
-        if (entry === binName || entry.startsWith(`${binName}.`)) candidates.push(full);
-        if (st.isDirectory()) walk(full);
+        if (entry === binName || entry === exeName || entry.startsWith(`${binName}.`)) {
+          candidates.push(full);
+        }
       }
     };
     walk(work);
     const hit = candidates.sort((a, b) => a.length - b.length)[0];
     if (!hit) throw new ToolError(`cannot locate ${binName} inside ${archive}`);
-    const dest = join(destDir, def.name);
-    execFileSync("cp", [hit, dest], { stdio: "ignore" });
-    chmodSync(dest, 0o755);
+    const dest = join(destDir, isWin ? `${def.name}.exe` : def.name);
+    copySync(hit, dest);
+    try {
+      chmodSync(dest, 0o755);
+    } catch {
+      // Windows chmod is a no-op / may throw on some filesystems
+    }
     return dest;
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+}
+
+function statSyncSafe(p: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** fs.promises.copyFile wrapped synchronously (tiny files, fine). */
+function copySync(from: string, to: string): void {
+  const { copyFileSync } = requireFs();
+  copyFileSync(from, to);
+}
+
+let _fsCache: typeof import("fs") | null = null;
+function requireFs(): typeof import("fs") {
+  if (!_fsCache) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    _fsCache = createRequire(import.meta.url)("fs") as typeof import("fs");
+  }
+  return _fsCache;
 }
 
 /** Ensure a tool is available locally: PATH > cached > download. Returns path. */
@@ -236,7 +353,6 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
   let lastErr: Error | null = null;
   for (const cand of urls) {
   const archive = `${dest}.dl-${cand.label}`;
-  console.error("[dbg] trying", cand.label, cand.url);
   try {
     await downloadTo(cand.url, archive, timeoutMs);
   } catch (err) {
@@ -245,7 +361,6 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
   }
   try {
     const final = await extractArchive(archive, def, join(opts.cacheDir, "bin"));
-    console.error("[dbg] extracted to", final);
     rmSync(archive, { force: true });
     if (def.verifyArgs) {
       try {
@@ -283,8 +398,17 @@ async function ensureNpmTool(def: ToolDef, opts: ToolRegistryOptions): Promise<s
   }
   const bin = join(opts.cacheDir, "npm", "node_modules", ".bin", def.name);
   if (!existsSync(bin)) throw new ToolError(`${def.name}: npm install produced no bin`);
-  // symlink into cacheDir/bin so resolution is uniform
-  execFileSync("ln", ["-sf", bin, dest], { stdio: "ignore" });
+  // link into cacheDir/bin so resolution is uniform (symlink on POSIX, copy on
+  // Windows where symlinks need privileges)
+  if (process.platform === "win32") {
+    copySync(bin, dest);
+  } else {
+    try {
+      symlinkSync(bin, dest);
+    } catch {
+      copySync(bin, dest);
+    }
+  }
   return dest;
 }
 
@@ -303,9 +427,10 @@ export const TOOLS: Record<string, ToolDef> = {
     version: "3.19.1",
     platforms: ["linux", "darwin", "win32"],
     download: {
-      official: "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{platform}-{arch}.tgz",
+      // equinox.io ships .tgz on POSIX, .zip on Windows ({ext} handles it)
+      official: "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{platform}-{arch}.{ext}",
       // equinox.io has no GitHub mirror; operators can configure toolMirrors.ngrok
-      kind: "tar.gz",
+      kind: "tar.gz", // kind is re-selected by ext at extraction time
       binPath: "ngrok",
     },
     verifyArgs: ["version"],
@@ -316,7 +441,7 @@ export const TOOLS: Record<string, ToolDef> = {
     platforms: ["linux", "darwin", "win32"],
     download: {
       official:
-        "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.tar.gz",
+        "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
       mirrors: GH_MIRRORS,
       kind: "tar.gz",
       binPath: "frpc",
@@ -328,7 +453,8 @@ export const TOOLS: Record<string, ToolDef> = {
     version: "latest",
     platforms: ["linux", "darwin", "win32"],
     download: {
-      official: "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{platform}-{arch}",
+      official:
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{platform}-{arch}{exe}",
       mirrors: GH_MIRRORS,
       kind: "binary",
     },

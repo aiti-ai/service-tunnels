@@ -209,6 +209,11 @@
 - 下载物：单二进制直接落 `cache/bin`；tar.gz 解压 strip 后取 binPath；`--version`
   校验；原子 rename 防半成品；平台无构建（如 authelia 无 Windows）→ 明确报错并
   提示 WSL2/Docker/apt；
+- **Windows 下载支持**：URL 模板 `{ext}` 自动展开 zip（win32）/tgz（POSIX）、
+  `{exe}` 展开 .exe（win32）；下载物按**魔数探测**解压方式（PK→zip、
+  1f8b→tar.gz），zip 解压依次回退 PowerShell Expand-Archive（win）/ ditto
+  （macOS）/ unzip → python3 → bsdtar（Linux）；`.exe` 缓存路径与 binPath
+  匹配；npm 工具 Windows 用拷贝代替 symlink（symlink 需管理员权限）；
 - 内置工具表：ngrok（equinox）、frpc/cloudflared/authelia（GitHub + ghproxy）、
   localtunnel（npm/npmmirror）；nginx/redis 走系统（无下载，apt 提示）；
 - CLI `tools list/resolve/download`；库 `st.tools.ensure/resolve/list`。

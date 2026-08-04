@@ -102,6 +102,7 @@ test("auto-download: official source, cached on second call", { timeout: 30_000 
     assert.equal(hits, 0, "no re-download when cached");
   } finally {
     server.close();
+    server.closeAllConnections?.();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -146,6 +147,8 @@ test("mirror fallback: official 404 → mirror succeeds", { timeout: 30_000 }, a
   } finally {
     deadServer.close();
     mirrorServer.close();
+    deadServer.closeAllConnections?.();
+    mirrorServer.closeAllConnections?.();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -189,6 +192,8 @@ test("preferMirrors downloads from mirror first", { timeout: 30_000 }, async () 
   } finally {
     mirrorServer.close();
     officialServer.close();
+    mirrorServer.closeAllConnections?.();
+    officialServer.closeAllConnections?.();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -210,5 +215,111 @@ test("unsupported platform gives a helpful error", async () => {
     );
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ── Windows 支持（zip 包、{ext}/{exe} URL 模板、.exe 匹配）────────────────────
+
+test("candidateUrls expands {ext} to zip on win32 and tgz elsewhere", async () => {
+  const { candidateUrls } = await loadSubject();
+  const def = {
+    name: "frpc",
+    version: "0.61.1",
+    platforms: ["linux", "darwin", "win32"],
+    download: {
+      official: "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
+      mirrors: [],
+      kind: "tar.gz",
+    },
+  };
+  const urls = candidateUrls(def, { cacheDir: "/tmp/x" });
+  const official = urls.find((u) => u.label === "official");
+  const expectedExt = process.platform === "win32" ? "zip" : "tgz";
+  assert.ok(
+    official.url.endsWith(`.${expectedExt}`),
+    `expected .${expectedExt}, got ${official.url}`,
+  );
+  assert.ok(official.url.includes("0.61.1"), "version substituted");
+});
+
+test("extractArchive handles a zip archive (Windows-style packaging)", async () => {
+  const { extractArchive } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  const work = mkdtempSync(join(tmpdir(), "st-zip-"));
+  try {
+    // build a zip with pkg-1.0.0/bin/ztool
+    const pkg = join(work, "pkg-1.0.0", "bin");
+    mkdirSync(pkg, { recursive: true });
+    const script = join(pkg, process.platform === "win32" ? "ztool.exe" : "ztool");
+    writeFileSync(script, "#!/bin/sh\necho z\n", "utf8");
+    chmodSync(script, 0o755);
+    const zipPath = join(work, "ztool.zip");
+    // zip via python (portable); bsdtar can also create but python is reliable
+    execFileSync("python3", ["-c", `
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED)
+z.write(sys.argv[2], arcname="pkg-1.0.0/bin/" + sys.argv[3])
+z.close()`, zipPath, script, process.platform === "win32" ? "ztool.exe" : "ztool"], { stdio: "ignore" });
+
+    const def = {
+      name: "ztool",
+      platforms: ["linux", "darwin", "win32"],
+      download: { official: "x.{ext}", kind: "tar.gz", binPath: "ztool", strip: 1 },
+    };
+    const dest = await extractArchive(zipPath, def, join(cacheDir, "bin"));
+    assert.ok(existsSync(dest), "extracted binary exists");
+    assert.equal(execFileSync(dest, [], { encoding: "utf8" }).trim(), "z");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("full flow: official .zip via {ext} template downloads and verifies", { timeout: 30_000 }, async () => {
+  const { ensureTool } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  const work = mkdtempSync(join(tmpdir(), "st-zip2-"));
+  try {
+    const pkg = join(work, "pkg-1.0.0", "bin");
+    mkdirSync(pkg, { recursive: true });
+    const script = join(pkg, "ztool2");
+    writeFileSync(script, "#!/bin/sh\necho z2\n", "utf8");
+    chmodSync(script, 0o755);
+    const zipPath = join(work, "ztool2.zip");
+    execFileSync("python3", ["-c", `
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED)
+z.write(sys.argv[2], arcname="pkg-1.0.0/bin/ztool2")
+z.close()`, zipPath, script], { stdio: "ignore" });
+    const file = require("node:fs").readFileSync(zipPath);
+
+    let gotPath = "";
+    const server = createServer((req, res) => {
+      gotPath = req.url;
+      res.writeHead(200, { "content-type": "application/zip" });
+      res.end(file);
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+    const def = {
+      name: "ztool2",
+      version: "1.0",
+      platforms: ["linux", "darwin", "win32"],
+      download: { official: `http://127.0.0.1:${port}/z-{version}.{ext}`, kind: "tar.gz", binPath: "ztool2" },
+    };
+    const installed = await ensureTool(def, { cacheDir });
+    // POSIX 上 {ext}=tgz 但服务器返回 zip —— ensureTool 按 kind 处理；
+    // 这里验证 URL 模板展开与可执行文件可跑。
+    assert.equal(gotPath, "/z-1.0.tgz");
+    assert.equal(execFileSync(installed, [], { encoding: "utf8" }).trim(), "z2");
+  } finally {
+    try {
+      server.close();
+      server.closeAllConnections?.();
+    } catch {
+      // already closed
+    }
+    rmSync(base, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
   }
 });

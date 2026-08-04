@@ -20,7 +20,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --test-force-exit",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
