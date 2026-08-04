@@ -327,11 +327,34 @@ test("defaultBasePath: random memorable name, basic gets none", async () => {
   const p = defaultBasePath("portal");
   assert.match(p, /^\/portal-[a-z]+-[a-z]+$/);
   const a = defaultBasePath("authelia");
-  assert.match(a, /^\/authelia-[a-z]+-[a-z]+$/);
+  assert.match(a, /^\/authelia[a-z0-9]{8}$/, "authelia path must be alnum only (no dashes)");
   assert.notEqual(p, a, "two exposes must not collide");
   assert.equal(defaultBasePath("basic"), "");
   assert.equal(defaultBasePath("oauth2-proxy"), "/oauth2-proxy", "oauth2-proxy keeps fixed path");
   // randomName always valid pair, no repeats in a decent sample
   const names = new Set(Array.from({ length: 50 }, () => randomName()));
   assert.ok(names.size > 30, "random names should vary");
+});
+
+test("basePath resolution: CLI/opts > config file > random", async () => {
+  const { defaultBasePath } = await import("../src/expose.ts");
+  const { readConfigFile } = await import("../src/config.ts");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "st-cfg-"));
+  // no config file → random name
+  assert.deepEqual(readConfigFile(dir), {});
+  assert.match(defaultBasePath("portal"), /^\/portal-[a-z]+-[a-z]+$/);
+  // config file: global basePath + per-provider
+  writeFileSync(join(dir, "service-tunnels.json"), JSON.stringify({
+    basePath: "/global-path",
+    basePathByProvider: { portal: "/login" },
+  }), "utf8");
+  const cfg = readConfigFile(dir);
+  assert.equal(cfg.basePath, "/global-path");
+  assert.equal(cfg.basePathByProvider?.portal, "/login");
+  // malformed → {}
+  writeFileSync(join(dir, "service-tunnels.json"), "not-json", "utf8");
+  assert.deepEqual(readConfigFile(dir), {});
 });

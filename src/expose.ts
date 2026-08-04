@@ -1,4 +1,5 @@
 import { GatewayController, type GatewayAuthMode } from "./gateway.ts";
+import { readConfigFile } from "./config.ts";
 import { RedisController } from "./redis.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 import { AuthRegistry } from "./auth-registry.ts";
@@ -96,11 +97,14 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   // ── auth flow: shared infrastructure ──────────────────────────────────────
   const pctx = providerCtx(ctx);
   const registry = ctx.auth ?? new AuthRegistry(pctx);
-  // basePath defaults to a per-expose random name so nginx (auth_request) and
-  // the provider agree AND generic paths (/{provider}) never collide with app
-  // routes on the same host (portal → /portal-sneaky-capybara). Callers may
-  // pass an explicit opts.basePath to pin it.
-  const basePath = opts.basePath ?? defaultBasePath(providerType);
+  // basePath resolution: explicit opts (library/CLI) > configDir/
+  // service-tunnels.json (basePath / basePathByProvider) > per-expose random
+  // name so nginx (auth_request) and the provider agree AND generic paths
+  // (/{provider}) never collide with app routes (portal → /portal-sneaky-capybara).
+  const cfgFile = readConfigFile(ctx.configDir);
+  const basePath = opts.basePath
+    ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+    ?? defaultBasePath(providerType);
   const provider: AuthProvider = registry.create(providerType, {
     port: opts.autheliaPort,
     basePath,
@@ -197,13 +201,23 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
  *  -free against app routes; basic auth needs no base path. */
 export function defaultBasePath(providerType: string): string {
   if (providerType === "basic") return "";
-  // portal/authelia support dynamic base paths → random memorable name avoids
-  // clashing with app routes. oauth2-proxy has its own fixed /oauth2 endpoints
-  // wired by the gateway, so it keeps a stable path.
-  if (providerType === "portal" || providerType === "authelia") {
+  if (providerType === "portal") {
+    // memorable random name avoids clashing with app routes
     return `/${providerType}-${randomName()}`;
   }
+  if (providerType === "authelia") {
+    // authelia's server.address path allows ONLY [a-z0-9] — no dashes
+    return `/${providerType}${randomAlnum(8)}`;
+  }
+  // oauth2-proxy has its own fixed /oauth2 endpoints wired by the gateway
   return `/${providerType}`;
+}
+
+const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
+export function randomAlnum(len: number): string {
+  let out = "";
+  for (let i = 0; i < len; i++) out += ALNUM[Math.floor(Math.random() * ALNUM.length)];
+  return out;
 }
 
 const BASE_ADJECTIVES = [

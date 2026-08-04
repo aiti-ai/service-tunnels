@@ -373,6 +373,7 @@ async function main(): Promise<void> {
         tunnelType: args.tunnel,
         tunnelName: args.name,
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
+        basePath: args.basePath,
       }, 90_000);
       jsonOut(res);
       break;

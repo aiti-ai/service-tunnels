@@ -37,14 +37,28 @@ import { mkdtempSync } from "fs";
 
 export type ToolKind = "binary" | "tar.gz" | "zip" | "npm";
 
+/** Node os.arch() → GitHub release asset arch naming. */
+const ARCH_ALIAS: Record<string, string> = {
+  x64: "amd64",
+  ia32: "386",
+  arm: "arm",
+  arm64: "arm64",
+  riscv64: "riscv64",
+  ppc64: "ppc64le",
+  s390x: "s390x",
+};
+
 export interface DownloadSpec {
   /** Official URL template: {version} {platform} {arch} {ext} {exe} are
-   *  substituted ({ext} = tgz|zip per platform, {exe} = .exe on win32). */
+   *  substituted ({arch} = amd64/arm64/386… per platform,
+   *  {ext} = exts.posix|win default tgz|zip, {exe} = .exe on win32). */
   official: string;
   /** China-mirror templates. "{official}" expands to the official URL
    *  (ghproxy-style prefixing) — or a plain template as well. */
   mirrors?: string[];
   kind: ToolKind;
+  /** Per-platform extension for {ext} (default: tgz on POSIX, zip on win32). */
+  exts?: { posix: string; win: string };
   /** Path of the executable inside an archive (default: archive basename). */
   binPath?: string;
   /** Strip leading dirs when extracting (tarballs). */
@@ -112,8 +126,11 @@ export function candidateUrls(
     t
       .replaceAll("{version}", def.version ?? "")
       .replaceAll("{platform}", platform())
-      .replaceAll("{arch}", arch())
-      .replaceAll("{ext}", isWin ? "zip" : "tgz")
+      .replaceAll("{arch}", ARCH_ALIAS[arch()] ?? arch())
+      .replaceAll(
+        "{ext}",
+        isWin ? (spec.exts?.win ?? "zip") : (spec.exts?.posix ?? "tgz"),
+      )
       .replaceAll("{exe}", isWin ? ".exe" : "");
 
   const configured = opts.toolMirrors?.[def.name] ?? opts.toolMirrors?.default;
@@ -477,6 +494,7 @@ export const TOOLS: Record<string, ToolDef> = {
         "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
       mirrors: GH_MIRRORS,
       kind: "tar.gz",
+      exts: { posix: "tar.gz", win: "zip" },
       binPath: "frpc",
     },
     verifyArgs: ["-v"],
@@ -502,6 +520,7 @@ export const TOOLS: Record<string, ToolDef> = {
         "https://github.com/authelia/authelia/releases/download/v{version}/authelia-v{version}-{platform}-{arch}.tar.gz",
       mirrors: GH_MIRRORS,
       kind: "tar.gz",
+      exts: { posix: "tar.gz", win: "zip" },
       binPath: "authelia",
     },
     verifyArgs: ["--version"],
@@ -522,6 +541,7 @@ export const TOOLS: Record<string, ToolDef> = {
         "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz",
       mirrors: GH_MIRRORS,
       kind: "tar.gz",
+      exts: { posix: "tar.gz", win: "zip" },
       binPath: "oauth2-proxy",
     },
     verifyArgs: ["--version"],

@@ -1,5 +1,6 @@
 import { homedir } from "os";
 import { join } from "path";
+import { readFileSync } from "fs";
 
 /**
  * Directory resolution — precedence: constructor args > env vars
@@ -16,6 +17,25 @@ export interface ServiceTunnelsDirs {
 export interface DirOptions {
   configDir?: string;
   cacheDir?: string;
+}
+
+export interface ServiceTunnelsConfigFile {
+  /** Global default base path override (expose --base-path wins over this). */
+  basePath?: string;
+  /** Per-provider base path override, e.g. { portal: "/login" }. */
+  basePathByProvider?: Record<string, string>;
+}
+
+/** Read configDir/service-tunnels.json (loose: missing/malformed → {}). */
+export function readConfigFile(configDir: string): ServiceTunnelsConfigFile {
+  try {
+    const raw = readFileSync(join(configDir, "service-tunnels.json"), "utf8");
+    const v = JSON.parse(raw) as ServiceTunnelsConfigFile;
+    if (v && typeof v === "object") return v;
+  } catch {
+    // missing or malformed → defaults
+  }
+  return {};
 }
 
 const ENV_CONFIG = "SERVICE_TUNNELS_CONFIG";
