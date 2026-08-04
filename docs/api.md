@@ -80,6 +80,10 @@ removeUser(name, provider?): Promise<string[]>
 - 持久化：authelia → `cacheDir/tmp/authelia/users_database.yml`（argon2）；
   basic → `cacheDir/tmp/basic/htpasswd`（APR1，nginx auth_basic 兼容）；
   portal → `cacheDir/tmp/portal/users.json`（scrypt）；
+- **portal 登录传输加密**：每次登录页下发一次性 RSA-2048 密钥对（5 分钟 TTL），
+  前端 WebCrypto RSA-OAEP-SHA256 加密密码后提交——**密码明文永不出浏览器**
+  （隧道边缘如 cloudflared/Cloudflare 只见密文）；keyId 单次使用，抓包重放
+  直接 401；无 JS 客户端（curl/API）走明文 `password` 字段兼容路径；
 - 仅当 provider 运行中才 validate+重启，未运行时文件写入下次启动生效；
 - CLI：`auth user list|add|set-password|remove <name> [--provider basic|authelia|all] [--password] [--display-name]`
   （未给 --password 时自动生成并在返回中输出一次；返回含 providers 列表）；

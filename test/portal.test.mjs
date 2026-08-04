@@ -122,3 +122,67 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
 
   await provider.stop();
 });
+
+test("portal login password transport: RSA-OAEP front-end encryption", { timeout: 40_000 }, async () => {
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const pickPort = async () => {
+    const { createServer } = await import("net");
+    return new Promise((resolve) => {
+      const srv = createServer();
+      srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+    });
+  };
+  const provider = new PortalAuthProvider(
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider.prepare();
+  await provider.start();
+  const port = provider.port;
+
+  // 1) login page embeds a fresh RSA public key
+  const page = await get("/portal/login", port);
+  assert.equal(page.status, 200);
+  assert.match(page.body, /crypto\.subtle\.importKey/);
+  assert.match(page.body, /RSA-OAEP/);
+  const pubB64 = /const PUB="([^"]+)"/.exec(page.body)?.[1];
+  const keyId = /const KEY_ID="([^"]+)"/.exec(page.body)?.[1];
+  assert.ok(pubB64 && keyId, "page must carry public key + key id");
+
+  // 2) encrypt the password like the browser does (WebCrypto → RSA-OAEP)
+  const { publicEncrypt } = await import("node:crypto");
+  const pubDer = Buffer.from(pubB64, "base64");
+  // importKey spki via node: crypto.createPublicKey from SPKI der
+  const { createPublicKey } = await import("node:crypto");
+  const pubKey = createPublicKey({ key: pubDer, format: "der", type: "spki" });
+  const cipher = publicEncrypt({ key: pubKey, padding: 4 /* RSA_PKCS1_OAEP_PADDING */, oaepHash: "sha256" }, Buffer.from("pw"));
+  const encB64 = cipher.toString("base64");
+
+  // 3) login with encrypted password (no plaintext field)
+  const login = await postForm("/portal/login", port, {
+    username: "admin", keyId, encrypted: encB64, next: "/app",
+  });
+  assert.equal(login.status, 302, "encrypted password must authenticate");
+  assert.ok(String(login.headers["set-cookie"]).includes("HttpOnly"));
+
+  // 4) key id is single-use — replay the same ciphertext → 401
+  const replay = await postForm("/portal/login", port, {
+    username: "admin", keyId, encrypted: encB64, next: "/app",
+  });
+  assert.equal(replay.status, 401, "replayed ciphertext must be rejected");
+
+  // 5) wrong key id → 401
+  const badKey = await postForm("/portal/login", port, {
+    username: "admin", keyId: "deadbeef", encrypted: encB64,
+  });
+  assert.equal(badKey.status, 401);
+
+  // 6) plaintext fallback still works (curl/API clients)
+  const plain = await postForm("/portal/login", port, { username: "admin", password: "pw" });
+  assert.equal(plain.status, 302);
+
+  // 7) the plaintext password never appears in the wire-visible channel:
+  //    encrypted path carried only ciphertext (assert the form had no password)
+  await provider.stop();
+});

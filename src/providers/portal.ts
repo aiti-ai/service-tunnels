@@ -309,7 +309,7 @@ function waitTcp(port: number, timeoutMs: number): Promise<void> {
 function writeServerScript(file: string, basePath: string): void {
   const script = `import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
-import { createHmac, scryptSync, randomBytes, timingSafeEqual } from "crypto";
+import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants } from "crypto";
 
 const PORT = Number(process.env.PORT);
 const SECRET = process.env.SECRET;
@@ -361,19 +361,75 @@ function rateLimited(ip) {
   return win.length >= 5;
 }
 
-function html(next, error) {
+// —— login password transport: RSA-OAEP front-end encryption ————————
+// The tunnel edge (cloudflared/Cloudflare) sees HTTP POST bodies, so the
+// plaintext password would leave this machine. Instead every login page
+// issues a fresh one-time RSA keypair (2048-bit, 5 min TTL); the browser
+// encrypts the password with the public key (WebCrypto) and we decrypt with
+// the private key that NEVER leaves this process. Key ids are single-use —
+// a captured ciphertext cannot be replayed.
+const rsaKeys = new Map();
+const RSA_TTL_MS = 5 * 60_000;
+function issueRsaKey() {
+  cleanupRsaKeys();
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const keyId = randomBytes(8).toString("hex");
+  rsaKeys.set(keyId, { privateKey, expires: Date.now() + RSA_TTL_MS });
+  return { keyId, publicKey: publicKey.export({ type: "spki", format: "der" }).toString("base64") };
+}
+function cleanupRsaKeys() {
+  const now = Date.now();
+  for (const [id, k] of rsaKeys) if (k.expires < now) rsaKeys.delete(id);
+}
+function decryptPassword(keyId, encryptedB64) {
+  const pair = rsaKeys.get(keyId);
+  rsaKeys.delete(keyId); // one-time use — replay of a captured ciphertext fails
+  if (!pair || pair.expires < Date.now()) throw new Error("stale or unknown key id");
+  try {
+    return privateDecrypt(
+      { key: pair.privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+      Buffer.from(encryptedB64, "base64"),
+    ).toString("utf8");
+  } catch {
+    throw new Error("decryption failed");
+  }
+}
+
+function html(next, error, keyId, publicKey) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const enc = publicKey
+    ? '<script>'
+      + 'const PUB="' + publicKey + '";'
+      + 'const KEY_ID="' + keyId + '";'
+      + 'function b64ToBuf(b){const bin=atob(b);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}'
+      + 'document.addEventListener("DOMContentLoaded",async()=>{'
+      + 'const f=document.getElementById("login");'
+      + 'f.addEventListener("submit",async(e)=>{'
+      + 'e.preventDefault();'
+      + 'const pw=document.getElementById("pw").value;'
+      + 'const key=await crypto.subtle.importKey("spki",b64ToBuf(PUB),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);'
+      + 'const enc=new Uint8Array(await crypto.subtle.encrypt({name:"RSA-OAEP"},key,new TextEncoder().encode(pw)));'
+      + 'let b="";for(const x of enc)b+=String.fromCharCode(x);'
+      + 'document.getElementById("encrypted").value=btoa(b);'
+      + 'document.getElementById("keyId").value=KEY_ID;'
+      + 'document.getElementById("pw").value="";'
+      + 'f.submit();'
+      + '});});</script>'
+    : "";
   return '<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title>'
     + '<style>body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7}'
     + 'form{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem}'
     + 'h1{font-size:1.15rem;margin:0 0 1.2rem}label{display:block;font-size:.8rem;color:#666;margin:.8rem 0 .25rem}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px}'
     + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}</style>'
-    + '</head><body><form method="post" action="' + BASE + '/login">'
+    + '</head><body>' + enc
+    + '<form id="login" method="post" action="' + BASE + '/login">'
     + '<h1>Sign in to access this service</h1>'
     + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err
+    + '<input type="hidden" name="encrypted" id="encrypted">'
+    + '<input type="hidden" name="keyId" id="keyId">'
     + '<label>Username</label><input name="username" autocomplete="username" required autofocus>'
-    + '<label>Password</label><input name="password" type="password" autocomplete="current-password" required>'
+    + '<label>Password</label><input name="password" id="pw" type="password" autocomplete="current-password" required>'
     + '<button type="submit">Sign in</button></form></body></html>';
 }
 
@@ -407,8 +463,9 @@ createServer((req, res) => {
 
   if (url.pathname === BASE + "/login" && req.method === "GET") {
     const next = url.searchParams.get("next") || "/";
+    const { keyId, publicKey } = issueRsaKey();
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(html(next, ""));
+    res.end(html(next, "", keyId, publicKey));
     return;
   }
 
@@ -423,8 +480,20 @@ createServer((req, res) => {
       }
       const params = new URLSearchParams(body);
       const name = params.get("username") || "";
-      const password = params.get("password") || "";
       const next = params.get("next") || "/";
+      let password = params.get("password") || "";
+      // RSA-OAEP path (browser): decrypt with the one-time private key
+      const keyId = params.get("keyId") || "";
+      const encrypted = params.get("encrypted") || "";
+      if (encrypted && keyId) {
+        try {
+          password = decryptPassword(keyId, encrypted);
+        } catch {
+          res.writeHead(401, { "Content-Type": "text/html" });
+          res.end(html(next, "Session expired — please reload and try again."));
+          return;
+        }
+      }
       const users = loadUsers();
       const rec = users[name];
       if (!rec) {
