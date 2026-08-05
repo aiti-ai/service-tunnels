@@ -32,6 +32,10 @@ import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, Aut
 export interface PortalAuthProviderOptions {
   port?: number;
   basePath?: string;
+  /** Embedder's deployment base path (pi-web /dev): the DEFAULT post-login
+   *  redirect target (next) when the login form carries none — /dev/portal/...
+   *  deployments redirect to /dev instead of /. */
+  deployBasePath?: string;
   /** Bootstrap user (only created when the db is empty). */
   user?: { name: string; password: string; displayName?: string };
   /** Per-site storage dir (P1); default = cacheDir/tmp/portal. */
@@ -108,6 +112,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   #serverFile = "";
   #port = 0;
   #basePath = "/portal";
+  #deployBasePath = "";
   #secret = "";
   #proc: ReturnType<typeof spawn> | null = null;
   #creds = { name: "admin", password: "" };
@@ -124,6 +129,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     this.#serverFile = join(this.#dir, "server.mjs");
     this.#port = opts.port ?? 0;
     this.#basePath = opts.basePath ?? "/portal";
+    this.#deployBasePath = (opts.deployBasePath ?? "").replace(/\/+$/, "");
     this.site = opts.site ?? "default";
     // per-instance random secret — NOT persisted: exposes are lifecycle-only,
     // so a restart kills the tunnels and the public hosts change. A persisted
@@ -159,7 +165,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   async prepare(): Promise<AuthProviderStatus> {
     mkdirSync(this.#dir, { recursive: true });
-    writeServerScript(this.#serverFile, this.#basePath);
+    writeServerScript(this.#serverFile, this.#basePath, this.#deployBasePath);
     if (!existsSync(this.#usersFile)) {
       await this.addUser(this.#creds.name, this.#creds.password, this.#opts.user?.displayName ?? "Administrator");
       this.#ctx.log(`portal: bootstrapped initial user ${this.#creds.name}`);
@@ -179,6 +185,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
           SECRET: this.#secret,
           USERS_FILE: this.#usersFile,
           BASE_PATH: this.#basePath,
+          DEPLOY_BASE_PATH: this.#deployBasePath,
           SECURE: process.env.PORTAL_SECURE === "1" ? "1" : "",
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -429,7 +436,7 @@ function waitTcp(port: number, timeoutMs: number): Promise<void> {
 }
 
 /** The generated portal server (ESM, written to cacheDir/tmp/portal/server.mjs). */
-function writeServerScript(file: string, basePath: string): void {
+function writeServerScript(file: string, basePath: string, deployBasePath = ""): void {
   const script = `import { createServer } from "http";
 import { readFileSync, writeFileSync } from "fs";
 import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants } from "crypto";
@@ -438,6 +445,7 @@ const PORT = Number(process.env.PORT);
 const SECRET = process.env.SECRET;
 const USERS_FILE = process.env.USERS_FILE;
 const BASE = process.env.BASE_PATH || "/portal";
+const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
 const SECURE = process.env.SECURE === "1";
 const COOKIE = "st_portal_session";
 const TTL_MS = 7 * 24 * 3600 * 1000;
@@ -692,7 +700,7 @@ createServer((req, res) => {
   }
 
   if (url.pathname === BASE + "/login" && req.method === "GET") {
-    const next = url.searchParams.get("next") || "/";
+    const next = url.searchParams.get("next") || DEPLOY || "/";
     const { keyId, publicKey } = issueRsaKey();
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html(next, "", keyId, publicKey));
@@ -705,7 +713,7 @@ createServer((req, res) => {
     req.on("end", () => {
       const params = new URLSearchParams(body);
       const name = params.get("username") || "";
-      const next = params.get("next") || "/";
+      const next = params.get("next") || DEPLOY || "/";
       // brute-force gate: account/IP banned → 429 with Retry-After
       const bannedUntil = banState(name, ip);
       if (bannedUntil > Date.now()) {
@@ -762,7 +770,7 @@ createServer((req, res) => {
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const params = new URLSearchParams(body);
-      const next = params.get("next") || "/";
+      const next = params.get("next") || DEPLOY || "/";
       const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
         .find((c) => c.startsWith("st_portal_2fa="));
       const name = cookie ? verifySession(cookie.slice("st_portal_2fa=".length), "st_portal_2fa") : null;

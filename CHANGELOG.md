@@ -1,18 +1,10 @@
+## 0.2.40
+
+### portal 登录默认重定向跟随部署前缀
+- **portal provider 支持 `deployBasePath`**：登录表单无 `next` 时默认重定向到
+  部署前缀（pi-web `PI_WEB_BASE_PATH=/dev` → `/dev`；根部署保持 `/`）——
+  `/dev/portal/login` 部署下登录后不再跳到根路径
+- portal 生成的 server.mjs 通过 `DEPLOY_BASE_PATH` env 注入（模板无 `this`）；
+  expose / daemon 恢复路径均传入
+
 ## 0.2.39
-
-### 认证域/部署集成修正（pi-web 实战反馈）
-- **default 站用户库统一**：`expose --auth <provider>`（无 `--site`）不再隐含新站点——
-  认证域 = default 站（vhost label 带 provider 名，`8903-basic` 与 `auth user add
-  --provider basic` 同一用户库），修复登录无效
-- **exposes() 修正**：proxy/both 记录 running=true（binding 已注册即运行中）；
-  `tunnel-stop` 可移除 proxy binding（含 state.json 同步）
-- **baseDomain 三来源统一**：`createServiceTunnels({baseDomain, baseDomains})` API
-  参数 > env `SERVICE_TUNNELS_BASE_DOMAIN` > config base-domain（多域支持，首个
-  为主域）；CLI `--base-domain` 运行时覆盖主域且保留其余
-- **deployBasePath 合并**：`createServiceTunnels({deployBasePath})`（pi-web
-  `PI_WEB_BASE_PATH=/dev`）与 provider basePath 合并 → 登录路径 `/dev/portal/login`；
-  根部署保持 `/portal/login`；转发时剥离部署前缀
-- **`.localhost` 加入默认后缀**：`DEFAULT_SUFFIXES = [.st.localhost, .service-tunnel.localhost, .localhost]`
-  （本机零 DNS 配置的虚拟主机后缀，D4 门控不变）
-
-## 0.2.38

@@ -291,6 +291,7 @@ async function proxyExpose(
         ...unflattenParams(opts.providerParams ?? {}),
         ...(siteCfg?.providerParams ?? {}),
         basePath: providerType === "basic" ? "" : mergedBasePath,
+        deployBasePath: proxy.basePath || undefined,
         policy: opts.policy ?? siteCfg?.policy,
         user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
         sessionSecret: opts.sessionSecret,

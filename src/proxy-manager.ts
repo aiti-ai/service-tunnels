@@ -367,8 +367,11 @@ export class ProxyManager {
     // Merge the deployment base path under the provider base path when the
     // binding carries one (daemon-restored bindings without an instance yet).
     const deploy = this.#opts.basePath ?? "";
-    if (deploy && typeof params.basePath === "string" && params.basePath) {
-      params.basePath = `${deploy.replace(/\/+$/, "")}${params.basePath}`;
+    if (deploy) {
+      params.deployBasePath ??= deploy;
+      if (typeof params.basePath === "string" && params.basePath) {
+        params.basePath = `${deploy.replace(/\/+$/, "")}${params.basePath}`;
+      }
     }
     const provider = registry.create(binding.provider, params, binding.site);
     if (!provider.status().running) {
