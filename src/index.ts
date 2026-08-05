@@ -494,6 +494,15 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           return info;
         },
         stop: async (name: string) => {
+          const ex = exposes.get(name);
+          if (ex && !ex.tunnelName) {
+            // proxy-mode expose (no tunnel): drop the binding + record
+            proxy.removeBinding(ex.port, ex.label ?? "");
+            exposes.delete(name);
+            await unregisterExposeHost(name);
+            persistState();
+            return;
+          }
           await tm.stop(name);
           persistState();
           await unregisterExposeHost(name);
@@ -684,7 +693,9 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           loginUrl: m.loginUrl,
           protocol: m.protocol,
           url: tun?.url ?? null,
-          running: tun?.running ?? false,
+          // proxy-mode records have no tunnel process — "running" means the
+          // binding is enrolled (lazily starts its provider on first request).
+          running: tun?.running ?? Boolean(m.localUrl),
           pid: tun?.pid ?? null,
           accessLog: logs?.access ?? null,
           errorLog: logs?.error ?? null,
