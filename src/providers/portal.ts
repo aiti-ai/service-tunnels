@@ -165,7 +165,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   async prepare(): Promise<AuthProviderStatus> {
     mkdirSync(this.#dir, { recursive: true });
-    writeServerScript(this.#serverFile, this.#basePath, this.#deployBasePath);
+    writeServerScript(this.#serverFile, this.#basePath, this.#deployBasePath, this.site);
     if (!existsSync(this.#usersFile)) {
       await this.addUser(this.#creds.name, this.#creds.password, this.#opts.user?.displayName ?? "Administrator");
       this.#ctx.log(`portal: bootstrapped initial user ${this.#creds.name}`);
@@ -436,7 +436,7 @@ function waitTcp(port: number, timeoutMs: number): Promise<void> {
 }
 
 /** The generated portal server (ESM, written to cacheDir/tmp/portal/server.mjs). */
-function writeServerScript(file: string, basePath: string, deployBasePath = ""): void {
+function writeServerScript(file: string, basePath: string, deployBasePath = "", site = "default"): void {
   const script = `import { createServer } from "http";
 import { readFileSync, writeFileSync } from "fs";
 import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants } from "crypto";
@@ -447,7 +447,8 @@ const USERS_FILE = process.env.USERS_FILE;
 const BASE = process.env.BASE_PATH || "/portal";
 const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
 const SECURE = process.env.SECURE === "1";
-const COOKIE = "st_portal_session";
+const COOKIE = "st_portal${site === "default" ? "" : "_" + site}_session";
+const COOKIE2 = "st_portal${site === "default" ? "" : "_" + site}_2fa";
 const TTL_MS = 7 * 24 * 3600 * 1000;
 
 function loadUsers() {
@@ -751,10 +752,10 @@ createServer((req, res) => {
       clearFailures(name, ip);
       // TOTP second factor when the user has one enrolled
       if (rec.totpSecret) {
-        const tmp = issueSession(name, "st_portal_2fa", 5 * 60_000);
+        const tmp = issueSession(name, COOKIE2, 5 * 60_000);
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
-          "Set-Cookie": "st_portal_2fa=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
+          "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
         });
         res.end(totpPage(next));
         return;
@@ -772,8 +773,8 @@ createServer((req, res) => {
       const params = new URLSearchParams(body);
       const next = params.get("next") || DEPLOY || "/";
       const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
-        .find((c) => c.startsWith("st_portal_2fa="));
-      const name = cookie ? verifySession(cookie.slice("st_portal_2fa=".length), "st_portal_2fa") : null;
+        .find((c) => c.startsWith(COOKIE2 + "="));
+      const name = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
       if (!name) {
         res.writeHead(401, { "Content-Type": "text/html" });
         res.end(totpPage(next, "Session expired — please sign in again."));

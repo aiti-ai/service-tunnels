@@ -278,6 +278,7 @@ ntp:
     const cookieHosts = hosts.length ? hosts : ["127.0.0.1"]; // authelia requires ≥1 cookie domain
     const portal = (h: string) => `https://${h}${this.#basePath}`;
     return `session:
+  name: '${this.site === "default" ? "authelia_session" : `authelia_${this.site}_session`}'
   secret: '${secret}'
   cookies:
 ${cookieHosts.map((h) => `    - domain: '${h}'\n      authelia_url: '${portal(h)}'`).join("\n")}

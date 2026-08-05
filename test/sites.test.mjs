@@ -123,23 +123,27 @@ test("P1 end-to-end: proxy vhosts of two sites authenticate against their OWN us
     const vDefault = `${port}-auth.st.localhost`;
     const vWeb = `${port}-pi-web.st.localhost`;
 
-    const login = async (vhost, user, pass) => {
+    // portal session cookies are named per auth realm (site), so nested
+    // proxies on the same host never collide: default → st_portal_session,
+    // site pi-web → st_portal_pi-web_session.
+    const cookieName = (site) => site === "default" ? "st_portal_session" : `st_portal_${site}_session`;
+    const login = async (vhost, user, pass, site = "default") => {
       const unauth = await get(tp, vhost, "/");
       assert.equal(unauth.status, 302, `${vhost} requires login`);
       const basePath = new URL(unauth.location).pathname.replace(/\/login$/, "");
       const res = await post(tp, vhost, `${basePath}/login`, `username=${user}&password=${pass}`);
-      return res.setCookie.match(/st_portal_session=([^;]+)/)?.[0];
+      return res.setCookie.match(new RegExp(cookieName(site) + "=([^;]+)"))?.[0];
     };
 
     // default site: only pw-default works
-    assert.ok(await login(vDefault, "alice", "pw-default"), "default site: alice/pw-default ok");
-    assert.equal(await login(vDefault, "alice", "pw-site"), undefined, "default site rejects pw-site");
+    assert.ok(await login(vDefault, "alice", "pw-default", "default"), "default site: alice/pw-default ok");
+    assert.equal(await login(vDefault, "alice", "pw-site", "default"), undefined, "default site rejects pw-site");
     // pi-web site: only pw-site works (opposite)
-    assert.ok(await login(vWeb, "alice", "pw-site"), "pi-web site: alice/pw-site ok");
-    assert.equal(await login(vWeb, "alice", "pw-default"), undefined, "pi-web site rejects pw-default");
+    assert.ok(await login(vWeb, "alice", "pw-site", "pi-web"), "pi-web site: alice/pw-site ok");
+    assert.equal(await login(vWeb, "alice", "pw-default", "pi-web"), undefined, "pi-web site rejects pw-default");
 
     // and with the right cookie each vhost passes through to the app
-    const cookieDefault = await login(vDefault, "alice", "pw-default");
+    const cookieDefault = await login(vDefault, "alice", "pw-default", "default");
     const authed = await get(tp, vDefault, "/secret", cookieDefault);
     assert.equal(authed.status, 200);
     assert.equal(authed.body, "echo:/secret");
@@ -175,7 +179,7 @@ test("P3 site domain: domainUrl + <port>.<site-domain> vhost serves the site aut
     // login through the site-domain vhost works (same site instance)
     const basePath = new URL(viaDomain.location).pathname.replace(/\/login$/, "");
     const loginRes = await post(tp, `${port}.web.pi.example.com`, `${basePath}/login`, "username=alice&password=pw");
-    assert.ok(loginRes.setCookie.includes("st_portal_session="), "login via site-domain vhost");
+    assert.ok(loginRes.setCookie.includes("st_portal_pi-web_session="), "login via site-domain vhost (per-site cookie)");
 
     // the labeled vhost still works too
     assert.equal((await get(tp, `${port}-pi-web.st.localhost`, "/")).status, 302);
