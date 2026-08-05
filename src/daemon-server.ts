@@ -398,6 +398,7 @@ const authRegistry = new AuthRegistry({
 // time; the daemon cannot see the caller's process tree anyway.
 const proxy = new ProxyManager({
   suffixes: DEFAULT_SUFFIXES,
+  baseDomains: (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean),
   registry: authRegistry,
   getSites: () => readSites(configDir),
   // persist enrollments; the arrow captures `proxy` (assigned after this

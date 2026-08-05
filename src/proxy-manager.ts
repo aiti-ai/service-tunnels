@@ -48,8 +48,12 @@ export interface ProxyManagerOptions {
    * User's wildcard-DNS base domain (e.g. "pi.example.com"): an ADDITIONAL
    * portless address `<port>[-<label>].<baseDomain>` is served (and returned
    * as baseUrl). The user reverse-proxies *.<baseDomain> to the proxy port.
+   * Multi-domain form: first entry is the primary (returned as baseUrl); the
+   * rest are served as extra suffixes (env SERVICE_TUNNELS_BASE_DOMAIN).
    */
   baseDomain?: string;
+  /** Extra base domains (env SERVICE_TUNNELS_BASE_DOMAIN, comma-separated). */
+  baseDomains?: string[];
   /** Strip this base path before forwarding. */
   basePath?: string;
   /** Optional Basic password gate for OPEN vhosts. */
@@ -88,6 +92,8 @@ export class ProxyManager {
   #server: Server | null = null;
   #port = 0;
   #baseDomain = "";
+  /** All base domains (primary first): config/CLI + env. */
+  #baseDomains: string[] = [];
   #bindings = new Map<string, ProxyBinding>(); // key `${port}:${label}`
   /** Vhosts already registered with their provider/gateway (avoid re-register).
    *  Key `${port}:${label}:${vhost}` — one binding may serve multiple hosts
@@ -100,6 +106,10 @@ export class ProxyManager {
     this.#opts = opts;
     this.#gateway = opts.gateway ?? null;
     this.#baseDomain = (opts.baseDomain ?? "").replace(/^\./, "");
+    this.#baseDomains = [
+      ...(this.#baseDomain ? [this.#baseDomain] : []),
+      ...(opts.baseDomains ?? []).map((d) => d.replace(/^\./, "")).filter((d) => d && d !== this.#baseDomain),
+    ];
   }
 
   get port(): number {
@@ -165,10 +175,12 @@ export class ProxyManager {
     return this.#baseDomain;
   }
 
-  /** All accepted suffixes (default + the base domain + registered site domains). */
+  /** All accepted suffixes (default + base domains + registered site domains). */
   get #allSuffixes(): string[] {
     const out = [...(this.#opts.suffixes ?? DEFAULT_SUFFIXES)];
-    if (this.#baseDomain && !out.includes(`.${this.#baseDomain}`)) out.push(`.${this.#baseDomain}`);
+    for (const d of this.#baseDomains) {
+      if (d && !out.includes(`.${d}`)) out.push(`.${d}`);
+    }
     const sites = this.#opts.getSites?.() ?? {};
     for (const cfg of Object.values(sites)) {
       const domain = (cfg as { domain?: string } | undefined)?.domain;
@@ -177,14 +189,18 @@ export class ProxyManager {
     return out;
   }
 
-  /** Update the base domain; restarts the transport when the suffix list
+  /** Update the base domains; restarts the transport when the suffix list
    *  changes while running (new host pattern must be accepted). */
-  async setBaseDomain(domain: string | undefined): Promise<void> {
-    const next = (domain ?? "").replace(/^\./, "");
-    if (next === this.#baseDomain) return;
+  async setBaseDomain(domain: string | string[] | undefined): Promise<void> {
+    const list = Array.isArray(domain)
+      ? domain.map((d) => d.replace(/^\./, "")).filter(Boolean)
+      : (domain ?? "").replace(/^\./, "") ? [(domain ?? "").replace(/^\./, "")] : [];
+    const prev = [...this.#baseDomains];
+    this.#baseDomain = list[0] ?? "";
+    this.#baseDomains = list;
+    const changed = JSON.stringify(prev) !== JSON.stringify(list);
     const wasRunning = this.#server !== null;
-    this.#baseDomain = next;
-    if (wasRunning) {
+    if (changed && wasRunning) {
       await this.stop();
       await this.start();
     }

@@ -355,6 +355,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   const proxy = new ProxyManager({
     suffixes: DEFAULT_SUFFIXES,
     baseDomain: readConfigFile(dirs.configDir).baseDomain,
+    baseDomains: (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean),
     registry: authRegistry,
     gateway,
     getSites: () => readSites(dirs.configDir),

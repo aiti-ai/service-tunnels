@@ -241,7 +241,14 @@ async function proxyExpose(
   });
   // base domain (portless public URL): explicit option > config file.
   const baseDomain = opts.baseDomain ?? cfgFile.baseDomain;
-  if (baseDomain) await proxy.setBaseDomain(baseDomain);
+  // Multi-domain base (env SERVICE_TUNNELS_BASE_DOMAIN, comma-separated,
+  // primary first): CLI --base-domain > env > config file. All are served as
+  // proxy suffixes; the primary drives the returned baseUrl.
+  const envBase = (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean);
+  const baseDomains = opts.baseDomain
+    ? [opts.baseDomain, ...envBase.filter((d) => d !== opts.baseDomain)]
+    : [...envBase, ...(cfgFile.baseDomain && !envBase.includes(cfgFile.baseDomain) ? [cfgFile.baseDomain] : [])];
+  if (baseDomains.length) await proxy.setBaseDomain(baseDomains);
   const authRequested =
     opts.auth === true || opts.auth === "auto" || (typeof opts.auth === "string" && opts.auth !== "none");
   const providerType = opts.provider
