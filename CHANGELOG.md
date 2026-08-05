@@ -1,10 +1,9 @@
+## 0.2.42
+
+### baseDomain 支持 host:port（不抹除 PI_WEB_HOSTNAME 的端口）
+- baseDomain 接受 `pi.example.com:57442` 形式：虚拟主机解析用 **host**（剥端口匹配
+  后缀），生成的 URL（baseUrl/baseVhost）**保留端口**（`http://<port>-basic.pi.example.com:57442`）
+- `setBaseDomain` / 构造统一 host:port 解析（splitHostPort，端口 1-65535 校验）；
+  附加 baseDomains 取 host
+
 ## 0.2.41
-
-### 会话 cookie 按认证域（site）隔离
-- **portal cookie 名包含 site**：default → `st_portal_session`（兼容），非 default
-  站点 → `st_portal_<site>_session` / `st_portal_<site>_2fa`——嵌套 proxy 或同一
-  浏览器访问多个认证域时 cookie 不再同名冲突
-- **authelia cookie 名包含 site**：`authelia_session`（default）/ `authelia_<site>_session`
-- 各 site 的 provider 实例本就持有独立 session secret——名 + 值双层隔离
-
-## 0.2.40

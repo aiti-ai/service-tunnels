@@ -90,12 +90,27 @@ export function localLoginRedirect(provider: string, basePath: string): string {
   return `http://$host${p}/login?next=$request_uri`; // portal & forward-auth defaults
 }
 
+/** Split "host:port" (base domain form) into host + valid port ("" if none). */
+function splitHostPort(d: string | undefined): { host: string; port: string } {
+  const clean = (d ?? "").trim().toLowerCase().replace(/^\./, "");
+  const m = clean.match(/^(.*?):(\d{1,5})$/);
+  if (m) {
+    const port = Number(m[2] ?? "");
+    if (port >= 1 && port <= 65535) return { host: m[1] ?? "", port: m[2] ?? "" };
+  }
+  return { host: clean, port: "" };
+}
+
 export class ProxyManager {
   #opts: ProxyManagerOptions;
   #server: Server | null = null;
   #port = 0;
   #baseDomain = "";
-  /** All base domains (primary first): config/CLI + env. */
+  /** Optional port on the primary base domain (host:port form, e.g.
+   *  "pi.example.com:57442"): virtual hosts match the HOST only, but generated
+   *  URLs (baseVhost/baseUrl) keep the port so they stay clickable. */
+  #basePort = "";
+  /** All base domains (primary first): config/CLI + env. Host only. */
   #baseDomains: string[] = [];
   #bindings = new Map<string, ProxyBinding>(); // key `${port}:${label}`
   /** Vhosts already registered with their provider/gateway (avoid re-register).
@@ -108,10 +123,14 @@ export class ProxyManager {
   constructor(opts: ProxyManagerOptions = {}) {
     this.#opts = opts;
     this.#gateway = opts.gateway ?? null;
-    this.#baseDomain = (opts.baseDomain ?? "").replace(/^\./, "");
+    const { host, port } = splitHostPort(opts.baseDomain);
+    this.#baseDomain = host;
+    this.#basePort = port;
     this.#baseDomains = [
-      ...(this.#baseDomain ? [this.#baseDomain] : []),
-      ...(opts.baseDomains ?? []).map((d) => d.replace(/^\./, "")).filter((d) => d && d !== this.#baseDomain),
+      ...(host ? [host] : []),
+      ...(opts.baseDomains ?? [])
+        .map((d) => splitHostPort(d).host)
+        .filter((d) => d && d !== host),
     ];
   }
 
@@ -203,12 +222,15 @@ export class ProxyManager {
   }
 
   /** Update the base domains; restarts the transport when the suffix list
-   *  changes while running (new host pattern must be accepted). */
+   *  changes while running (new host pattern must be accepted). Accepts
+   *  "host" or "host:port" entries (port kept on generated URLs only). */
   async setBaseDomain(domain: string | string[] | undefined): Promise<void> {
-    const list = Array.isArray(domain)
-      ? domain.map((d) => d.replace(/^\./, "")).filter(Boolean)
-      : (domain ?? "").replace(/^\./, "") ? [(domain ?? "").replace(/^\./, "")] : [];
+    const list = (Array.isArray(domain) ? domain : domain ? [domain] : [])
+      .map((d) => splitHostPort(d).host)
+      .filter(Boolean);
     const prev = [...this.#baseDomains];
+    const first = Array.isArray(domain) ? domain[0] : domain;
+    this.#basePort = first ? splitHostPort(first).port : "";
     this.#baseDomain = list[0] ?? "";
     this.#baseDomains = list;
     const changed = JSON.stringify(prev) !== JSON.stringify(list);
@@ -224,10 +246,12 @@ export class ProxyManager {
     return label ? `${port}-${label}.${this.#suffix}` : `${port}.${this.#suffix}`;
   }
 
-  /** Portless virtual host under the user's base domain ("" when unset). */
+  /** Portless virtual host under the user's base domain ("" when unset).
+   *  Keeps the base-domain port (host:port form) so the URL stays complete. */
   baseVhost(port: number, label: string): string {
     if (!this.#baseDomain) return "";
-    return label ? `${port}-${label}.${this.#baseDomain}` : `${port}.${this.#baseDomain}`;
+    const host = label ? `${port}-${label}.${this.#baseDomain}` : `${port}.${this.#baseDomain}`;
+    return this.#basePort ? `${host}:${this.#basePort}` : host;
   }
 
   /** Idempotent start. Default port 4180 (busy → random); explicit 0 = random;
