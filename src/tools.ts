@@ -17,6 +17,7 @@ import { execFileSync } from "child_process";
 import { platform, arch, tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync } from "fs";
+import { download as justgetDownload } from "justget";
 
 /**
  * Tool resolution + auto-download.
@@ -46,6 +47,20 @@ const ARCH_ALIAS: Record<string, string> = {
   riscv64: "riscv64",
   ppc64: "ppc64le",
   s390x: "s390x",
+};
+
+/** Node (platform, arch) → Rust target triple, for Rust-built tools whose
+ *  release assets are named with full triples (e.g. bore ships
+ *  `bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz`). Keyed `"<platform>_<arch>"`. */
+const RUST_TARGET: Record<string, string> = {
+  linux_x64: "x86_64-unknown-linux-musl",
+  linux_ia32: "i686-unknown-linux-musl",
+  linux_arm64: "aarch64-unknown-linux-musl",
+  linux_arm: "armv7-unknown-linux-gnueabihf",
+  darwin_x64: "x86_64-apple-darwin",
+  darwin_arm64: "aarch64-apple-darwin",
+  win32_x64: "x86_64-pc-windows-msvc",
+  win32_ia32: "i686-pc-windows-msvc",
 };
 
 export interface DownloadSpec {
@@ -107,6 +122,9 @@ export interface ToolRegistryOptions {
   toolMirrors?: Record<string, string[]>;
   /** Force mirrors first (CN networks). */
   preferMirrors?: boolean;
+  /** Allow on-demand downloads when a tool is missing (default true). When
+   *  false, missing tools throw instead of auto-installing. */
+  allowToolDownload?: boolean;
   /** Download timeout per attempt (ms). */
   downloadTimeoutMs?: number;
 }
@@ -130,6 +148,7 @@ export function candidateUrls(
       .replaceAll("{version}", def.version ?? "")
       .replaceAll("{platform}", platform())
       .replaceAll("{arch}", ARCH_ALIAS[arch()] ?? arch())
+      .replaceAll("{rust_target}", RUST_TARGET[`${platform()}_${arch()}`] ?? "{rust_target}")
       .replaceAll(
         "{ext}",
         isWin ? (spec.exts?.win ?? "zip") : (spec.exts?.posix ?? "tgz"),
@@ -223,7 +242,16 @@ export async function downloadTo(
         writer.write(Buffer.from(value));
         await pump();
       };
-      void pump();
+      // Route pump failures (incl. AbortError when the download timeout
+      // aborts the fetch body) to `bad`, so the outer Promise rejects and the
+      // caller can fall back to the next mirror. Without this, a timeout
+      // surfaces the AbortError from reader.read() as an *unhandled* rejection
+      // that crashes the whole process.
+      pump().catch((err) => {
+        reader.cancel?.().catch(() => {});
+        writer.destroy();
+        bad(err);
+      });
     });
     // atomic rename on success
     await import("fs").then((fs) => fs.promises.rename(tmp, dest));
@@ -396,7 +424,12 @@ export async function ensureTool(
   // 3. cached download
   const cached = downloadedPath(opts.cacheDir, def.name);
   if (existsSync(cached)) return cached;
-  // 4. auto-download
+  // 4. auto-download (skipped when downloads are disabled)
+  if (opts.allowToolDownload === false) {
+    throw new ToolError(
+      `${def.name} is not installed and online tool downloads are disabled — install it manually or re-enable downloads`,
+    );
+  }
   if (!platformSupported(def)) {
     throw new ToolError(
       `${def.name} has no ${platform()} ${arch()} build; use a system install (e.g. apt) or WSL2/Docker`,
@@ -408,18 +441,56 @@ export async function ensureTool(
   return ensureDownloadedTool(def, opts);
 }
 
-async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Promise<string> {
-  const dest = downloadedPath(opts.cacheDir, def.name);
+/** Resolve a tool WITHOUT downloading: toolPaths > PATH > cache, else null.
+ *  Used by the availability UI + by callers that must never auto-install. */
+export function probeTool(
+  def: ToolDef,
+  opts: ToolRegistryOptions,
+): { path: string; source: "toolPaths" | "path" | "cache" } | null {
+  const toolPaths = mergeToolPaths(opts.toolPaths);
+  const explicit = toolPaths[def.name];
+  if (explicit) {
+    if (existsSync(explicit)) return { path: explicit, source: "toolPaths" };
+    return null;
+  }
+  const onPath = findOnPathAll(def);
+  if (onPath) return { path: onPath, source: "path" };
+  const cached = downloadedPath(opts.cacheDir, def.name);
+  if (existsSync(cached)) return { path: cached, source: "cache" };
+  return null;
+}
+
+async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Promise<string> {  const dest = downloadedPath(opts.cacheDir, def.name);
   const urls = candidateUrls(def, opts);
   const timeoutMs = opts.downloadTimeoutMs ?? 60_000;
-  let lastErr: Error | null = null;
-  for (const cand of urls) {
-  const archive = `${dest}.dl-${cand.label}`;
+  const archive = `${dest}.dl-${process.pid}`;
+  const [official, ...mirrorUrls] = urls;
+  if (!official) {
+    throw new ToolError(`${def.name}: no download source URLs`);
+  }
+
+  // justget 多源竞速：官方 + 镜像并行，官方 4xx/超时立即失败并交给镜像接管，
+  // 内部自带重试与容错——不需要顺序回退。
+  // justget racing download: official + mirrors in parallel, immediate-failure
+  // handover to mirrors, retries built in — no sequential fallback needed.
   try {
-    await downloadTo(cand.url, archive, timeoutMs);
+    await justgetDownload({
+      url: official.url,
+      output: archive,
+      mirrors: mirrorUrls.map((m) => m.url),
+      options: {
+        timeout: timeoutMs,
+        connectTimeout: Math.min(timeoutMs, 10_000),
+        primaryWarmupTime: 1_000, // 工具通常几 MB：预热 1s 后即可启动镜像
+        retries: 0,
+        retryDelay: 0,
+      },
+    });
   } catch (err) {
-    lastErr = err instanceof Error ? err : new Error(String(err));
-    continue;
+    throw new ToolError(
+      `${def.name}: all download sources failed via justget — ${err instanceof Error ? err.message : String(err)}. ` +
+        `Try installing it manually (apt install ${def.name}) or set toolPaths.${def.name}.`,
+    );
   }
   try {
     const final = await extractArchive(archive, def, join(opts.cacheDir, "bin"));
@@ -428,20 +499,17 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
       try {
         execFileSync(final, def.verifyArgs, { stdio: "ignore" });
       } catch {
-        throw new ToolError(`${def.name} downloaded from ${cand.label} failed verification`);
+        throw new ToolError(`${def.name} downloaded via justget failed verification`);
       }
     }
     return final;
   } catch (err) {
     rmSync(archive, { force: true });
     rmSync(dest, { force: true });
-    lastErr = err instanceof Error ? err : new Error(String(err));
+    throw new ToolError(
+      `${def.name}: downloaded archive failed to extract/verify — ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  }
-  throw new ToolError(
-    `${def.name}: all download sources failed — ${lastErr?.message}. ` +
-      `Try installing it manually (apt install ${def.name}) or set toolPaths.${def.name}.`,
-  );
 }
 
 async function ensureNpmTool(def: ToolDef, opts: ToolRegistryOptions): Promise<string> {
@@ -458,10 +526,23 @@ async function ensureNpmTool(def: ToolDef, opts: ToolRegistryOptions): Promise<s
     // fall back to official registry
     execFileSync("npm", ["install", "--prefix", join(opts.cacheDir, "npm"), pkg], { stdio: "ignore", timeout: 120_000 });
   }
-  const bin = join(opts.cacheDir, "npm", "node_modules", ".bin", def.name);
-  if (!existsSync(bin)) throw new ToolError(`${def.name}: npm install produced no bin`);
+  // npm bins often differ from the tool name (localtunnel ships `lt`).
+  // Walk def.commands (alias order) then fall back to def.name; first hit wins.
+  const binNames = [...(def.commands ?? []), def.name];
+  let bin = "";
+  for (const n of binNames) {
+    const cand = join(opts.cacheDir, "npm", "node_modules", ".bin", n);
+    if (existsSync(cand)) {
+      bin = cand;
+      break;
+    }
+  }
+  if (!bin) throw new ToolError(`${def.name}: npm install produced no bin (looked for ${binNames.join(", ")})`);
   // link into cacheDir/bin so resolution is uniform (symlink on POSIX, copy on
-  // Windows where symlinks need privileges)
+  // Windows where symlinks need privileges). The bin/ dir is created here
+  // (ensureNpmTool is the only path that writes to it without going through
+  // extractArchive, which mkdirs itself).
+  mkdirSync(join(dest, ".."), { recursive: true });
   if (process.platform === "win32") {
     copySync(bin, dest);
   } else {
@@ -544,6 +625,24 @@ export const TOOLS: Record<string, ToolDef> = {
     download: { official: "", kind: "npm" },
     npmPackage: "localtunnel",
     npmRegistry: "https://registry.npmmirror.com",
+  },
+  bore: {
+    // bore: a minimal TCP tunnel (Rust, single static binary). The lightest
+    // self-hostable option — run `bore server` locally and point clients at
+    // it for offline/CI end-to-end testing without any account or public
+    // server. Assets are full Rust target triples (see RUST_TARGET).
+    name: "bore",
+    version: "0.6.0",
+    platforms: ["linux", "darwin", "win32"],
+    download: {
+      official:
+        "https://github.com/ekzhang/bore/releases/download/v{version}/bore-v{version}-{rust_target}.{ext}",
+      mirrors: GH_MIRRORS,
+      kind: "tar.gz",
+      exts: { posix: "tar.gz", win: "zip" },
+      binPath: "bore",
+    },
+    verifyArgs: ["-V"],
   },
   "oauth2-proxy": {
     name: "oauth2-proxy",

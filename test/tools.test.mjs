@@ -187,7 +187,9 @@ test("preferMirrors downloads from mirror first", { timeout: 30_000 }, async () 
       preferMirrors: true,
       toolMirrors: { default: [`http://127.0.0.1:${mirrorPort}/p.tar.gz`] },
     });
-    assert.equal(mirrorHits, 1, "mirror should be used first");
+    // justget 竞速：主源=镜像（probe HEAD + GET），官方作为镜像列表不启动
+    // justget racing: primary=mirror (HEAD probe + GET); official not started
+    assert.ok(mirrorHits >= 1, "mirror should be used first");
     assert.equal(officialHits, 0, "official should be skipped when mirror works");
   } finally {
     mirrorServer.close();
@@ -389,6 +391,37 @@ test("env SERVICE_TUNNELS_TOOLPATHS + mergeToolPaths", async () => {
   const ensured = await ensureTool(def, { cacheDir: dir });
   assert.equal(ensured, fake);
   delete process.env.SERVICE_TUNNELS_TOOLPATHS;
+});
+
+test("ensureNpmTool finds bin via commands[] alias (localtunnel → lt)", { timeout: 120_000 }, async () => {
+  // Regression for "npm install produced no bin": the localtunnel npm package
+  // ships a `lt` bin, not `localtunnel`. ensureNpmTool must consult
+  // def.commands, not just def.name, when locating the installed binary.
+  const { ensureTool, TOOLS } = await import("../src/tools.ts");
+  const { mkdtempSync, rmSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const cacheDir = mkdtempSync(join(tmpdir(), "st-npm-lt-"));
+  // Scrub PATH so `lt`/`localtunnel` are not found via PATH — forces the
+  // ensureNpmTool download branch (otherwise step 2 short-circuits on a PATH
+  // `lt` and the buggy bin lookup is never exercised).
+  const origPath = process.env.PATH;
+  process.env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  try {
+    const def = TOOLS.localtunnel;
+    const installed = await ensureTool(def, { cacheDir });
+    assert.ok(installed, "ensureTool must return a path");
+    assert.ok(existsSync(installed), "installed bin must exist on disk");
+    // The linked dest is named after def.name, but it must point at the real
+    // `lt` bin that npm created (not a missing `localtunnel` one).
+    const ltBin = join(cacheDir, "npm", "node_modules", ".bin", "lt");
+    assert.ok(existsSync(ltBin), "npm must have produced a `lt` bin");
+    const localtunnelBin = join(cacheDir, "npm", "node_modules", ".bin", "localtunnel");
+    assert.ok(!existsSync(localtunnelBin), "sanity: localtunnel pkg ships no `localtunnel` bin");
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(cacheDir, { recursive: true, force: true });
+  }
 });
 
 test("localtunnel resolves via `lt` command alias on PATH", async () => {
