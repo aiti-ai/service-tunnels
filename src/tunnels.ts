@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
+import { promises as dns } from "node:dns";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
@@ -16,7 +17,66 @@ import { roleEnv } from "./marker.ts";
  * nginx gateway port (design.md §5). `--auth` is applied at the gateway.
  */
 
-export type TunnelType = "ngrok" | "frpc" | "ssh" | "cloudflared" | "localtunnel" | "command";
+export type TunnelType =
+  | "ngrok"
+  | "frpc"
+  | "ssh"
+  | "serveo"
+  | "cloudflared"
+  | "localtunnel"
+  | "bore"
+  | "command";
+
+/** Which tunnel types can carry raw TCP (non-HTTP) traffic.
+ *  - ngrok: `ngrok tcp <port>` ✓
+ *  - ssh / serveo: `-R` raw forward ✓ (serveo is HTTP-oriented but the ssh
+ *    transport is raw TCP)
+ *  - frpc: `type = tcp` ✓
+ *  - cloudflared free / localtunnel / bore: HTTP-only ✗
+ *  - command: depends on the user's command (assume tcp-capable). */
+export function tunnelSupportsTcp(type: TunnelType): boolean {
+  // ngrok tcp, ssh -R, frpc tcp are raw-TCP capable. serveo is HTTP-only
+  // (fixed `-R 80:` + https subdomain), localtunnel/cloudflared-free/bore are
+  // HTTP. `command` depends on the user's command (assume capable).
+  return type === "ngrok" || type === "ssh" || type === "frpc" || type === "command";
+}
+
+/**
+ * cloudflared discovers its edge via SRV lookups
+ * (_v2-origintunneld._tcp.argotunnel.com). CN networks and some router DNS
+ * fail those lookups, which makes cloudflared exit before any tunnel is
+ * established (the A records of the edge host still resolve there). When SRV
+ * fails we pin the edge by domain — cloudflared resolves it itself, so no IP
+ * list to maintain. Cache the probe (per process); override with
+ * SERVICE_TUNNELS_CLOUDFLARED_EDGE=1 (always pin) / =0 (never pin).
+ * Node 24 dropped the sync dns resolvers, so this is async (2s cap so a
+ * hanging resolver can't stall tunnel startup).
+ */
+let cloudflaredEdgeCache: boolean | null = null;
+export async function cloudflaredNeedsEdge(): Promise<boolean> {
+  const force = process.env.SERVICE_TUNNELS_CLOUDFLARED_EDGE;
+  if (force === "1") return true;
+  if (force === "0") return false;
+  if (cloudflaredEdgeCache === null) {
+    cloudflaredEdgeCache = await Promise.race([
+      dns.resolveSrv("_v2-origintunneld._tcp.argotunnel.com").then(() => false, () => true),
+      new Promise<boolean>((r) => setTimeout(() => r(true), 2_000)),
+    ]);
+  }
+  return cloudflaredEdgeCache;
+}
+
+/** `--edge` args for the cloudflared command when SRV discovery is broken. */
+export async function cloudflaredEdgeArgs(): Promise<string[]> {
+  return (await cloudflaredNeedsEdge())
+    ? ["--edge", "region1.v2.argotunnel.com:7844", "--edge-ip-version", "4"]
+    : [];
+}
+
+/** Reset the SRV probe cache (tests). */
+export function _resetCloudflaredEdgeCache(): void {
+  cloudflaredEdgeCache = null;
+}
 
 export interface TunnelConfig {
   name: string;
@@ -27,13 +87,30 @@ export interface TunnelConfig {
   domain?: string;
   /** Extra CLI args (passed through). */
   args?: string[];
-  /** frpc server (host:port) / token — defaults from env/config. */
+  /** Forwarding protocol: "http"/"https" go through the nginx gateway
+   *  (auth/logs); "tcp" is a raw direct tunnel (no gateway — only TCP-
+   *  capable tunnel types: ngrok tcp, ssh, frpc tcp). */
+  protocol?: "http" | "https" | "tcp";
+  /** Tunnel server address. frpc: `host:port` (default 127.0.0.1:7000).
+   *  bore: `--to` target (default localhost; control port 7835). */
   server?: string;
+  /** frpc token / bore shared secret (`-s`, env SERVICE_TUNNELS_BORE_SECRET). */
   token?: string;
   /** command type: raw shell command. */
   cmd?: string;
-  /** SSH host for type "ssh" (default serveo.net). */
+  /** SSH server for type "ssh" (required) or "serveo" (default serveo.net). */
   host?: string;
+  /** SSH username; prepended as `user@host` when set (ssh + serveo). */
+  user?: string;
+  /** SSH server port (`-p`, default 22 when unset → flag omitted). */
+  port?: number;
+  /** Remote port forwarded on the SSH server (`-R <remotePort>:127.0.0.1:<target>`);
+   *  ssh only — serveo always uses 80. Defaults to `target`.
+   *  bore: requested public port (`-p`, default 0 = server-assigned). */
+  remotePort?: number;
+  /** Extra env vars for the tunnel process, merged over process.env at spawn
+   *  (e.g. `{ NGROK_AUTHTOKEN: "..." }` so ngrok authenticates). */
+  env?: Record<string, string>;
 }
 
 export interface TunnelInfo {
@@ -61,6 +138,8 @@ export interface TunnelManagerOptions {
   log?: (line: string) => void;
   /** Emitted events: { type: "start"|"url"|"stop"|"error", name, url? }. */
   onEvent?: (evt: { type: "start" | "url" | "stop" | "error"; name: string; url?: string | null; error?: string }) => void;
+  /** Called after a tunnel process spawns (pid registration for cleanup). */
+  registerPid?: (role: string, pid: number) => void;
 }
 
 /** True while a pid is a live (non-zombie) process. */
@@ -89,13 +168,39 @@ const OUTPUT_LIMIT = 8192;
  * any-URL fallback applies ONLY to user-supplied command tunnels where the
  * URL domain cannot be predicted.
  */
+/** Probe a LOCAL port to decide http vs https (for ssh -R synth URLs). */
+async function detectLocalScheme(port: number, timeoutMs = 1500): Promise<"http" | "https"> {
+  if (!port || port <= 0) return "http";
+  const probe = (mod: "http" | "https") =>
+    new Promise<boolean>((resolve) => {
+      void import(mod).then(({ request }) => {
+        const req = request({ host: "127.0.0.1", port, path: "/", method: "GET", rejectUnauthorized: false, timeout: timeoutMs }, (r: { destroy(): void }) => {
+          r.destroy();
+          resolve(true);
+        });
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => { req.destroy(); resolve(false); });
+        req.end();
+      });
+    });
+  if (await probe("http")) return "http";
+  if (await probe("https")) return "https";
+  return "http";
+}
+
 export function extractTunnelUrl(output: string, type?: string): string | null {
   if (!output) return null;
   const known =
-    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
+    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app|\-free\.dev)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
       output,
     );
   if (known && known[1]) return known[1];
+  // bore prints no URL scheme — synthesize http:// from "listening at host:port".
+  if (type === "bore") {
+    const m = /listening at\s+(\S+:\d+)/i.exec(output);
+    if (m && m[1]) return `http://${m[1]}`;
+    return null;
+  }
   if (type !== "command" && type !== "ssh") return null;
   // command/ssh: any http(s) URL not preceded by "(" and not localhost
   const any = /(?<![(\w])(https?:\/\/[a-z0-9][a-z0-9.-]*(?::\d+)?[^\s"'<>)\]]*)/i.exec(output);
@@ -116,6 +221,39 @@ interface SpawnSpec {
   args: string[];
   /** shell form (command type): bin is the raw command line. */
   shell?: boolean;
+}
+
+/** Build an `ssh` forward spec. SSH tunnels need more than host+target:
+ *  a username (`user@host`), an optional server port (`-p`), and a remote
+ *  forward port (`-R <remote>:127.0.0.1:<local>`). serveo hard-codes remote
+ *  port 80 (that's its URL-assignment protocol); the generic `ssh` type lets
+ *  the caller pick the remote port. */
+function sshSpec(opts: {
+  /** Full `-R` value, e.g. "80:127.0.0.1:3000" or "8080:127.0.0.1:3000". */
+  forward: string;
+  /** Destination: "host" or "user@host". */
+  dest: string;
+  /** SSH server port (added as `-p <port>` only when set). */
+  port?: number;
+  /** Extra CLI args, appended verbatim. */
+  extra?: string[];
+  /** When true (default) add `-N` (no remote command — pure forwarding).
+   *  serveo.net must OMIT it: the public URL is printed by serveo's forced
+   *  session command, which `-N` suppresses (no session → no URL). */
+  forwardOnly?: boolean;
+}): SpawnSpec {
+  const args = [];
+  if (opts.forwardOnly !== false) args.push("-N");
+  args.push(
+    "-R", opts.forward,
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ExitOnForwardFailure=yes",
+  );
+  if (opts.port) args.push("-p", String(opts.port));
+  args.push(opts.dest, ...(opts.extra ?? []));
+  return { bin: "ssh", args };
 }
 
 export class TunnelManager {
@@ -201,12 +339,41 @@ export class TunnelManager {
     const child = spec.shell
       ? spawn(spec.bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] })
       : spawn(spec.bin, spec.args, {
-          env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env },
+          env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...cfg.env },
           detached: true, // own process group → group kill
           stdio: ["ignore", "pipe", "pipe"],
         });
     s.child = child;
     this.#opts.onEvent?.({ type: "start", name });
+    this.#opts.registerPid?.("tunnel", child.pid ?? 0);
+
+    // Generic ssh -R to the operator's own server prints no URL (unlike
+    // serveo, which echoes one). The endpoint is deterministic from config,
+    // so synthesize it — but ONLY once the ssh process survives startup:
+    // an unreachable host makes ssh exit fast, and reporting a URL then is a
+    // false "success".
+    let sshUrlTimer: ReturnType<typeof setTimeout> | null = null;
+    if (cfg.type === "ssh" && cfg.host) {
+      const rp = cfg.remotePort ?? cfg.target;
+      if (rp) {
+        // scheme depends on the LOCAL target's protocol (ssh -R forwards the
+        // remote port to 127.0.0.1:<target>) — probe it, default http. TCP
+        // forwards get a `tcp://` URL (raw transport, no scheme).
+        const synthUrl = () =>
+          cfg.protocol === "tcp"
+            ? Promise.resolve(`tcp://${cfg.host}:${rp}`)
+            : detectLocalScheme(cfg.target ?? 0).then((scheme) => `${scheme}://${cfg.host}:${rp}`);
+        // Window must exceed ssh's ConnectTimeout (10s): an unreachable host
+        // keeps ssh alive for the connect attempt then exits. Only synthesize
+        // the URL after ssh has survived that window (real forward established).
+        sshUrlTimer = setTimeout(async () => {
+          if (child.exitCode === null && s.child === child) {
+            s.url = await synthUrl();
+            this.#opts.onEvent?.({ type: "url", name, url: s.url });
+          }
+        }, 11_000);
+      }
+    }
 
     const append = (chunk: Buffer) => {
       s.output = (s.output + chunk.toString()).slice(-OUTPUT_LIMIT);
@@ -223,8 +390,15 @@ export class TunnelManager {
       this.#opts.onEvent?.({ type: "error", name, error: s.error });
     });
     child.once("exit", (code, signal) => {
+      if (sshUrlTimer) clearTimeout(sshUrlTimer);
       if (s.child === child) s.child = null;
-      if (code !== 0 && !s.url) {
+      // ssh synth URL is PROVISIONAL: if ssh exits with an error (e.g. an
+      // unreachable host hit its ConnectTimeout AFTER the 1.5s synth window),
+      // revoke the URL so we don't report a false success.
+      if (code !== 0 && cfg.type === "ssh") {
+        s.url = null;
+        s.error = `exited (${signal ?? code})`;
+      } else if (code !== 0 && !s.url) {
         s.error = `exited (${signal ?? code})`;
       }
       this.#opts.onEvent?.({ type: "stop", name, url: s.url });
@@ -283,8 +457,8 @@ export class TunnelManager {
     switch (cfg.type) {
       case "ngrok": {
         const bin = await tool("ngrok");
-        const args = ["http", String(target), "--log", "stdout"];
-        if (domain) args.push("--domain", domain);
+        const args = [cfg.protocol === "tcp" ? "tcp" : "http", String(target), "--log", "stdout"];
+        if (cfg.protocol !== "tcp" && domain) args.push("--domain", domain);
         args.push(...(cfg.args ?? []));
         return { bin, args };
       }
@@ -294,23 +468,31 @@ export class TunnelManager {
         return { bin, args: ["-c", ini] };
       }
       case "ssh": {
+        // Generic SSH transport to the user's OWN server. host (and optional
+        // user/port/remotePort) configure it; remote forward defaults to the
+        // local target port. (For the serveo.net hosted service use "serveo".)
+        if (!cfg.host) throw new Error(`tunnel '${cfg.name}': type "ssh" requires host`);
+        const dest = cfg.user ? `${cfg.user}@${cfg.host}` : cfg.host;
+        const remotePort = cfg.remotePort ?? target;
+        return sshSpec({ forward: `${remotePort}:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args });
+      }
+      case "serveo": {
+        // The serveo.net hosted service: forward remote port 80 and serveo
+        // hands back a public URL. user/port are honored for serveo mirrors
+        // or authenticated variants; host defaults to the public serveo.net.
+        // forwardOnly:false — serveo prints the URL via its forced session
+        // command, which `-N` would suppress.
         const host = cfg.host ?? "serveo.net";
-        const args = [
-          "-N",
-          "-R", `80:127.0.0.1:${target}`,
-          "-o", "StrictHostKeyChecking=accept-new",
-          "-o", "ConnectTimeout=10",
-          "-o", "ServerAliveInterval=30",
-          "-o", "ExitOnForwardFailure=yes",
-          host,
-        ];
-        args.push(...(cfg.args ?? []));
-        return { bin: "ssh", args };
+        const dest = cfg.user ? `${cfg.user}@${host}` : host;
+        return sshSpec({ forward: `80:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false });
       }
       case "cloudflared": {
         const bin = await tool("cloudflared");
         const args = ["tunnel", "--url", `http://127.0.0.1:${target}`];
         if (domain) args.push("--hostname", domain);
+        // SRV edge discovery may be broken (CN/router DNS); pin the edge by
+        // domain in that case so the tunnel still establishes.
+        args.push(...(await cloudflaredEdgeArgs()));
         args.push(...(cfg.args ?? []));
         return { bin, args };
       }
@@ -318,6 +500,20 @@ export class TunnelManager {
         const bin = await tool("localtunnel");
         const args = ["--port", String(target)];
         if (domain) args.push("--subdomain", domain);
+        args.push(...(cfg.args ?? []));
+        return { bin, args };
+      }
+      case "bore": {
+        // bore: minimal TCP tunnel (Rust, single static binary). `bore local`
+        // connects to an operator-run `bore server` — the lightest option for
+        // offline/CI end-to-end testing (no account, no public server). Default
+        // server = localhost (control port 7835, bore's built-in default).
+        const bin = await tool("bore");
+        const server = cfg.server ?? process.env.SERVICE_TUNNELS_BORE_SERVER ?? "localhost";
+        const args = ["local", String(target), "--to", server];
+        if (cfg.remotePort) args.push("-p", String(cfg.remotePort));
+        const secret = cfg.token ?? process.env.SERVICE_TUNNELS_BORE_SECRET;
+        if (secret) args.push("-s", secret);
         args.push(...(cfg.args ?? []));
         return { bin, args };
       }
@@ -342,9 +538,166 @@ export class TunnelManager {
       `server_port = ${port}`,
     ];
     if (token) lines.push(`token = ${token}`);
-    lines.push("", "[web]", "type = http", "local_ip = 127.0.0.1", `local_port = ${target}`);
-    lines.push(`custom_domains = ${domain ?? "localhost"}`);
+    if (cfg.protocol === "tcp") {
+      lines.push("", "[web]", "type = tcp", "local_ip = 127.0.0.1", `local_port = ${target}`, `remote_port = ${cfg.remotePort ?? target}`);
+    } else {
+      lines.push("", "[web]", "type = http", "local_ip = 127.0.0.1", `local_port = ${target}`);
+      lines.push(`custom_domains = ${domain ?? "localhost"}`);
+    }
     writeFileSync(iniPath, lines.join("\n") + "\n", "utf8");
     return iniPath;
   }
+}
+
+/**
+ * Declarative parameter schema — drives client (pi-web) form rendering so a
+ * new tunnel type or auth provider needs NO client code changes: the client
+ * renders inputs from these specs (label / description / link / default /
+ * type) and spreads the collected values back as TunnelConfig fields (or
+ * provider options). Keys are TunnelConfig field names (domain/server/token/
+ * host/user/port/remotePort/cmd/...).
+ */
+export interface ParamSpec {
+  /** Key into TunnelConfig (or provider options). Nested with "." (e.g.
+   *  "oidc.issuerUrl" → { oidc: { issuerUrl } }). */
+  key: string;
+  /** Display label (default: key). */
+  label?: string;
+  type?: "string" | "number" | "boolean" | "password";
+  description?: string;
+  /** Docs / setup link (e.g. ngrok dashboard token page). */
+  link?: string;
+  linkTitle?: string;
+  default?: string | number | boolean;
+  placeholder?: string;
+  required?: boolean;
+  options?: Array<{ value: string; label?: string }>;
+}
+
+/** Tunnel-type parameter schemas (data-driven forms; the only place a tunnel
+ *  type's user-facing parameters are declared). */
+export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
+  ngrok: [
+    {
+      key: "domain",
+      label: "固定域名",
+      description: "绑定固定域名(需 ngrok 账号支持);留空用随机域名",
+      placeholder: "myapp.ngrok-free.app",
+    },
+    {
+      key: "token",
+      type: "password",
+      label: "Authtoken",
+      description: "未认证的 ngrok 会直接退出(ERR_NGROK_4018);token 注入 NGROK_AUTHTOKEN",
+      link: "https://dashboard.ngrok.com/get-started/your-authtoken",
+      linkTitle: "获取 token",
+    },
+  ],
+  frpc: [
+    {
+      key: "server",
+      label: "frps 地址",
+      default: "127.0.0.1:7000",
+      description: "frps server host:port",
+      placeholder: "frp.example.com:7000",
+    },
+    { key: "token", type: "password", label: "Token", description: "frps 共享 token(可选)" },
+    { key: "domain", label: "自定义域名", description: "custom_domains;留空用 localhost", placeholder: "app.example.com" },
+  ],
+  ssh: [
+    { key: "host", label: "SSH 服务器", required: true, placeholder: "localhost", description: "ssh -R 目标服务器(自建/本机均可用)" },
+    { key: "user", label: "用户名", placeholder: "wind", description: "user@host;留空用当前用户" },
+    { key: "port", type: "number", label: "SSH 端口", default: 22, description: "ssh -p" },
+    { key: "remotePort", type: "number", label: "远程端口", description: "-R <remotePort>:127.0.0.1:<target>;留空=target" },
+  ],
+  serveo: [
+    { key: "host", label: "serveo 镜像", default: "serveo.net" },
+    { key: "user", label: "用户名" },
+    { key: "port", type: "number", label: "SSH 端口", default: 22 },
+  ],
+  cloudflared: [
+    { key: "domain", label: "Hostname", description: "命名隧道主机名;留空=随机 trycloudflare", placeholder: "app.example.com" },
+  ],
+  localtunnel: [
+    { key: "domain", label: "Subdomain", description: "固定子域名;留空=随机" },
+  ],
+  bore: [
+    {
+      key: "server",
+      label: "bore server",
+      default: "localhost",
+      description: "自建 bore server 地址(host 或 host:port);默认 localhost:7835",
+    },
+    { key: "remotePort", type: "number", label: "远程端口", description: "-p 请求固定端口;留空=server 随机分配" },
+    { key: "token", type: "password", label: "Secret", description: "-s 共享密钥;server 未设 secret 则留空" },
+  ],
+  command: [
+    { key: "cmd", label: "命令", required: true, description: "任意 shell 命令;URL 从输出解析", placeholder: "ssh -R 80:127.0.0.1:<port> serveo.net" },
+  ],
+};
+
+/** Param schema for one tunnel type ([] when unknown). */
+export function tunnelParamSchema(type: TunnelType): ParamSpec[] {
+  return TUNNEL_PARAM_SCHEMAS[type] ?? [];
+}
+
+/** All tunnel-type param schemas (keyed by type). */
+export function tunnelParamSchemas(): Record<TunnelType, ParamSpec[]> {
+  return TUNNEL_PARAM_SCHEMAS;
+}
+
+/** Per-type UI metadata. `favorite` marks zero-account / few-params /
+ *  immediately-usable types (localtunnel/serveo/cloudflared/bore) — clients
+ *  sort them first and surface a badge. */
+export interface TunnelMeta {
+  favorite?: boolean;
+}
+
+export const TUNNEL_META: Record<TunnelType, TunnelMeta> = {
+  ngrok: {},
+  frpc: {},
+  ssh: {},
+  serveo: { favorite: true },
+  cloudflared: { favorite: true },
+  localtunnel: { favorite: true },
+  bore: { favorite: true },
+  command: {},
+};
+
+export function tunnelMeta(type: TunnelType): TunnelMeta {
+  return TUNNEL_META[type] ?? {};
+}
+
+export function tunnelMetas(): Record<TunnelType, TunnelMeta> {
+  return TUNNEL_META;
+}
+
+/** Coerce a form/CLI string against a param spec (number/boolean/string). */
+export function coerceParam(raw: string, spec: ParamSpec): string | number | boolean {
+  if (spec.type === "number") {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) throw new Error(`param "${spec.key}" expects a number, got "${raw}"`);
+    return n;
+  }
+  if (spec.type === "boolean") return raw === "true" || raw === "1" || raw === "yes";
+  return raw;
+}
+
+/** Validate + coerce --set/form values against a ParamSpec list. Throws on
+ *  unknown keys (listing the valid ones) so typos surface immediately — the
+ *  same schema drives pi-web forms and the CLI. */
+export function applyParamSets(
+  specs: ParamSpec[],
+  sets: Record<string, string>,
+  label: string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(sets)) {
+    const spec = specs.find((s) => s.key === key);
+    if (!spec) {
+      throw new Error(`${label}: unknown param "${key}" (valid: ${specs.map((s) => s.key).join(", ") || "(none)"})`);
+    }
+    out[key] = coerceParam(raw, spec);
+  }
+  return out;
 }

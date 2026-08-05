@@ -23,7 +23,7 @@ function httpReq(opts, body) {
   });
 }
 
-test("nginx gateway + portal provider: 401 → login → cookie → 200 (real nginx)", { timeout: 60_000 }, async (t) => {
+test("nginx gateway + portal provider: 302→login→cookie→200 (real nginx)", { timeout: 60_000 }, async (t) => {
   const { existsSync } = await import("node:fs");
   const nginxBin = ["/usr/sbin/nginx", "/usr/local/sbin/nginx", "/opt/homebrew/sbin/nginx"].find(existsSync);
   if (!nginxBin) {
@@ -53,6 +53,7 @@ test("nginx gateway + portal provider: 401 → login → cookie → 200 (real ng
     resolveTool: async () => "",
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     pickPort,
     log: () => {},
   };
@@ -67,19 +68,21 @@ test("nginx gateway + portal provider: 401 → login → cookie → 200 (real ng
     basePath: "/portal",
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     log: () => {},
   });
   let gatewayPort = 0;
   try {
-    gatewayPort = await gateway.start(portal.port, "forward-auth");
-    await gateway.registerHost("demo.local.test", backendPort, portal.port);
+    gatewayPort = await gateway.start();
+    await gateway.registerHost("demo.local.test", backendPort, { authPort: portal.port, basePath: "/portal", authMode: "forward-auth" });
 
   // 1) unauthenticated → 401 via auth_request
   const unauth = await httpReq({
     host: "127.0.0.1", port: gatewayPort,
     path: "/", headers: { Host: "demo.local.test" },
   });
-  assert.equal(unauth.status, 401);
+  assert.equal(unauth.status, 302);
+  assert.match(String(unauth.headers["location"] || ""), /\/portal\/login/, "302 redirects to the login page");
 
   // 2) login through the nginx portal location → cookie
   const loginBody = new URLSearchParams({ username: "admin", password: "pw", next: "/" }).toString();

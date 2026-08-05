@@ -86,6 +86,7 @@ wait
     resolveTool: async () => fakeAuthelia,
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     pickPort,
     log: () => {},
   };
@@ -126,22 +127,25 @@ wait
 });
 
 test("gateway: nginx config generation + host registration", async () => {
-  const { generateGatewayNginx } = await loadGateway();
+  const { generateGatewayNginx, generateHostNginx } = await loadGateway();
+  // main config: global + http, includes conf.d, NO server blocks
   const cfg = generateGatewayNginx({
     nginxPort: 4180,
-    autheliaPort: 9091,
-    basePath: "/authelia",
-    hosts: [{ host: "demo.ngrok-free.app", port: 5173 }],
     nginxRoot: "/tmp/x/nginx",
+    hosts: [{ host: "demo.ngrok-free.app", port: 5173 }],
   });
-  assert.match(cfg, /server_name demo\\.ngrok-free\\.app/);
-  assert.match(cfg, /auth_request \/authelia\/api\/authz\/auth-request/);
-  assert.match(cfg, /proxy_pass http:\/\/127\.0\.0\.1:5173/);
-  assert.match(cfg, /location \/authelia\//);
-  // escaped dots in server_name
-  assert.match(cfg, /demo\\\.ngrok-free\\\.app/);
+  assert.match(cfg, /include \/tmp\/x\/nginx\/conf\.d\/\*\.conf;/);
+  assert.doesNotMatch(cfg, /server_name demo\.ngrok-free\.app/);
+  // per-host file carries the server block + auth
+  const host = generateHostNginx(
+    { host: "demo.ngrok-free.app", port: 5173, authPort: 9091, basePath: "/authelia", authMode: "forward-auth" },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.match(host, /server_name demo\\.ngrok-free\\.app/);
+  assert.match(host, /auth_request \/authelia\/api\/authz\/auth-request/);
+  assert.match(host, /proxy_pass http:\/\/127\.0\.0\.1:5173/);
+  assert.match(host, /location \/authelia\//);
 });
-
 test("gateway: start/stop lifecycle with a real nginx binary", { timeout: 30_000 }, async () => {
   const { GatewayController } = await loadGateway();
   const { cacheDir, configDir, base } = tempDirs();
@@ -234,6 +238,7 @@ sleep 30
     resolveTool: async () => fakeAuthelia,
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     pickPort: async () => 19140,
     log: () => {},
   };
@@ -276,7 +281,8 @@ test("basic user management via htpasswd (openssl apr1)", { timeout: 30_000 }, a
   const { BasicAuthProvider } = await import("../src/providers/basic.ts");
   const { cacheDir, configDir } = tempDirs();
   const provider = new BasicAuthProvider(
-    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort: async () => 0, log: () => {} },
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
+    registerPid: () => {}, pickPort: async () => 0, log: () => {} },
     { user: { name: "admin", password: "pw" } },
   );
   await provider.prepare();
@@ -314,6 +320,7 @@ test("AuthRegistry userManagers() detects UserManager providers", async () => {
     resolveTool: async () => "",
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     pickPort: async () => 0,
     log: () => {},
   });

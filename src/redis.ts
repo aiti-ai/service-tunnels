@@ -18,6 +18,8 @@ export interface RedisControllerOptions {
   port?: number;
   redisBin?: string;
   log?: (line: string) => void;
+  /** Called after redis spawns (pid registration for cleanup). */
+  registerPid?: (role: string, pid: number) => void;
 }
 
 /** Pre-assign a free local port. */
@@ -121,6 +123,7 @@ export class RedisController {
     );
     child.stderr?.on("data", (c) => this.#opts.log?.(`redis: ${c.toString().trim()}`));
     this.#child = child;
+    this.#opts.registerPid?.("redis", child.pid ?? 0);
     // wait for the listener
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {

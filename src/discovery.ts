@@ -35,6 +35,10 @@ export interface ServicePortInfo {
   cmdline: string;
   /** Every concrete address the port is listening on (wildcards expanded). */
   addresses: string[];
+  /** Username of the process owner (filled when requested). */
+  username?: string;
+  /** UID of the process owner (Linux/macOS only). */
+  uid?: number;
 }
 
 export interface DiscoveryOptions {
@@ -652,4 +656,242 @@ export function stripBasePath(pathname: string, basePath: string): string {
   if (pathname === base) return "/";
   if (pathname.startsWith(`${base}/`)) return pathname.slice(base.length);
   return pathname;
+}
+
+// ── Port ownership verification ───────────────────────────────────────────────
+
+/** Extended port info with user information. */
+export interface PortOwnerInfo extends Omit<ServicePortInfo, "username" | "uid"> {
+  username: string;
+  uid?: number;
+}
+
+/** Get the UID of a process (Linux/macOS). Returns null on error or unsupported. */
+function getProcessUid(pid: number): number | null {
+  if (process.platform === "linux") {
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = /^Uid:\s+(\d+)/m.exec(status);
+      return m ? Number(m[1]) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync("ps", ["-o", "uid=", "-p", String(pid)], { encoding: "utf8" });
+      const uid = Number(out.trim());
+      return Number.isFinite(uid) ? uid : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Get the username of a process (Linux/macOS/Windows). */
+function getProcessUsername(pid: number): string | null {
+  if (process.platform === "linux") {
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, "utf8");
+      const m = /^Uid:\s+(\d+)/m.exec(status);
+      if (!m) return null;
+      const uid = Number(m[1]);
+      const passwd = readFileSync("/etc/passwd", "utf8");
+      for (const line of passwd.split("\n")) {
+        const parts = line.split(":");
+        if (parts.length >= 3 && parts[2] === String(uid)) {
+          return parts[0]!;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    try {
+      const uid = getProcessUid(pid);
+      if (uid === null) return null;
+      const out = execFileSync("id", ["-un", String(uid)], { encoding: "utf8" });
+      return out.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "win32") {
+    try {
+      const cmd =
+        'Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ' +
+        pid +
+        ' } | ForEach-Object { $_.GetOwner().User }';
+      const out = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", cmd],
+        { encoding: "utf8", maxBuffer: 1024 * 1024 },
+      );
+      return out.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Get the current username. */
+export function getCurrentUsername(): string {
+  if (process.platform === "win32") {
+    return process.env.USERNAME || process.env.USER || "unknown";
+  }
+  return process.env.USER || process.env.LOGNAME || "unknown";
+}
+
+/** Get the current UID (Linux/macOS only). */
+function getCurrentUid(): number | null {
+  if (process.platform === "win32") return null;
+  return process.getuid ? process.getuid() : null;
+}
+
+/** Find all processes listening on a specific port (not limited to descendants). */
+function findPortListeners(port: number, internal: InternalRegistry): PortOwnerInfo[] {
+  const result: PortOwnerInfo[] = [];
+
+  if (process.platform === "linux") {
+    const inodeToSocket = parseNetListenTables();
+    const pids = listAllPids();
+
+    for (const pid of pids) {
+      if (processHasRole(pid)) continue; // skip framework helpers
+      for (const sock of pidsListeningSockets(pid, inodeToSocket)) {
+        if (sock.port === port && !internal.isInternalPort(port)) {
+          const username = getProcessUsername(pid);
+          const uid = getProcessUid(pid);
+          result.push({
+            port,
+            pid,
+            process: readComm(pid),
+            cmdline: readCommandLine(pid),
+            addresses: [sock.address],
+            username: username || "unknown",
+            uid: uid ?? undefined,
+          });
+        }
+      }
+    }
+  } else if (process.platform === "darwin") {
+    try {
+      const out = execFileSync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-P"], {
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      for (const line of out.split("\n").slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 9) continue;
+        const parsed = parseLsofAddress(parts[8]!);
+        if (!parsed || parsed.port !== port) continue;
+        if (internal.isInternalPort(port)) continue;
+        const pid = Number(parts[1]!);
+        const username = getProcessUsername(pid);
+        const uid = getProcessUid(pid);
+        result.push({
+          port,
+          pid,
+          process: parts[0]!,
+          cmdline: parts[8]!,
+          addresses: [parsed.address],
+          username: username || "unknown",
+          uid: uid ?? undefined,
+        });
+      }
+    } catch {
+      // lsof failed
+    }
+  } else if (process.platform === "win32") {
+    try {
+      const out = execFileSync("netstat", ["-ano"], {
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      for (const line of out.split("\n")) {
+        if (!/LISTENING/.test(line)) continue;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 5) continue;
+        const parsed = parseNetstatAddress(parts[1]!);
+        if (!parsed || parsed.port !== port) continue;
+        if (internal.isInternalPort(port)) continue;
+        const pid = Number(parts[4]!);
+        const username = getProcessUsername(pid);
+      result.push({
+          port,
+          pid,
+          process: "unknown",
+          cmdline: "",
+          addresses: [parsed.address],
+          username: username || "unknown",
+        });
+      }
+    } catch {
+      // netstat failed
+    }
+  }
+
+  // Expand wildcard addresses
+  for (const info of result) {
+    info.addresses = expandListeningAddresses(info.addresses);
+  }
+
+  return result;
+}
+
+/**
+ * Verify that a port is owned by the current user.
+ *
+ * This is a security check to prevent tunneling ports owned by other users.
+ * The check can be bypassed with the `--force` flag.
+ *
+ * @returns `{ allowed: true }` if port is owned by current user
+ *          `{ allowed: false, reason: string }` if not
+ */
+export function verifyPortOwner(port: number, internal: InternalRegistry): {
+  allowed: boolean;
+  reason?: string;
+  owners?: PortOwnerInfo[];
+} {
+  const listeners = findPortListeners(port, internal);
+
+  if (listeners.length === 0) {
+    return { allowed: false, reason: `Port ${port} is not being listened to by any process` };
+  }
+
+  const currentUser = getCurrentUsername();
+  const currentUid = getCurrentUid();
+
+  // Check if any listener is owned by the current user
+  for (const listener of listeners) {
+    let isOwner = false;
+
+    if (process.platform === "win32") {
+      // Windows: compare usernames (case-insensitive)
+      isOwner = listener.username.toLowerCase() === currentUser.toLowerCase();
+    } else {
+      // Unix-like: compare UIDs first, then usernames as fallback
+      if (currentUid !== null && listener.uid !== undefined) {
+        isOwner = listener.uid === currentUid;
+      } else {
+        isOwner = listener.username === currentUser;
+      }
+    }
+
+    if (isOwner) {
+      return { allowed: true };
+    }
+  }
+
+  // None of the listeners are owned by the current user
+  const owners = listeners.map((l) => `${l.process} (${l.username})`).join(", ");
+  return {
+    allowed: false,
+    reason: `Port ${port} is owned by other user(s): ${owners}. Use --force to tunnel anyway.`,
+    owners: listeners,
+  };
 }

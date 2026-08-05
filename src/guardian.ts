@@ -1,5 +1,6 @@
 import { execFileSync } from "child_process";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync, statSync, rmSync } from "fs";
+import { join } from "path";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 
 /**
@@ -66,24 +67,160 @@ export function readStarttime(pid: number): string {
   }
 }
 
+/** Recursively collect ALL descendants of `rootPid` (direct children +
+
+/** Recursively collect ALL descendants of `rootPid` (direct children +
+ *  grandchildren + deeper) by walking /proc ppid chains. Done WHILE the
+ *  parent is alive so pids are captured before any reparenting; the kill is
+ *  by pid, so it stays valid after the parent dies. */
+function collectDescendants(rootPid: number): Set<number> {
+  const out = new Set<number>();
+  let frontier = [rootPid];
+  // build pid → ppid once, then BFS
+  const ppidOf = new Map<number, number>();
+  let pids: string[] = [];
+  try {
+    pids = readdirSync("/proc").filter((n) => /^\d+$/.test(n));
+  } catch {
+    return out;
+  }
+  for (const p of pids) {
+    const n = Number(p);
+    try {
+      const stat = readFileSync(`/proc/${p}/stat`, "utf8");
+      const after = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      ppidOf.set(n, Number(after[1]) || 0);
+    } catch {}
+  }
+  while (frontier.length) {
+    const next: number[] = [];
+    for (const parent of frontier) {
+      for (const [pid, ppid] of ppidOf) {
+        if (ppid === parent && !out.has(pid)) {
+          out.add(pid);
+          next.push(pid);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return out;
+}
+
+/** Read the registration file (pids our framework spawned and registered). */
+function readRegistered(file: string | undefined): Set<number> {
+  const out = new Set<number>();
+  if (!file) return out;
+  try {
+    const raw = readFileSync(file, "utf8");
+    const arr = JSON.parse(raw) as { pid: number; role: string; t: number }[];
+    for (const r of arr) {
+      if (r?.pid && Number.isInteger(r.pid) && r.pid > 0) out.add(r.pid);
+    }
+  } catch {
+    // missing / malformed → empty
+  }
+  return out;
+}
+
+/** Clean per-parent artifacts older than `maxAgeMs` whose owner process is
+ *  gone (pid no longer exists). Covers tmp/nginx-<pid>/ folders and
+ *  registered-pids-<pid>.json. The guardian runs this periodically so stale
+ *  folders from long-dead instances don't accumulate. */
+function cleanupStaleDirs(cacheDir: string, maxAgeMs = 7 * 24 * 3600 * 1000): void {
+  if (!cacheDir) return;
+  const pidAlive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const consider = (path: string, pidStr: string) => {
+    const pid = Number(pidStr);
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    if (pidAlive(pid)) return; // owner still alive → keep
+    try {
+      const st = statSync(path);
+      if (Date.now() - st.mtimeMs > maxAgeMs) {
+        rmSync(path, { recursive: true, force: true });
+      }
+    } catch {
+      // vanished already
+    }
+  };
+  try {
+    for (const e of readdirSync(join(cacheDir, "tmp"), { withFileTypes: true })) {
+      const m = /^nginx-(\d+)$/.exec(e.name);
+      if (m && m[1]) consider(join(cacheDir, "tmp", e.name), m[1]);
+    }
+  } catch {}
+  try {
+    for (const f of readdirSync(cacheDir)) {
+      const m = /^registered-pids-(\d+)\.json$/.exec(f);
+      if (m && m[1]) consider(join(cacheDir, f), m[1]);
+    }
+  } catch {}
+}
+
 async function main(): Promise<void> {
   const parentPid = Number(process.argv[2] ?? 0);
   const parentStarttime = process.argv[3] ? String(process.argv[3]) : "";
   const intervalMs = Number(process.argv[4] ?? 1_000);
+  const registrationFile = process.argv[5] || "";
+  const cacheDir = process.argv[6] || "";
   if (!parentPid) return;
-  // loop forever; on parent death, reap role-marked helpers then exit
+  // Low-frequency (5s) full-descendant scan + registration read, recorded
+  // while the parent is alive; on parent death kill the recorded set + marker.
+  const scanIntervalMs = 5_000;
+  const cleanupIntervalMs = 6 * 3600 * 1000; // stale-folder sweep every 6h
+  let descendants = new Set<number>();
+  let registered = new Set<number>();
+  let lastScan = 0;
+  let lastCleanup = 0;
   for (;;) {
     await new Promise((r) => setTimeout(r, intervalMs));
-    if (parentAlive(parentPid, parentStarttime)) continue;
-    // parent gone — clean up OUR helpers only (marker-scoped: concurrent
-    // instances and other tests are never touched), then exit
+    if (parentAlive(parentPid, parentStarttime)) {
+      if (Date.now() - lastScan >= scanIntervalMs) {
+        descendants = collectDescendants(parentPid);
+        registered = readRegistered(registrationFile);
+        lastScan = Date.now();
+      }
+      // periodic sweep of stale per-parent artifacts (older than 7d + owner dead)
+      if (Date.now() - lastCleanup >= cleanupIntervalMs) {
+        cleanupStaleDirs(cacheDir);
+        lastCleanup = Date.now();
+      }
+      continue;
+    }
+    // parent gone — kill everything we recorded (by pid; valid even after
+    // reparenting), then marker-scoped stragglers (detached tunnels).
     const marker = process.env.SERVICE_TUNNELS_MARKER ?? "";
+    const targets = new Set([...descendants, ...registered]);
+    const killSig = (sig: NodeJS.Signals) => {
+      let n = 0;
+      for (const pid of targets) {
+        try {
+          process.kill(pid, sig);
+          n++;
+        } catch {}
+      }
+      return n;
+    };
+    const n = killSig("SIGTERM");
+    if (n > 0) await new Promise((r) => setTimeout(r, 300));
+    killSig("SIGKILL");
+    // per-PPID path marker: catches processes that strip their env (nginx's
+    // argv still carries `-c .../nginx-<ppid>/nginx.conf`) — a second,
+    // path-based ownership signal in addition to the env marker.
+    const perPpidPath = `nginx-${parentPid}`;
     try {
-      await killRoleProcesses("SIGTERM", 300, marker);
+      await killRoleProcesses("SIGTERM", 300, marker, parentPid, perPpidPath);
     } catch {
       // fall through to sync variant
     }
-    killRoleProcessesSync(marker);
+    killRoleProcessesSync(marker, parentPid, perPpidPath);
     process.exit(0);
   }
 }

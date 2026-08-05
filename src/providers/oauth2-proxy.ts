@@ -127,6 +127,7 @@ export class OAuth2ProxyProvider implements AuthProvider {
     child.stderr?.on("data", (c) => this.#ctx.log(`oauth2-proxy: ${c.toString().trim()}`));
     this.#child = child;
     this.#ctx.registerInternal("oauth2-proxy", this.#port);
+    this.#ctx.registerPid("oauth2-proxy", child.pid ?? 0);
     // wait for readiness (TCP probe)
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline && alive(child.pid ?? 0)) {

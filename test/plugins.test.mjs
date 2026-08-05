@@ -26,6 +26,7 @@ function providerCtx(configDir, cacheDir, overrides = {}) {
     resolveTool: async () => "/usr/bin/authelia",
     registerInternal: () => {},
     unregisterInternal: () => {},
+    registerPid: () => {},
     pickPort: async () => 20001,
     log: () => {},
     ...overrides,
@@ -122,29 +123,23 @@ test("basic provider: htpasswd generation + nginx auth_basic config", { timeout:
     // not a plaintext password
     assert.equal(htpasswd.includes("pw123"), false);
 
-    // nginx config in basic mode has auth_basic and NO auth_request
-    const conf = generateGatewayNginx({
-      nginxPort: 4100,
-      authPort: 9091,
-      basePath: "/authelia",
-      authMode: "basic",
-      htpasswdFile: join(cacheDir, "tmp", "basic", "htpasswd"),
-      hosts: [{ host: "demo.ngrok-free.app", port: 5173 }],
-      nginxRoot: join(cacheDir, "tmp", "nginx"),
-    });
-    assert.match(conf, /auth_basic "service-tunnels"/);
-    assert.match(conf, /auth_basic_user_file/);
-    assert.equal(conf.includes("auth_request"), false, "basic mode must not use auth_request");
+    // nginx config in basic mode has auth_basic and NO auth_request (in the
+    // per-host conf.d file — generateHostNginx)
+    const { generateHostNginx } = await loadGateway();
+    const host = generateHostNginx(
+      { host: "demo.ngrok-free.app", port: 5173, authMode: "basic", htpasswdFile: join(cacheDir, "tmp", "basic", "htpasswd") },
+      { nginxPort: 4100, nginxRoot: join(cacheDir, "tmp", "nginx") },
+    );
+    assert.match(host, /auth_basic "service-tunnels"/);
+    assert.match(host, /auth_basic_user_file/);
+    assert.equal(host.includes("auth_request"), false, "basic mode must not use auth_request");
 
     // default (forward-auth) mode still has auth_request
-    const conf2 = generateGatewayNginx({
-      nginxPort: 4100,
-      authPort: 9091,
-      basePath: "/authelia",
-      hosts: [{ host: "demo.ngrok-free.app", port: 5173 }],
-      nginxRoot: join(cacheDir, "tmp", "nginx"),
-    });
-    assert.match(conf2, /auth_request \/authelia\/api\/authz\/auth-request/);
+    const host2 = generateHostNginx(
+      { host: "demo.ngrok-free.app", port: 5173, authMode: "forward-auth", authPort: 9091, basePath: "/authelia" },
+      { nginxPort: 4100, nginxRoot: join(cacheDir, "tmp", "nginx") },
+    );
+    assert.match(host2, /auth_request \/authelia\/api\/authz\/auth-request/);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
@@ -208,12 +203,18 @@ test("expose --auth basic end-to-end with real nginx", { timeout: 40_000 }, asyn
     assert.ok(nginxPort > 0);
     assert.equal(res.url, "https://demo-basic.trycloudflare.com");
 
-    // the gateway config carries auth_basic for this host (basic mode)
-    const conf = readFileSync(join(cacheDir, "tmp", "nginx", "nginx.conf"), "utf8");
-    assert.match(conf, /auth_basic "service-tunnels"/);
-    assert.match(conf, /server_name demo-basic/);
+    // the gateway config carries auth_basic for this host — inline in the
+    // main nginx.conf (single-config mode, per-ppid folder).
+    const { readdirSync } = await import("node:fs");
+    const nginxDir = readdirSync(join(cacheDir, "tmp")).find((n) => /^nginx-\d+$/.test(n));
+    assert.ok(nginxDir, "per-ppid nginx dir exists");
+    const hostConf = readFileSync(join(cacheDir, "tmp", nginxDir, "conf.d", "demo-basic.trycloudflare.com.conf"), "utf8");
+    assert.match(hostConf, /auth_basic "service-tunnels"/);
+    assert.match(hostConf, /server_name demo-basic/);
+    const mainConf = readFileSync(join(cacheDir, "tmp", nginxDir, "nginx.conf"), "utf8");
+    assert.match(mainConf, /include .*conf\.d\/\*\.conf;/);
     // and nginx -t still validates it
-    execFileSync(nginxBin, ["-t", "-c", join(cacheDir, "tmp", "nginx", "nginx.conf")], { stdio: "ignore" });
+    execFileSync(nginxBin, ["-t", "-c", join(cacheDir, "tmp", nginxDir, "nginx.conf")], { stdio: "ignore" });
 
     // HTTP round trip (guarded: some CI sandboxes hang http to our nginx)
     const requestWithTimeout = (authorization) =>

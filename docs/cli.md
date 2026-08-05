@@ -74,6 +74,8 @@ service-tunnels tunnel add web --type ngrok --target 4180 [--domain x.ngrok-free
 service-tunnels tunnel add api --type frpc --target 8080 [--auth authelia]
 service-tunnels tunnel add ssh1 --type ssh --target 3000            # serveo：ssh -R 80:127.0.0.1:3000 serveo.net
 service-tunnels tunnel add lt1  --type localtunnel --target 5173    # lt --port 5173；随机域名走动态登记即可，--subdomain 可选
+service-tunnels tunnel add b1   --type bore --target 5173 [--server localhost] [--remote-port 8080] [--token s3cret]  # 自建 bore server，URL 自动 http://host:port
+service-tunnels tunnel add ssh2 --type ssh --target 5173 --host localhost --user wind --remote-port 8080   # ssh -R 8080:127.0.0.1:5173 wind@localhost（本机快速测）
 service-tunnels tunnel add cf1 --type cloudflared --target 4180
 service-tunnels tunnel start web
 service-tunnels tunnel stop web

@@ -2,6 +2,8 @@ import {
   resolveDirs,
   cachePaths,
   readConfigFile,
+  writeConfigFile,
+  hardenDir,
   type DirOptions,
   type ServiceTunnelsDirs,
 } from "./config.ts";
@@ -20,6 +22,7 @@ import {
   type DiscoveryOptions,
 } from "./discovery.ts";
 import { ensureMarker } from "./marker.ts";
+import { registerPid as registerPidToFile, registrationFilePath } from "./pid-registry.ts";
 import {
   daemonStatus,
   startDaemon,
@@ -28,14 +31,16 @@ import {
   type DaemonStatus,
 } from "./daemon.ts";
 import { readState } from "./state.ts";
-import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths } from "./tools.ts";
+import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths, type ToolRegistryOptions } from "./tools.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
-import { TunnelManager, extractTunnelUrl, type TunnelConfig, type TunnelInfo } from "./tunnels.ts";
+import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
+import { GatewayController } from "./gateway.ts";
+import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
-import { AuthRegistry, loadProviderPlugins } from "./auth-registry.ts";
+import { AuthRegistry, loadProviderPlugins, authProviderSchemas } from "./auth-registry.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
 import type { AuthUser } from "./auth-provider.ts";
 
@@ -43,11 +48,12 @@ export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
 export type { DaemonStatus } from "./daemon.ts";
 export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
-export type { TunnelConfig, TunnelInfo, TunnelType } from "./tunnels.ts";
-export { extractTunnelUrl } from "./tunnels.ts";
+export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from "./tunnels.ts";
+export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
+export { authProviderSchemas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
-export { GatewayController, generateGatewayNginx } from "./gateway.ts";
+export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
 export { RedisController } from "./redis.ts";
 
 export {
@@ -75,6 +81,10 @@ export interface ServiceTunnelsOptions extends DirOptions {
   toolMirrors?: Record<string, string[]>;
   /** Try mirrors before official sources (CN networks). */
   preferMirrors?: boolean;
+  /** Allow on-demand tool downloads when a tool is missing (default true).
+   *  False → only PATH/cache tools are usable. Persisted to config so the UI
+   *  toggle survives restarts; library opts win over the config file. */
+  allowToolDownload?: boolean;
   /** Spawn a parent-death guardian (default true): if this process exits
    *  without cleanup, a detached guardian kills our framework helpers. */
   guardian?: boolean;
@@ -110,6 +120,10 @@ export interface ServiceTunnels {
     resolve(name: string): string | null;
     /** All known tools + current resolution + source. */
     list(): ToolResolution[];
+    /** Whether on-demand downloads are currently allowed. */
+    allowDownload(): boolean;
+    /** Toggle on-demand downloads (persisted to service-tunnels.json). */
+    setAllowDownload(allowed: boolean): void;
   };
   proxy: {
     /** Create a wildcard-host reverse proxy (allow-list = discovery cache). */
@@ -130,6 +144,18 @@ export interface ServiceTunnels {
     stopAll(): Promise<void>;
     /** Restore URLs from state.json after a restart. */
     hydrate(): void;
+    /** Tunnel types that support raw TCP (for the UI: only these selectable
+     *  when exposing a tcp port). */
+    tcpSupport(): string[];
+  };
+  /** Provider/tunnel parameter schemas — data-driven forms for clients
+   *  (pi-web renders inputs from these; adding a type/provider needs no
+   *  client changes). */
+  schemas: {
+    tunnels(): Record<TunnelType, ParamSpec[]>;
+    tunnel(type: string): ParamSpec[];
+    authProviders(): Promise<Record<string, ParamSpec[]>>;
+    metas(): Record<TunnelType, TunnelMeta>;
   };
   auth: {
     /** Built-in + plugin providers. */
@@ -163,6 +189,8 @@ export interface ServiceTunnels {
     removeUser(name: string, provider?: string | string[]): Promise<string[]>;
     /** Provider types with local user databases (e.g. ["authelia","basic"]). */
     userManagers(): string[];
+    /** Provider types that expose TOTP 2FA management (portal). */
+    totpProviders(): string[];
     /** Enroll TOTP 2FA for a user (portal) — returns secret + otpauth URL. */
     totpEnroll(name: string, provider?: string): Promise<{ secret: string; otpauthUrl: string }>;
     /** Disable TOTP 2FA for a user (portal). */
@@ -172,6 +200,13 @@ export interface ServiceTunnels {
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
+  /** Stop everything: all tunnels + the shared nginx gateway + redis.
+   *  Call on normal shutdown so framework helpers don't outlive the host
+   *  (the guardian only covers crash/SIGKILL). */
+  shutdown(): Promise<void>;
+  /** Exposes made in this process lifecycle with their metadata (port, tunnel
+   *  type, auth provider, url, running, pid). For display; not persisted. */
+  exposes(): Array<{ name: string; port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; url: string | null; running: boolean; pid: number | null; accessLog: string | null; errorLog: string | null }>;
 }
 
 /**
@@ -195,26 +230,73 @@ function resolveUserTargets(
 
 export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceTunnels {
   const dirs = resolveDirs(opts);
-  // CLI/daemon 无代码入口时，从配置文件读镜像设置；库选项优先。
+  // Hardening: the cache holds password hashes, session secrets and tunnel
+  // tokens — make the whole tree unreadable to other users (umask may be 022).
+  hardenDir(dirs.cacheDir, true);
   const file = readConfigFile(dirs.configDir);
   ensureMarker(opts.marker);
+  // PID registration: framework processes register here; the guardian reads
+  // this file on its low-frequency scan and reaps them on parent death.
+  // Scoped per parent pid so multiple owners never share a file.
+  const registerPid = (role: string, pid: number) => registerPidToFile(dirs.cacheDir, process.pid, role, pid);
   if (opts.guardian !== false) {
-    spawnGuardian(process.pid);
+    spawnGuardian(process.pid, { registrationFile: registrationFilePath(dirs.cacheDir, process.pid), cacheDir: dirs.cacheDir });
   }
   const internal = new InternalRegistry();
+  // Priority: explicit option > env SERVICE_TUNNELS_ALLOW_DOWNLOAD > config-file
+  // fallback > default true. Never persisted — config file is a read-only
+  // fallback, not a dependency.
+  const envAllow = process.env.SERVICE_TUNNELS_ALLOW_DOWNLOAD;
+  let allowToolDownload =
+    opts.allowToolDownload ??
+    (envAllow !== undefined
+      ? !(envAllow === "0" || envAllow.toLowerCase() === "false" || envAllow.toLowerCase() === "off")
+      : file.allowToolDownload ?? true);
   const toolOpts = {
     cacheDir: dirs.cacheDir,
     toolPaths: mergeToolPaths(opts.toolPaths),
     toolMirrors: opts.toolMirrors ?? file.toolMirrors,
     preferMirrors: opts.preferMirrors ?? file.preferMirrors,
+    allowToolDownload,
   };
   const tm = new TunnelManager({
     cacheDir: dirs.cacheDir,
     resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+    registerPid,
     log: () => {},
   });
   for (const cfg of readTunnelConfigs(dirs.configDir)) tm.add(cfg);
   tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels);
+
+  // Shared singletons — ONE nginx gateway + ONE redis for ALL exposes, so
+  // repeated expose() calls reuse them instead of spawning a fresh nginx/
+  // redis each time (which leaked processes and confused discovery). Both
+  // register their port in `internal` so discovery excludes them.
+  const gateway = new GatewayController({
+    configDir: dirs.configDir,
+    cacheDir: dirs.cacheDir,
+    port: 0,
+    registerInternal: (role, p) => internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+    unregisterInternal: (role) => internal.unregister(role),
+    registerPid,
+    log: () => {},
+  });
+  const redis = new RedisController({ cacheDir: dirs.cacheDir, port: 0, log: () => {}, registerPid });
+  // In-memory record of exposes made in THIS process lifecycle (port + tunnel
+  // type + auth provider + url), so callers (pi-web) can display active exposes
+  // with their metadata. Not persisted across restarts.
+  const exposes = new Map<string, { port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string }>();
+
+  /** Unregister the gateway host an expose registered (so stopping one expose
+   *  doesn't leave a stale nginx server block — localhost:PORT hosts would
+   *  otherwise collide with the next expose since nginx server_name ignores
+   *  the port part). */
+  const unregisterExposeHost = async (name: string): Promise<void> => {
+    const ex = exposes.get(name);
+    if (ex?.host) {
+      try { await gateway.unregisterHost(ex.host); } catch { /* best effort */ }
+    }
+  };
 
   return {
     dirs,
@@ -257,6 +339,21 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
                 : null;
           return { name, path: onPath, source };
         }),
+      allowDownload: () => allowToolDownload,
+      setAllowDownload: (allowed: boolean) => {
+        // git-config style: persist to service-tunnels.json. Reads keep the
+        // priority params > env > file > default, so per-expose params still
+        // win; the file is the durable default, not a hard dependency.
+        allowToolDownload = !!allowed;
+        toolOpts.allowToolDownload = allowToolDownload;
+        try {
+          const f = readConfigFile(dirs.configDir);
+          f.allowToolDownload = allowToolDownload;
+          writeConfigFile(dirs.configDir, f);
+        } catch {
+          // config write failures must not break the toggle
+        }
+      },
     },
     proxy: {
       create: (o: Omit<ProxyOptions, "internal"> = {}) =>
@@ -303,12 +400,19 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         stop: async (name: string) => {
           await tm.stop(name);
           persistState();
+          await unregisterExposeHost(name);
         },
         stopAll: async () => {
+          for (const name of [...exposes.keys()]) await unregisterExposeHost(name);
           await tm.stopAll();
           persistState();
         },
         hydrate: () => tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels),
+        tcpSupport: () => {
+          const fixed: TunnelType[] = ["ssh"]; // resolved via PATH, not TOOLS
+          const fromTools = (Object.keys(TOOLS) as TunnelType[]).filter((t) => tunnelSupportsTcp(t));
+          return [...new Set([...fixed, ...fromTools])];
+        },
       };
     })(),
     auth: (() => {
@@ -320,6 +424,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           registerInternal: (role, port) =>
             internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
           unregisterInternal: (role) => internal.unregister(role),
+          registerPid,
           pickPort,
           log: () => {},
         },
@@ -329,19 +434,32 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         for (const f of plugins) registry.register(f);
       });
       return {
-        providers: () => registry.list(),
+        providers: () => ["none", ...registry.list()],
         registerProvider: (f: AuthProviderFactory) => registry.register(f),
-        expose: (port: number, o: Omit<ExposeOptions, "port"> = {}) =>
-          exposeFlow(port, { ...o, port }, {
+        expose: async (port: number, o: Omit<ExposeOptions, "port"> = {}) => {
+          const r = await exposeFlow(port, { ...o, port }, {
             configDir: dirs.configDir,
             cacheDir: dirs.cacheDir,
-            resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+            resolveTool: async (name: string) =>
+              // per-expose param beats the shared toolOpts (env > config fallback)
+              o.allowToolDownload !== undefined
+                ? st_tools_ensure(name, { ...toolOpts, allowToolDownload: o.allowToolDownload })
+                : st_tools_ensure(name, toolOpts),
             internal,
             tunnels: tm,
             auth: registry,
+            gateway,
+            redis,
+            registerPid,
+            onTunnelStop: unregisterExposeHost,
             log: () => {},
-          }),
+          });
+          // record this expose's metadata for the lifecycle display
+          exposes.set(r.tunnel, { port, tunnelType: o.tunnelType, provider: r.provider, loginUrl: r.loginUrl, protocol: r.protocol, host: r.url ? new URL(r.url).host : undefined });
+          return r;
+        },
         userManagers: () => registry.userManagers(),
+        totpProviders: () => registry.totpProviders(),
         totpEnroll: async (name: string, provider?: string) => {
           const mgr = registry.userManager(provider ?? "portal") as unknown as {
             totpEnroll(n: string): Promise<{ secret: string; otpauthUrl: string }>;
@@ -383,7 +501,41 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         },
       };
     })(),
+    /** Provider/tunnel parameter schemas — data-driven forms for clients
+     *  (pi-web renders inputs from these; no client changes per provider). */
+    schemas: {
+      tunnels: () => tunnelParamSchemas(),
+      tunnel: (type: string) => tunnelParamSchema(type as TunnelType),
+      metas: () => tunnelMetas(),
+      authProviders: () => authProviderSchemas(dirs.configDir),
+    },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
+    shutdown: async () => {
+      await tm.stopAll();
+      try { await gateway.stop(); } catch {}
+      try { await redis.stop(); } catch {}
+    },
+    /** Exposes made in this process lifecycle (port + tunnel type + auth
+     *  provider + url + running), for display. Not persisted. */
+    exposes: () =>
+      [...exposes.entries()].map(([name, m]) => {
+        const tun = tm.get(name);
+        const host = tun?.url ? new URL(tun.url).host : null;
+        const logs = host ? gateway.logPaths(host) : null;
+        return {
+          name,
+          port: m.port,
+          tunnelType: m.tunnelType,
+          provider: m.provider,
+          loginUrl: m.loginUrl,
+          protocol: m.protocol,
+          url: tun?.url ?? null,
+          running: tun?.running ?? false,
+          pid: tun?.pid ?? null,
+          accessLog: logs?.access ?? null,
+          errorLog: logs?.error ?? null,
+        };
+      }),
   };
 }
 
@@ -402,7 +554,7 @@ async function pickPort(): Promise<number> {
 }
 
 // helper: resolve tool via tools.ts (keeps the IIFE below minimal)
-async function st_tools_ensure(name: string, toolOpts: { cacheDir: string; toolPaths?: Record<string, string> }): Promise<string> {
+async function st_tools_ensure(name: string, toolOpts: ToolRegistryOptions): Promise<string> {
   const def = TOOLS[name];
   if (!def) throw new Error(`unknown tool: ${name}`);
   return ensureTool(def, toolOpts);

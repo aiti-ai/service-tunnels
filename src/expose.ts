@@ -1,10 +1,36 @@
-import { GatewayController, type GatewayAuthMode } from "./gateway.ts";
+import { GatewayController, type GatewayAuthMode, detectProtocol } from "./gateway.ts";
 import { readConfigFile } from "./config.ts";
 import { RedisController } from "./redis.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 import { AuthRegistry } from "./auth-registry.ts";
+import { tunnelSupportsTcp } from "./tunnels.ts";
 import type { TunnelManager } from "./tunnels.ts";
 import { InternalRegistry } from "./internal.ts";
+
+/** "oidc.issuerUrl" → { oidc: { issuerUrl } } — schema-driven form params
+ *  arrive flat; provider options are nested. */
+function unflattenParams(params: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [key, value] of Object.entries(params)) {
+    const parts = key.split(".");
+    let cur = out;
+    let ok = true;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const k = parts[i]!;
+      // prototype-pollution guard: never traverse __proto__/constructor/prototype
+      if (k === "__proto__" || k === "constructor" || k === "prototype") {
+        ok = false;
+        break;
+      }
+      if (typeof cur[k] !== "object" || cur[k] === null) cur[k] = Object.create(null);
+      cur = cur[k] as Record<string, unknown>;
+    }
+    if (ok && parts[parts.length - 1] !== "__proto__" && parts[parts.length - 1] !== "constructor") {
+      cur[parts[parts.length - 1]!] = value;
+    }
+  }
+  return out;
+}
 
 /**
  * expose — the one-shot flow: tunnel + (optional) gateway auth.
@@ -27,6 +53,9 @@ export interface ExposeOptions {
   provider?: string;
   tunnelName?: string;
   tunnelType?: string;
+  /** Forwarding protocol: "http"/"https" via the nginx gateway (auth/logs);
+   *  "tcp" raw direct tunnel (no gateway). Default: auto-detect the app port. */
+  protocol?: "http" | "https" | "tcp";
   policy?: "one_factor" | "two_factor" | "deny";
   nginxPort?: number;
   autheliaPort?: number;
@@ -36,15 +65,36 @@ export interface ExposeOptions {
   sessionSecret?: string;
   /** External authelia reload command (operator-managed authelia). */
   autheliaReloadCmd?: string;
+  /** ngrok authtoken — injected as NGROK_AUTHTOKEN env into the ngrok process
+   *  so it authenticates (otherwise ngrok exits with ERR_NGROK_4018). */
+  ngrokAuthtoken?: string;
+  /** Allow on-demand tool downloads for THIS expose (param > env > config
+   *  fallback > default true). When false, missing tools error instead of
+   *  downloading. */
+  allowToolDownload?: boolean;
+  /** Extra tunnel config fields (schema-driven form): keys are TunnelConfig
+   *  fields (domain/server/token/host/user/port/remotePort/cmd/...). Applied
+   *  BEFORE name/type/target/env so those can't be overridden. */
+  tunnelParams?: Record<string, unknown>;
+  /** Extra auth-provider options (schema-driven form). Dot keys nest
+   *  ("oidc.issuerUrl" → { oidc: { issuerUrl } }). */
+  providerParams?: Record<string, unknown>;
+  /** When true, skip the port ownership check (allow tunneling other users' ports). */
+  force?: boolean;
 }
 
 export interface ExposeResult {
   url: string | null;
   tunnel: string;
+  /** Forwarding protocol used (http/https/tcp) — detected or explicit. */
+  protocol?: "http" | "https" | "tcp";
   provider?: string;
   /** Login portal page (provider basePath under the tunnel URL). */
   loginUrl?: string;
   gateway?: { nginx: number; authelia: number; redis: number };
+  /** Failure reason when `url` is null (e.g. ngrok "not authenticated").
+   *  Surfaced so callers/UI aren't left with a silent null URL. */
+  error?: string;
 }
 
 export interface ExposeContext {
@@ -53,8 +103,19 @@ export interface ExposeContext {
   resolveTool: (name: string) => Promise<string>;
   internal: InternalRegistry;
   tunnels: TunnelManager;
+  /** Register a spawned helper PID (guardian cleanup). */
+  registerPid?: (role: string, pid: number) => void;
   /** Auth provider registry (built-ins + plugins). */
   auth?: AuthRegistry;
+  /** Called after every internal tunnel stop — lets the owner unregister the
+   *  gateway host an old expose registered (nginx server_name ignores the
+   *  port, so stale localhost:PORT hosts collide with the next expose). */
+  onTunnelStop?: (name: string) => void | Promise<void>;
+  /** Shared nginx gateway singleton (one instance for all exposes). When
+   *  omitted, expose() falls back to a local GatewayController. */
+  gateway?: GatewayController;
+  /** Shared redis singleton (one session store for all authelia exposes). */
+  redis?: RedisController;
   log?: (line: string) => void;
 }
 
@@ -78,20 +139,97 @@ async function pickPort(): Promise<number> {
 
 export async function expose(port: number, opts: ExposeOptions, ctx: ExposeContext): Promise<ExposeResult> {
   const log = ctx.log ?? (() => {});
+  
+  // Security check: verify port ownership (unless --force is specified)
+  if (!opts.force) {
+    const { verifyPortOwner } = await import("./discovery.ts");
+    const check = verifyPortOwner(port, ctx.internal);
+    if (!check.allowed) {
+      log(`Security check failed: ${check.reason}`);
+      return {
+        url: null,
+        tunnel: "",
+        error: check.reason ?? "Port ownership verification failed",
+      };
+    }
+    log(`Port ${port} ownership verified (current user)`);
+  } else {
+    log(`--force specified: skipping port ownership check for port ${port}`);
+  }
+  
   const providerType = opts.provider ?? "authelia";
-  const useAuth = opts.auth ?? false;
+  // "none" is a first-class provider = expose WITHOUT auth (like basic but
+  // no auth): skip the whole gateway/auth flow and make a plain tunnel.
+  const useAuth = (opts.auth ?? false) && providerType !== "none";
+  // Forwarding protocol: explicit opts win; else detect the app port
+  // (http/https/tcp). tcp → direct raw tunnel; http/https → nginx gateway.
+  const protocol = opts.protocol ?? (await detectProtocol(port));
+  // ngrok authtoken → NGROK_AUTHTOKEN env on the tunnel process (so ngrok
+  // authenticates instead of exiting ERR_NGROK_4018). Harmless for other types.
+  const tunnelEnv = opts.ngrokAuthtoken ? { NGROK_AUTHTOKEN: opts.ngrokAuthtoken } : undefined;
 
-  if (!useAuth) {
-    // plain tunnel straight to the app
-    const name = opts.tunnelName ?? `expose-${port}`;
+  if (opts.protocol === "tcp") {
+    // raw TCP — NO nginx gateway (nginx is HTTP-only), NO auth: tunnel
+    // straight to the app port. Only TCP-capable tunnel types allowed.
+    const tunnelType = (opts.tunnelType as never) ?? "ngrok";
+    if (!tunnelSupportsTcp(tunnelType)) {
+      return { url: null, tunnel: "", error: `tunnel type "${tunnelType}" does not support tcp forwarding (use ngrok/ssh/frpc)` };
+    }
+    const name = opts.tunnelName ?? `expose-${port}-tcp`;
+    await ctx.tunnels.stop(name);
+    await ctx.onTunnelStop?.(name);
     ctx.tunnels.add({
+      ...(opts.tunnelParams ?? {}),
       name,
       type: (opts.tunnelType as never) ?? "ngrok",
       target: port,
+      protocol: "tcp",
+      env: tunnelEnv,
     });
     await ctx.tunnels.start(name);
     const url = await waitForUrl(ctx.tunnels, name, 30_000);
-    return { url, tunnel: name };
+    return { url, tunnel: name, protocol, ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
+  }
+
+  if (!useAuth) {
+    // "none" auth — route through the shared nginx gateway TOO (like basic but
+    // with no auth), so access/error logs are recorded for every expose. The
+    // only difference from basic is the absence of auth directives.
+    const name = opts.tunnelName ?? `expose-${port}`;
+    const nginxPort = opts.nginxPort ?? 0;
+    const gateway = ctx.gateway ?? new GatewayController({
+      configDir: ctx.configDir,
+      cacheDir: ctx.cacheDir,
+      port: nginxPort,
+      registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+      unregisterInternal: (role) => ctx.internal.unregister(role),
+      log,
+    });
+    const gatewayPort = await gateway.start("none");
+    await ctx.tunnels.stop(name);
+    await ctx.onTunnelStop?.(name);
+    ctx.tunnels.add({
+      ...(opts.tunnelParams ?? {}),
+      name,
+      type: (opts.tunnelType as never) ?? "ngrok",
+      target: gatewayPort,
+      env: tunnelEnv,
+    });
+    await ctx.tunnels.start(name);
+    const url = await waitForUrl(ctx.tunnels, name, 30_000);
+    if (url) {
+      const host = new URL(url).host;
+      const scheme = protocol === "https" ? "https" : "http";
+      try {
+        await gateway.registerHost(host, port, { authMode: "none", scheme });
+      } catch (err) {
+        // unsafe host (injection attempt / non-domain) — roll the tunnel back
+        await ctx.tunnels.stop(name).catch(() => {});
+        await ctx.onTunnelStop?.(name);
+        return { url: null, tunnel: name, protocol, error: `tunnel URL host rejected: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
+    return { url, tunnel: name, protocol, ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
   }
 
   // ── auth flow: shared infrastructure ──────────────────────────────────────
@@ -102,10 +240,15 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   // name so nginx (auth_request) and the provider agree AND generic paths
   // (/{provider}) never collide with app routes (portal → /portal-sneaky-capybara).
   const cfgFile = readConfigFile(ctx.configDir);
-  const basePath = opts.basePath
+  const initialBasePath = opts.basePath
     ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
     ?? defaultBasePath(providerType);
+  // basePath is interpolated into nginx locations + 302 redirects + authelia's
+  // server.address — allow a plain URL path only (no ; {} whitespace quotes
+  // which would inject nginx directives or break the config).
+  const basePath = providerType === "basic" ? "" : sanitizeBasePath(initialBasePath);
   const provider: AuthProvider = registry.create(providerType, {
+    ...unflattenParams(opts.providerParams ?? {}),
     port: opts.autheliaPort,
     basePath,
     sessionSecret: opts.sessionSecret,
@@ -113,10 +256,12 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     user: opts.user,
     externalReloadCmd: opts.autheliaReloadCmd,
   });
-  // the registry caches ONE instance per type — a user-management call may
-  // have created it without a basePath; fix it up so nginx auth_request and
-  // the provider agree
-  if (basePath && provider.setBasePath) await provider.setBasePath(basePath);
+  // The registry caches ONE provider per type (singleton): every expose of
+  // this provider shares the SAME process + basePath. Use the provider's own
+  // basePath (the first expose set it) — do NOT regenerate or setBasePath,
+  // that would rebind the shared provider + restart it and break every other
+  // expose of this type (multiple authelia instances colliding → authz 400).
+  const providerBasePath = (provider as { basePath?: string }).basePath ?? initialBasePath;
 
   const problems = (await provider.validate?.()) ?? [];
   if (problems.length) {
@@ -127,25 +272,31 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   if (provider.capabilities.edgeAuth && !provider.capabilities.localGateway) {
     const name = opts.tunnelName ?? `expose-${port}`;
     const tunnelAuth = provider.renderTunnelAuth?.() ?? {};
+    await ctx.tunnels.stop(name);
+    await ctx.onTunnelStop?.(name);
     ctx.tunnels.add({
+      ...(opts.tunnelParams ?? {}),
       name,
       type: (opts.tunnelType as never) ?? "ngrok",
       target: port,
       args: (tunnelAuth.args as string[]) ?? [],
+      env: tunnelEnv,
     });
     await ctx.tunnels.start(name);
     const url = await waitForUrl(ctx.tunnels, name, 30_000);
-    return { url, tunnel: name, provider: providerType };
+    return { url, tunnel: name, provider: providerType, protocol, ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
   }
 
   const nginxPort = opts.nginxPort ?? 0; // 0 = random
   const authMode: GatewayAuthMode = provider.type === "basic" ? "basic" : "forward-auth";
   const htpasswdFile = (provider as { htpasswdFile?: string }).htpasswdFile;
-  const gateway = new GatewayController({
+  // Shared gateway singleton (one nginx for all exposes); fall back to a
+  // local instance when no shared one is provided (standalone/tests).
+  const gateway = ctx.gateway ?? new GatewayController({
     configDir: ctx.configDir,
     cacheDir: ctx.cacheDir,
     port: nginxPort,
-    basePath,
+    basePath: providerBasePath,
     htpasswdFile,
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     unregisterInternal: (role) => ctx.internal.unregister(role),
@@ -153,27 +304,30 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   });
 
   // Redis first (provider may need it for sessions), then provider, then nginx.
-  let redis: RedisController | null = null;
+  // Shared singleton: started once on first need, reused across exposes.
+  let redis = ctx.redis ?? null;
   if (provider.capabilities.needsSessionStore) {
-    redis = new RedisController({
-      cacheDir: ctx.cacheDir,
-      port: opts.redisPort,
-      log,
-    });
+    if (!redis) redis = new RedisController({ cacheDir: ctx.cacheDir, port: opts.redisPort, log });
+    // start() is idempotent (reuses the running instance) → shared singleton
     const redisPort = await redis.start();
     ctx.internal.register("redis", { port: redisPort, pid: 0, process: "redis", cmdline: "redis", addresses: ["127.0.0.1"] });
   }
 
   await provider.start();
   const authPort = (provider as unknown as { port?: number }).port ?? 9091;
-  const gatewayPort = await gateway.start(authPort, authMode);
+  // start the shared gateway once (auth backend is per-host now)
+  const gatewayPort = await gateway.start(authMode);
 
   // tunnel pointing at the gateway
   const name = opts.tunnelName ?? `expose-${port}`;
+  await ctx.tunnels.stop(name);
+  await ctx.onTunnelStop?.(name);
   ctx.tunnels.add({
+    ...(opts.tunnelParams ?? {}),
     name,
     type: (opts.tunnelType as never) ?? "ngrok",
     target: gatewayPort,
+    env: tunnelEnv,
   });
   await ctx.tunnels.start(name);
 
@@ -182,25 +336,56 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const url = await waitForUrl(ctx.tunnels, name, 30_000);
   const publicHost = url ? new URL(url).host : null;
   if (publicHost) {
-    await gateway.registerHost(publicHost, port, authPort);
+    // provider-specific login redirect target (nginx vars $host/$request_uri):
+    //  - portal:  /<basePath>/login?next=<path>   (portal's `next` param)
+    //  - authelia: /<basePath>/?rd=https://$host$request_uri  (authelia's `rd`
+    //             param + portal root — NOT /login, which isn't authelia's entry)
+    const loginRedirect = providerType === "authelia"
+      ? `https://$host${providerBasePath}/?rd=https://$host$request_uri`
+      : `https://$host${providerBasePath}/login?next=$request_uri`;
+    const scheme = protocol === "https" ? "https" : "http";
+    try {
+      await gateway.registerHost(publicHost, port, { authPort, basePath: providerBasePath, authMode, htpasswdFile, loginRedirect, scheme });
+    } catch (err) {
+      // unsafe host — tear down the tunnel so nothing is left half-registered
+      await ctx.tunnels.stop(name).catch(() => {});
+      await ctx.onTunnelStop?.(name);
+      return { url: null, tunnel: name, provider: providerType, protocol, error: `tunnel URL host rejected: ${err instanceof Error ? err.message : String(err)}` };
+    }
     await provider.registerHost(publicHost, { policy: opts.policy });
-    log(`expose ${port}: ${url} (auth via ${providerType}, host ${publicHost} registered)`);
+    log(`expose ${port}: ${url} (auth via ${providerType}, host ${publicHost} registered, scheme ${scheme})`);
   }
 
   return {
     url,
     tunnel: name,
     provider: providerType,
+    protocol,
     loginUrl: url && basePath ? `${url}${basePath}/login` : undefined,
     gateway: { nginx: gatewayPort, authelia: authPort, redis: redis?.port ?? 0 },
+    ...(url ? {} : tunnelFailure(ctx.tunnels, name)),
   };
 }
 
 /** Random memorable base path: {provider}-{adjective}-{animal} (e.g.
  *  /portal-sneaky-capybara). Random per expose → unpredictable and collision
  *  -free against app routes; basic auth needs no base path. */
-export function defaultBasePath(providerType: string): string {
-  if (providerType === "basic") return "";
+/** Validate a caller-supplied base path before it is interpolated into nginx
+ *  locations / 302 redirects / authelia's server.address. URL path characters
+ *  only; anything that could break a config line (; {} whitespace quotes \n)
+ *  is rejected. Returns the path unchanged (leading slash kept, trailing
+ *  slashes trimmed). */
+export function sanitizeBasePath(p: string): string {
+  if (typeof p !== "string" || p.length === 0 || p.length > 128) {
+    throw new Error(`invalid base path: ${JSON.stringify(p)}`);
+  }
+  if (!p.startsWith("/") || !/^[\/a-zA-Z0-9._-]+$/.test(p)) {
+    throw new Error(`invalid base path: ${JSON.stringify(p)}`);
+  }
+  return p.replace(/\/+$/, "");
+}
+
+export function defaultBasePath(providerType: string): string {  if (providerType === "basic") return "";
   if (providerType === "portal") {
     // memorable random name avoids clashing with app routes
     return `/${providerType}-${randomName()}`;
@@ -237,6 +422,20 @@ export function randomName(): string {
   return `${a}-${n}`;
 }
 
+/** A human-readable failure reason for a tunnel that didn't produce a URL.
+ *  Tunnels capture their process output (ngrok/cloudflared log the actionable
+ *  error there) and an exit code; surface a trimmed tail so the caller/UI
+ *  gets a concrete reason instead of a silent null URL. */
+function tunnelFailure(tunnels: TunnelManager, name: string): { error: string } {
+  const info = tunnels.get(name);
+  if (!info) return { error: `tunnel '${name}' not found` };
+  const tail = (info.lastOutput ?? "").trim().slice(-500);
+  if (info.error && tail) return { error: `${info.error} — ${tail}` };
+  if (info.error) return { error: info.error };
+  if (tail) return { error: tail };
+  return { error: info.running ? `tunnel '${name}' running but produced no URL` : `tunnel '${name}' produced no URL` };
+}
+
 async function waitForUrl(tunnels: TunnelManager, name: string, timeoutMs: number): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -264,6 +463,7 @@ function providerCtx(ctx: ExposeContext): ProviderContext {
         addresses: ["127.0.0.1"],
       }),
     unregisterInternal: (role) => ctx.internal.unregister(role),
+    registerPid: (role, pid) => ctx.registerPid?.(role, pid),
     pickPort,
     log: ctx.log ?? (() => {}),
   };

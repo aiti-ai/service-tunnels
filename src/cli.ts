@@ -4,9 +4,10 @@
  */
 import { createServiceTunnels } from "./index.ts";
 import { InternalRegistry } from "./internal.ts";
-import { cachePaths, resolveDirs } from "./config.ts";
+import { cachePaths, resolveDirs, readConfigFile, writeConfigFile, type ServiceTunnelsConfigFile } from "./config.ts";
 import { readState } from "./state.ts";
 import { readEnvToolPaths } from "./tools.ts";
+import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 
 function usage(): void {
   console.log(`service-tunnels <command>
@@ -17,11 +18,17 @@ function usage(): void {
   tools list | resolve <name> | download <name> | path <name>
   proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
   tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
+                 [--host <h>] [--user <u>] [--port <p>] [--remote-port <rp>] |
+                 [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
-  expose <port> [--tunnel <t>] [--auth [<provider>]] [--name <n>] [--nginx-port <p>]
+  schemas [--type <tunnel-type|auth>]   # 数据驱动参数 schema(客户端据此渲染表单)
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--allow-tool-download <true|false>]
   stop-all
   status [--json]
   config path | show
+  config get <key> | set <key> <value>   # key: allow-tool-download | prefer-mirrors
+                                        #      | base-path | base-path-by-provider <prov:path>
+                                        #      | tool-mirrors <tool:url>
 
 全局：--config-dir <dir> / --cache-dir <dir>（或 SERVICE_TUNNELS_CONFIG/CACHE）`);
 }
@@ -43,7 +50,17 @@ interface CliArgs {
   host?: string;
   server?: string;
   token?: string;
+  user?: string;
+  remotePort?: number;
   cmd?: string;
+  /** --set key=value (tunnel params, validated against the type schema). */
+  sets?: Record<string, string>;
+  /** --tunnel-set key=value (expose tunnel params). */
+  tunnelSets?: Record<string, string>;
+  /** --provider-set key=value (expose auth-provider params). */
+  providerSets?: Record<string, string>;
+  /** -i / --interactive: prompt each schema param (readline). */
+  interactive?: boolean;
   tunnelArgs?: string[];
   tunnel?: string;
   name?: string;
@@ -51,6 +68,10 @@ interface CliArgs {
   auth?: boolean | string;
   displayName?: string;
   provider?: string;
+  /** --force: skip port ownership check. */
+  force?: boolean;
+  /** --allow-tool-download <true|false>: per-expose tool-download override. */
+  allowToolDownload?: boolean;
   [k: string]: unknown;
 }
 
@@ -108,6 +129,25 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--token":
         args.token = argv[++i];
         break;
+      case "--user":
+        args.user = argv[++i];
+        break;
+      case "--remote-port":
+        args.remotePort = Number(argv[++i]!);
+        break;
+      case "--set":
+        addSet(args, "sets", argv[++i]);
+        break;
+      case "--tunnel-set":
+        addSet(args, "tunnelSets", argv[++i]);
+        break;
+      case "--provider-set":
+        addSet(args, "providerSets", argv[++i]);
+        break;
+      case "-i":
+      case "--interactive":
+        args.interactive = true;
+        break;
       case "--cmd":
         args.cmd = argv[++i];
         break;
@@ -132,11 +172,19 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--nginx-port":
         args.nginxPort = Number(argv[++i]!);
         break;
+      case "--allow-tool-download": {
+        const raw = (argv[++i] ?? "true").toLowerCase();
+        args.allowToolDownload = !(raw === "false" || raw === "0" || raw === "off" || raw === "no");
+        break;
+      }
       case "--display-name":
         args.displayName = argv[++i]!;
         break;
       case "--provider":
         args.provider = argv[++i]!;
+        break;
+      case "--force":
+        args.force = true;
         break;
       default:
         if (a!.startsWith("-")) {
@@ -147,6 +195,91 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
     }
   }
   return { cmd, args };
+}
+
+/** Parse `--set key=value` into a per-namespace map. */
+function addSet(args: CliArgs, key: "sets" | "tunnelSets" | "providerSets", raw: string | undefined): void {
+  if (!raw) return;
+  const eq = raw.indexOf("=");
+  if (eq < 0) {
+    console.error(`--${key === "sets" ? "set" : key === "tunnelSets" ? "tunnel-set" : "provider-set"} expects key=value, got "${raw}"`);
+    process.exit(2);
+  }
+  (args[key] ??= {})[raw.slice(0, eq).trim()] = raw.slice(eq + 1).trim();
+}
+
+/** Interactive schema-driven prompts (readline) — the same ParamSpec that
+ *  pi-web renders as a form. On a real TTY every param is prompted (label /
+ *  default / description); on piped input (scripts) readline never resolves
+ *  at EOF, so we skip prompting and apply --set + defaults deterministically. */
+async function promptParams(specs: ParamSpec[], initial: Record<string, string>): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  const apply = (s: ParamSpec, raw: string) => {
+    const ans = raw.trim();
+    if (ans === "" && s.default !== undefined) out[s.key] = s.default;
+    else if (ans === "" && s.required) throw new Error(`required param "${s.key}" is empty (pass --set ${s.key}=...)`);
+    else if (ans !== "") out[s.key] = coerceParam(ans, s);
+  };
+  if (!process.stdin.isTTY) {
+    for (const s of specs) apply(s, initial[s.key] ?? "");
+    return out;
+  }
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // Mask password echoes: readline's _writeToOutput (on the classic Interface
+  // prototype; not in the public types) writes both the prompt AND the echoed
+  // typed chars — swallow the echo while a password is being typed.
+  const rl2 = rl as typeof rl & { _writeToOutput: (str: string) => void };
+  let muted = false;
+  const origWrite = rl2._writeToOutput.bind(rl2);
+  rl2._writeToOutput = (s) => {
+    if (muted) return;
+    origWrite(s);
+  };
+  const question = (q: string, hide: boolean) =>
+    new Promise<string>((resolve) => {
+      rl2.question(q, (ans) => {
+        muted = false;
+        resolve(ans);
+      });
+      // prompt is written synchronously by question(); mute the typing echo now
+      if (hide) setImmediate(() => {
+        muted = true;
+      });
+    });
+  try {
+    for (const s of specs) {
+      const def = s.default !== undefined ? ` [${String(s.default)}]` : "";
+      const pre = initial[s.key];
+      if (pre !== undefined) {
+        apply(s, pre);
+        continue;
+      }
+      const prompt = `${s.label ?? s.key}${s.required ? " *" : ""}${def}: ${s.description ?? ""}\n> `;
+      const ans = await question(prompt, s.type === "password");
+      apply(s, ans);
+    }
+  } finally {
+    rl.close();
+  }
+  return out;
+}
+
+/** Validate --tunnel-set/--provider-set against the tunnel/provider schema.
+ *  Returns undefined when no sets given (caller keeps library defaults). */
+async function applyExposeSets(
+  st: ReturnType<typeof createServiceTunnels>,
+  kind: "tunnel" | "provider",
+  name: string,
+  sets: Record<string, string>,
+): Promise<Record<string, unknown> | undefined> {
+  if (!Object.keys(sets).length) return undefined;
+  if (kind === "tunnel") {
+    return applyParamSets(TUNNEL_PARAM_SCHEMAS[name as TunnelType] ?? [], sets, `tunnel "${name}"`);
+  }
+  if (!name || name === "none") throw new Error("provider params need --auth <provider>");
+  const schemas = await st.schemas.authProviders();
+  return applyParamSets(schemas[name] ?? [], sets, `auth provider "${name}"`);
 }
 
 function randomCliPassword(len = 16): string {
@@ -160,17 +293,106 @@ function jsonOut(v: unknown): void {
   process.stdout.write(JSON.stringify(v, null, 2) + "\n");
 }
 
+/** Read the config file (loose). */
+function readCliConfig(configDir: string): ServiceTunnelsConfigFile {
+  return readConfigFile(configDir);
+}
+
+/** Write the config file (atomic, 0600). */
+function writeCliConfig(configDir: string, f: ServiceTunnelsConfigFile): void {
+  writeConfigFile(configDir, f);
+}
+
+/** kebab-case CLI key → config-file field name (allow-tool-download → allowToolDownload). */
+const CONFIG_KEYS: Record<string, keyof ServiceTunnelsConfigFile> = {
+  "allow-tool-download": "allowToolDownload",
+  "prefer-mirrors": "preferMirrors",
+  "base-path": "basePath",
+  "base-path-by-provider": "basePathByProvider",
+  "tool-mirrors": "toolMirrors",
+};
+
+/** Parse a `config set <key> <value>` value per key type. Returns undefined
+ *  when the key is unknown or the value is invalid. */
+function parseCliConfigValue(key: keyof ServiceTunnelsConfigFile, value: string): unknown {
+  const boolVal = (): boolean | undefined => {
+    const v = value.toLowerCase();
+    if (v === "true" || v === "1" || v === "on" || v === "yes") return true;
+    if (v === "false" || v === "0" || v === "off" || v === "no") return false;
+    return undefined;
+  };
+  switch (key) {
+    case "allowToolDownload":
+    case "preferMirrors":
+      return boolVal();
+    case "basePath":
+      return value.startsWith("/") ? value.replace(/\/+$/, "") : undefined;
+    case "basePathByProvider": {
+      const idx = value.indexOf(":");
+      if (idx <= 0 || !value.slice(idx + 1).startsWith("/")) return undefined;
+      return { [value.slice(0, idx)]: value.slice(idx + 1).replace(/\/+$/, "") };
+    }
+    case "toolMirrors": {
+      const idx = value.indexOf(":");
+      if (idx <= 0 || !value.slice(idx + 1).startsWith("http")) return undefined;
+      return { [value.slice(0, idx)]: [value.slice(idx + 1)] };
+    }
+    default:
+      return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   const { cmd, args } = parseArgs(process.argv.slice(2));
-  const st = createServiceTunnels({ configDir: args.configDir, cacheDir: args.cacheDir });
+  const st = createServiceTunnels({ configDir: args.configDir, cacheDir: args.cacheDir, guardian: false });
   const sub = cmd[0] ?? "";
 
   switch (sub) {
     case "config": {
       if (cmd[1] === "path") {
         process.stdout.write(`${st.dirs.configDir}\n${st.dirs.cacheDir}\n`);
+      } else if (cmd[1] === "get" && cmd[2]) {
+        const field = CONFIG_KEYS[cmd[2]];
+        if (!field) {
+          console.error(`unknown config key: ${cmd[2]} (known: ${Object.keys(CONFIG_KEYS).join(", ")})`);
+          process.exit(2);
+        }
+        jsonOut({ [cmd[2]]: readCliConfig(st.dirs.configDir)[field] ?? null });
+      } else if (cmd[1] === "set" && cmd[2]) {
+        const value = cmd[3];
+        const key = CONFIG_KEYS[cmd[2]];
+        if (value === undefined || !key) {
+          console.error(`config set ${cmd[2]} <value>  (known keys: ${Object.keys(CONFIG_KEYS).join(", ")})`);
+          process.exit(2);
+        }
+        // git-config style: persist to service-tunnels.json (atomic + chmod
+        // 600); per-call params / env still win at read time.
+        const f = readCliConfig(st.dirs.configDir);
+        const parsed = parseCliConfigValue(key, value);
+        if (parsed === undefined) {
+          console.error(`unsupported or invalid value for ${cmd[2]}: ${value}`);
+          process.exit(2);
+        }
+        (f as Record<string, unknown>)[key] = parsed;
+        writeCliConfig(st.dirs.configDir, f);
+        if (key === "allowToolDownload") st.tools.setAllowDownload(!!parsed);
+        jsonOut({ [key]: parsed });
       } else {
         jsonOut({ configDir: st.dirs.configDir, cacheDir: st.dirs.cacheDir });
+      }
+      break;
+    }
+
+    case "schemas": {
+      // data-driven provider/tunnel param schemas (clients render forms from
+      // these — adding a type/provider needs no client changes)
+      const t = args.type;
+      if (t === "auth") {
+        jsonOut(await st.schemas.authProviders());
+      } else if (t) {
+        jsonOut(st.schemas.tunnel(t));
+      } else {
+        jsonOut({ tunnels: st.schemas.tunnels(), metas: st.schemas.metas(), authProviders: await st.schemas.authProviders() });
       }
       break;
     }
@@ -313,19 +535,40 @@ async function main(): Promise<void> {
         jsonOut(infos ?? []);
       } else if (op === "add") {
         if (!name || !args.type) {
-          console.error("tunnel add <name> --type <ngrok|frpc|ssh|cloudflared|localtunnel|command>");
+          console.error("tunnel add <name> --type <ngrok|frpc|ssh|serveo|cloudflared|localtunnel|bore|command> [--set k=v ...] [-i]");
+          process.exit(2);
+        }
+        const specs = TUNNEL_PARAM_SCHEMAS[args.type as TunnelType];
+        if (!specs) {
+          console.error(`unknown tunnel type "${args.type}" (valid: ${Object.keys(TUNNEL_PARAM_SCHEMAS).join(", ")})`);
+          process.exit(2);
+        }
+        let setCfg: Record<string, unknown> = {};
+        try {
+          if (args.interactive) {
+            setCfg = await promptParams(specs, args.sets ?? {});
+          } else {
+            setCfg = applyParamSets(specs, args.sets ?? {}, `tunnel type "${args.type}"`);
+          }
+        } catch (err) {
+          console.error(String(err instanceof Error ? err.message : err));
           process.exit(2);
         }
         const cfg = {
           name,
           type: args.type,
           target: args.target ? Number(args.target) : undefined,
-          domain: args.domain,
-          args: args.tunnelArgs,
-          cmd: args.cmd,
-          host: args.host,
-          server: args.server,
-          token: args.token,
+          ...setCfg,
+          // explicit named flags override --set
+          ...(args.domain ? { domain: args.domain } : {}),
+          ...(args.cmd ? { cmd: args.cmd } : {}),
+          ...(args.host ? { host: args.host } : {}),
+          ...(args.user ? { user: args.user } : {}),
+          ...(args.port !== undefined ? { port: args.port } : {}),
+          ...(args.remotePort !== undefined ? { remotePort: args.remotePort } : {}),
+          ...(args.server ? { server: args.server } : {}),
+          ...(args.token ? { token: args.token } : {}),
+          ...(args.tunnelArgs?.length ? { args: args.tunnelArgs } : {}),
         };
         await d.request("tunnel.add", cfg);
         jsonOut({ added: name });
@@ -366,6 +609,15 @@ async function main(): Promise<void> {
           await new Promise((r) => setTimeout(r, 100));
         }
       }
+      let tunnelParams: Record<string, unknown> | undefined;
+      let providerParams: Record<string, unknown> | undefined;
+      try {
+        tunnelParams = await applyExposeSets(st, "tunnel", args.tunnel ?? "ngrok", args.tunnelSets ?? {});
+        providerParams = await applyExposeSets(st, "provider", typeof args.auth === "string" ? args.auth : "", args.providerSets ?? {});
+      } catch (err) {
+        console.error(String(err instanceof Error ? err.message : err));
+        process.exit(2);
+      }
       const res = await st.daemon.request("expose", {
         port,
         auth: Boolean(args.auth),
@@ -374,6 +626,10 @@ async function main(): Promise<void> {
         tunnelName: args.name,
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
         basePath: args.basePath,
+        tunnelParams,
+        providerParams,
+        force: args.force,
+        allowToolDownload: args.allowToolDownload,
       }, 90_000);
       jsonOut(res);
       break;

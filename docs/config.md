@@ -58,8 +58,9 @@
   { "name": "api",  "type": "frpc", "target": 8080,
     "args": { "serverAddr": "frp.example.com:7000", "token": "...",
               "customDomains": "api.example.com" } },
-  { "name": "ssh1", "type": "ssh", "target": 3000,
-    "args": { "host": "serveo.net" } },
+  { "name": "serveo1", "type": "serveo", "target": 3000 },
+  { "name": "bore1", "type": "bore", "target": 3000, "server": "localhost", "remotePort": 8080, "token": "s3cret" },
+  { "name": "ssh1", "type": "ssh", "target": 3000, "host": "my-host.example.com", "user": "deploy", "remotePort": 8080 },
   { "name": "cf1",  "type": "cloudflared", "target": 4180,
     "args": { "namedTunnel": "my-tunnel", "ingresses": ["app1.example.com", "app2.example.com"] } }
 ]

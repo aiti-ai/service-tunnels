@@ -26,6 +26,8 @@ export interface ProviderContext {
   /** Register a framework helper port (nginx/authelia/redis). */
   registerInternal: (role: string, port: number) => void;
   unregisterInternal: (role: string) => void;
+  /** Register a spawned helper PID for guardian cleanup (all active spawns). */
+  registerPid: (role: string, pid: number) => void;
   /** Find a free local port (0 = kernel-assigned). */
   pickPort: () => Promise<number>;
   log: (line: string) => void;
@@ -81,7 +83,7 @@ export interface AuthProvider {
   validate?(): Promise<string[]>;
 }
 
-export type AuthProviderFactory = (ctx: ProviderContext) => AuthProvider;
+export type AuthProviderFactory = (ctx: ProviderContext, opts?: Record<string, unknown>) => AuthProvider;
 
 /** A registered user (no secrets) — provider-local meaning of displayName/email. */
 export interface AuthUser {

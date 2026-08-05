@@ -16,15 +16,17 @@ import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
-import { TunnelManager } from "./tunnels.ts";
+import { readConfigFile, writeConfigFile } from "./config.ts";
+import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
+import { registerPid } from "./pid-registry.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
-import { AuthRegistry } from "./auth-registry.ts";
+import { AuthRegistry, authProviderSchemas } from "./auth-registry.ts";
 import type { AutheliaProvider } from "./authelia.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
@@ -37,6 +39,15 @@ if (!stateFile || !sockPath || !configDir || !cacheDir) {
 ensureMarker(); // this daemon carries its own instance marker (cleanup scoping)
 
 const internal = new InternalRegistry();
+
+// Allow on-demand tool downloads? Explicit daemon arg (env SERVICE_TUNNELS_ALLOW_DOWNLOAD)
+// > config-file fallback > default true. Toggled via daemon RPC in-memory; the
+// config file is a read-only fallback, never written.
+const envAllowDownload = process.env.SERVICE_TUNNELS_ALLOW_DOWNLOAD;
+let toolAllowDownload =
+  envAllowDownload !== undefined
+    ? !(envAllowDownload === "0" || envAllowDownload.toLowerCase() === "false" || envAllowDownload.toLowerCase() === "off")
+    : readConfigFile(configDir).allowToolDownload ?? true;
 
 // Tunnel manager owned by the daemon: CLI commands reach it over IPC, so a
 // started tunnel stays visible/controllable across CLI invocations.
@@ -51,7 +62,7 @@ const tunnels = new TunnelManager({
   resolveTool: async (name: string) => {
     const def = TOOLS[name];
     if (!def) throw new Error(`unknown tool: ${name}`);
-    return ensureTool(def, { cacheDir });
+    return ensureTool(def, { cacheDir, allowToolDownload: toolAllowDownload });
   },
   onEvent: () => persistTunnels(),
 });
@@ -108,7 +119,28 @@ const methods = new Map<string, Handler>([
   ["tunnel.start", (params) => tunnels.start(String(params)).then((i) => ({ ...i }))],
   ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
+  ["config.allow-download", () => ({ allowToolDownload: toolAllowDownload })],
+  [
+    "config.set-allow-download",
+    (params) => {
+      // git-config style: persist (params > env > file > default), update the
+      // daemon's live value; per-expose `allowToolDownload` still overrides.
+      toolAllowDownload = !!(params as { allowToolDownload?: boolean }).allowToolDownload;
+      try {
+        const f = readConfigFile(configDir);
+        f.allowToolDownload = toolAllowDownload;
+        writeConfigFile(configDir, f);
+      } catch {}
+      return { allowToolDownload: toolAllowDownload };
+    },
+  ],
+  ["schemas", async () => ({
+    tunnels: tunnelParamSchemas(),
+    metas: tunnelMetas(),
+    authProviders: await authProviderSchemas(configDir),
+  })],
   ["auth.user.managers", () => authRegistry.userManagers()],
+  ["auth.totp.providers", () => authRegistry.totpProviders()],
   ["auth.totp.enroll", (params) => {
     const p = params as { name?: string; provider?: string };
     const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
@@ -182,7 +214,8 @@ const methods = new Map<string, Handler>([
         resolveTool: async (name: string) => {
           const def = TOOLS[name];
           if (!def) throw new Error(`unknown tool: ${name}`);
-          return ensureTool(def, { cacheDir, toolPaths: o.toolPaths });
+          // per-expose param > daemon default (env > config-file fallback)
+          return ensureTool(def, { cacheDir, toolPaths: o.toolPaths, allowToolDownload: o.allowToolDownload ?? toolAllowDownload });
         },
         internal,
         tunnels,
@@ -304,7 +337,7 @@ const authRegistry = new AuthRegistry({
   resolveTool: async (name: string) => {
     const def = TOOLS[name];
     if (!def) throw new Error(`unknown tool: ${name}`);
-    return ensureTool(def, { cacheDir });
+    return ensureTool(def, { cacheDir, allowToolDownload: toolAllowDownload });
   },
   registerInternal: (role, port) =>
     internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
@@ -321,6 +354,11 @@ const authRegistry = new AuthRegistry({
     });
   },
   log: (line) => console.error(`[service-tunnels] ${line}`),
+  registerPid: (role, pid) => {
+    try {
+      registerPid(cacheDir, process.pid, role, pid);
+    } catch {}
+  },
 });
 
 function resolveDaemonUserTargets(registry: AuthRegistry, provider?: string | string[]): string[] {

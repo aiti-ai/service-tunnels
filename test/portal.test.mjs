@@ -48,6 +48,7 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
       resolveTool: async () => "",
       registerInternal: () => {},
       unregisterInternal: () => {},
+    registerPid: () => {},
       pickPort: async () => {
         const { createServer } = await import("net");
         return new Promise((resolve) => {
@@ -123,6 +124,52 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
   await provider.stop();
 });
 
+test("portal login redirect: hidden `next` survives the browser round-trip (no double-encoding)", { timeout: 40_000 }, async () => {
+  // Regression: the login page used to put encodeURIComponent(next) in the
+  // hidden field, so each redirect stacked an encoding layer (/foo → %2Ffoo
+  // → %252Ffoo → %25252Ffoo) and the post-login Location pointed at an
+  // encoded path instead of the real one. The field must hold the RAW path.
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const provider = new PortalAuthProvider(
+    {
+      configDir, cacheDir,
+      resolveTool: async () => "",
+      registerInternal: () => {},
+      unregisterInternal: () => {},
+    registerPid: () => {},
+      pickPort: async () => {
+        const { createServer } = await import("net");
+        return new Promise((resolve) => {
+          const srv = createServer();
+          srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+        });
+      },
+      log: () => {},
+    },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider.prepare();
+  await provider.start();
+  const port = provider.port;
+  try {
+    // 1) load the login page with ?next=/foo (as the gateway redirect would)
+    const page = await get(`/portal/login?next=${encodeURIComponent("/foo")}`, port);
+    assert.equal(page.status, 200);
+    // 2) extract the hidden next value the way a browser parses the field
+    const m = /name="next" value="([^"]*)"/.exec(page.body);
+    assert.ok(m, "login page has a hidden next field");
+    assert.equal(m[1], "/foo", "hidden next is the RAW path (not pre-encoded %2Ffoo)");
+    // 3) POST exactly as a browser would (form-encode the field's value)
+    const ok = await postForm("/portal/login", port, { username: "admin", password: "pw", next: m[1] });
+    assert.equal(ok.status, 302);
+    // 4) Location must be the clean original path — not %2Ffoo / %252Ffoo
+    assert.equal(ok.headers["location"], "/foo", "post-login redirect is the clean original path");
+  } finally {
+    await provider.stop();
+  }
+});
+
 test("portal login password transport: RSA-OAEP front-end encryption", { timeout: 40_000 }, async () => {
   const { PortalAuthProvider } = await import("../src/providers/portal.ts");
   const { cacheDir, configDir } = tempDirs();
@@ -134,7 +181,8 @@ test("portal login password transport: RSA-OAEP front-end encryption", { timeout
     });
   };
   const provider = new PortalAuthProvider(
-    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
+    registerPid: () => {}, pickPort, log: () => {} },
     { user: { name: "admin", password: "pw" } },
   );
   await provider.prepare();
@@ -198,7 +246,8 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
     });
   };
   const provider = new PortalAuthProvider(
-    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
+    registerPid: () => {}, pickPort, log: () => {} },
     { user: { name: "admin", password: "pw" } },
   );
   await provider.prepare();
@@ -225,7 +274,8 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const { PortalAuthProvider: P2 } = await import("../src/providers/portal.ts");
   const d2 = tempDirs();
   const provider2 = new P2(
-    { configDir: d2.configDir, cacheDir: d2.cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, pickPort, log: () => {} },
+    { configDir: d2.configDir, cacheDir: d2.cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
+    registerPid: () => {}, pickPort, log: () => {} },
     { user: { name: "admin", password: "pw" } },
   );
   await provider2.prepare();

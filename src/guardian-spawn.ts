@@ -20,14 +20,14 @@ function guardianEntry(): string | null {
 
 export function spawnGuardian(
   parentPid: number,
-  opts: { intervalMs?: number } = {},
+  opts: { intervalMs?: number; registrationFile?: string; cacheDir?: string } = {},
 ): ChildProcess | null {
   const entry = guardianEntry();
   if (!entry || !parentPid) return null;
   const starttime = readStarttime(parentPid);
   const child = spawn(
     process.execPath,
-    [entry, String(parentPid), starttime, String(opts.intervalMs ?? 1_000)],
+    [entry, String(parentPid), starttime, String(opts.intervalMs ?? 1_000), opts.registrationFile ?? "", opts.cacheDir ?? ""],
     { detached: true, stdio: ["ignore", "ignore", "ignore"] },
   );
   child.unref();

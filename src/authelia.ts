@@ -1,7 +1,9 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from "fs";
 import { join } from "path";
+import { randomBytes } from "crypto";
 import { roleEnv } from "./marker.ts";
+import { base32Encode } from "./providers/portal.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser } from "./auth-provider.ts";
 
 /**
@@ -124,7 +126,7 @@ export class AutheliaProvider implements AuthProvider {
   #usersDb = "";
   #bin: string | null = null;
   /** Registered public hosts (persisted in config-tunnels.yml). */
-  #hosts = new Set<string>();
+  #hosts = new Map<string, AuthPolicy["policy"]>();
 
   constructor(ctx: ProviderContext, opts: AutheliaProviderOptions = {}) {
     this.#ctx = ctx;
@@ -213,6 +215,15 @@ export class AutheliaProvider implements AuthProvider {
       `# service-tunnels authelia — main config (dynamic parts live in config-tunnels.yml)
 server:
   address: 'tcp://127.0.0.1:${this.#port}/${this.#basePath.replace(/^\//, "")}'
+  # authelia v4.38+ requires the authz implementations to be declared, otherwise
+  # /api/authz/auth-request returns 400 for every request (nginx auth_request
+  # then 500s). Declare the two nginx-relevant implementations.
+  endpoints:
+    authz:
+      auth-request:
+        implementation: 'AuthRequest'
+      forward-auth:
+        implementation: 'ForwardAuth'
 log:
   level: warn
 identity_validation:
@@ -236,9 +247,13 @@ ntp:
       "utf8",
     );
 
-    // config-tunnels.yml: complete session + access_control sections
-    this.#restoreHosts();
+    // config-tunnels.yml: complete session + access_control sections.
+    // NOTE: no #restoreHosts here — #hosts is the in-memory source of truth
+    // (registerHost fills it). A fresh provider starts EMPTY so a restarted
+    // service-tunnels clears stale hosts from previous runs instead of
+    // resurrecting dead exposes' session cookies / access_control entries.
     writeFileSync(this.#tunnelConfig, this.#renderTunnelConfig(secret), "utf8");
+    try { chmodSync(this.#tunnelConfig, 0o600); } catch {}
 
     // validate before first start
     const bin = await this.#resolveBin();
@@ -250,8 +265,7 @@ ntp:
   }
 
   #renderTunnelConfig(secret: string): string {
-    const policy = this.#opts.policy ?? "two_factor";
-    const hosts = [...this.#hosts];
+    const hosts = [...this.#hosts.keys()];
     const cookieHosts = hosts.length ? hosts : ["127.0.0.1"]; // authelia requires ≥1 cookie domain
     const portal = (h: string) => `https://${h}${this.#basePath}`;
     return `session:
@@ -261,24 +275,11 @@ ${cookieHosts.map((h) => `    - domain: '${h}'\n      authelia_url: '${portal(h)
 access_control:
   default_policy: deny
   rules:
-${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).join("\n") || `    - domain: '**'\n      policy: deny`}
+${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts.get(h) ?? "two_factor"}`).join("\n") || `    - domain: '**'\n      policy: deny`}
 `;
   }
 
   /** Restore hosts from config-tunnels.yml (persisted across restarts). */
-  #restoreHosts(): void {
-    try {
-      const raw = readFileSync(this.#tunnelConfig, "utf8");
-      const re = /- domain:\s*'([^']+)'/g;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(raw))) {
-        if (m[1] !== "**" && m[1] !== "127.0.0.1") this.#hosts.add(m[1]!);
-      }
-    } catch {
-      // first run: no file yet
-    }
-  }
-
   async start(): Promise<AuthProviderStatus> {
     if (this.#child && alive(this.#child.pid ?? 0)) return this.status();
     if (!this.#port) this.#port = await this.#ctx.pickPort();
@@ -299,6 +300,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
     child.stderr?.on("data", (c) => this.#ctx.log(`authelia[err]: ${c.toString().trim()}`));
     this.#child = child;
     this.#ctx.registerInternal("authelia", this.#port);
+    this.#ctx.registerPid("authelia", child.pid ?? 0);
     // wait for readiness
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline && alive(child.pid ?? 0)) {
@@ -365,8 +367,9 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
       return;
     }
     const secret = this.#sessionSecret();
-    this.#hosts.add(host);
+    this.#hosts.set(host, policy?.policy ?? this.#opts.policy ?? "two_factor");
     writeFileSync(this.#tunnelConfig, this.#renderTunnelConfig(secret), "utf8");
+    try { chmodSync(this.#tunnelConfig, 0o600); } catch {}
     await this.#validateAndRestart();
     this.#ctx.log(`authelia: registered ${host}`);
   }
@@ -375,11 +378,12 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
     const secret = this.#sessionSecret();
     this.#hosts.delete(host);
     writeFileSync(this.#tunnelConfig, this.#renderTunnelConfig(secret), "utf8");
+    try { chmodSync(this.#tunnelConfig, 0o600); } catch {}
     await this.#validateAndRestart();
   }
 
   async listHosts(): Promise<string[]> {
-    return [...this.#hosts];
+    return [...this.#hosts.keys()];
   }
 
   #sessionSecret(): string {
@@ -442,7 +446,10 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
         passwordHash: await this.#hashPassword(password),
       });
     }
+    // the db dir is only created by start(); writes must work before start
+    mkdirSync(this.#tmpDir, { recursive: true });
     writeFileSync(this.#usersDb, serializeUsers(records), "utf8");
+    try { chmodSync(this.#usersDb, 0o600); } catch {}
     await this.#validateAndRestart();
     this.#ctx.log(`authelia: user ${name} ${existing ? "updated" : "added"}`);
   }
@@ -453,7 +460,9 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
     const rec = records.find((r) => r.name === name);
     if (!rec) throw new Error(`user ${name} not registered`);
     rec.passwordHash = await this.#hashPassword(password);
+    mkdirSync(this.#tmpDir, { recursive: true });
     writeFileSync(this.#usersDb, serializeUsers(records), "utf8");
+    try { chmodSync(this.#usersDb, 0o600); } catch {}
     await this.#validateAndRestart();
     this.#ctx.log(`authelia: password updated for ${name}`);
   }
@@ -466,6 +475,69 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${policy}`).j
     writeFileSync(this.#usersDb, serializeUsers(next), "utf8");
     await this.#validateAndRestart();
     this.#ctx.log(`authelia: user ${name} removed`);
+  }
+
+  // —— TOTP 2FA management (via authelia's storage CLI) ————————————————————
+  // authelia stores TOTP secrets ENCRYPTED in its sqlite storage (NOT the
+  // users yaml we write for passwords), and the web API demands an elevation
+  // flow to register them. The storage CLI is a trusted operator path: it
+  // encrypts with the storage key and writes the credential directly — no
+  // elevation, same {secret, otpauthUrl} contract as portal.
+
+  /** Ensure configs + storage schema exist so the storage CLI can run. */
+  async #ensureStorageReady(): Promise<string> {
+    if (!existsSync(this.#mainConfig) || !existsSync(join(this.#dataDir, "sqlite"))) {
+      await this.prepare();
+    }
+    const bin = await this.#resolveBin();
+    // migrate ONLY on a fresh db — `migrate up` exits non-zero with "schema
+    // already up to date" once migrated, so calling it unconditionally would
+    // break every subsequent TOTP operation.
+    const dbPath = join(this.#dataDir, "sqlite", "authelia.db");
+    if (!existsSync(dbPath)) {
+      execFileSync(bin, ["storage", "migrate", "up", "--config", this.#mainConfig], { stdio: "ignore" });
+    }
+    return bin;
+  }
+
+  /** Enroll TOTP for a user (base32 secret written via authelia's CLI). */
+  async totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }> {
+    const rec = (await readUsersFile(this.#usersDb)).find((r) => r.name === name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    const bin = await this.#ensureStorageReady();
+    const secret = base32Encode(randomBytes(20));
+    execFileSync(
+      bin,
+      ["storage", "user", "totp", "generate", name, "--secret", secret, "--force", "--config", this.#mainConfig],
+      { stdio: "ignore" },
+    );
+    const label = encodeURIComponent(`${name}@service-tunnels`);
+    this.#ctx.log(`authelia: TOTP enrolled for ${name}`);
+    return {
+      secret,
+      otpauthUrl: `otpauth://totp/${label}?secret=${secret}&issuer=service-tunnels&algorithm=SHA1&digits=6&period=30`,
+    };
+  }
+
+  /** Whether the user has a TOTP credential in storage. */
+  async totpStatus(name: string): Promise<{ enrolled: boolean }> {
+    const bin = await this.#ensureStorageReady();
+    const outFile = join(this.#tmpDir, `totp-export-${name}.yml`);
+    // export exits non-zero when NO configurations exist (e.g. right after
+    // disable) — treat that as "not enrolled", not an error.
+    try {
+      execFileSync(bin, ["storage", "user", "totp", "export", "--file", outFile, "--config", this.#mainConfig], { stdio: "ignore" });
+      return { enrolled: readFileSync(outFile, "utf8").includes(`username: ${name}`) };
+    } catch {
+      return { enrolled: false };
+    }
+  }
+
+  /** Delete a user's TOTP credential. */
+  async totpDisable(name: string): Promise<void> {
+    const bin = await this.#ensureStorageReady();
+    execFileSync(bin, ["storage", "user", "totp", "delete", name, "--config", this.#mainConfig], { stdio: "ignore" });
+    this.#ctx.log(`authelia: TOTP disabled for ${name}`);
   }
 
   async #hashPassword(password: string): Promise<string> {

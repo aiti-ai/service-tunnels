@@ -1,6 +1,6 @@
 # service-tunnels
 
-服务端口发现 + 泛域名反向代理 + 隧道管理（ngrok/frpc/ssh/cloudflared/localtunnel）+ 可插拔认证编排（nginx + Authelia + Redis）。**npm 包 + CLI**，零运行时依赖。
+服务端口发现 + 泛域名反向代理 + 隧道管理（ngrok/frpc/ssh/serveo/cloudflared/localtunnel/bore）+ 可插拔认证编排（nginx + Authelia + Redis）。**npm 包 + CLI**，零运行时依赖。
 
 > 架构原则：**认证统一在本地端口侧（nginx 网关）**，所有隧道都是纯透传通道——与隧道工具无关、随机/固定域名统一走动态登记。Authelia 是内置默认 provider，接口可插拔（oauth2-proxy / ngrok edge-oidc / 自研）。
 
@@ -12,6 +12,8 @@ npm install -g service-tunnels
 service-tunnels daemon start          # 常驻守护（持有隧道/网关进程）
 service-tunnels discover              # 发现调用方进程树中的服务端口
 service-tunnels tunnel add web --type ngrok --target 4180
+service-tunnels tunnel add loc --type bore --target 4180     # 自建 bore server（本机/局域网），零账号
+service-tunnels tunnel add ssh1 --type ssh --target 4180 --host localhost --user wind --remote-port 8080  # ssh -R 到本机
 service-tunnels tunnel start web      # 启动隧道 → URL 自动解析
 service-tunnels expose 5173           # 一键暴露（默认 ngrok，无认证）
 service-tunnels expose 5173 --auth    # 一键暴露 + nginx/Authelia/Redis 认证

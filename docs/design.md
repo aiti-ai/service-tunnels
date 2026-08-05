@@ -145,7 +145,7 @@
 
 ### 4.6 tunnels/ —— 隧道进程管理
 
-- `TunnelConfig { name, type: "ngrok"|"frpc"|"ssh"|"cloudflared"|"localtunnel"|"command",
+- `TunnelConfig { name, type: "ngrok"|"frpc"|"ssh"|"serveo"|"cloudflared"|"localtunnel"|"bore"|"command",
   target, args?, auth? }`，存 `~/.config/service-tunnels/tunnels.json`。
   支持矩阵：
 
@@ -156,6 +156,7 @@
   | `ssh` | `ssh -R 80:127.0.0.1:<端口> <host>`——**serveo.net** 等 SSH 反向隧道服务即此类型 | serveo.net 随机/固定前缀 | **统一走网关** |
   | `cloudflared` | quick tunnel（随机 trycloudflare，**无 SSE**）或 named tunnel 多 ingress | trycloudflare.com / 自有域名 | **统一走网关** |
   | `localtunnel` | `lt --port <端口>`（或 `npx localtunnel`），URL 从输出解析 | loca.lt 随机 | **统一走网关** |
+  | `bore` | `bore local <端口> --to <server>`，连自建 `bore server`（单二进制，本机/局域网零账号测试专用），URL 合成 `http://host:port` | host:port | **统一走网关** |
   | `command` | 任意命令兜底（同 pi-web 的 PI_WEB_TUNNELS cmd 形态） | 解析输出 | **统一走网关** |
 
   **认证与隧道类型解耦**：所有隧道进程都只是"公网 URL → 本地 nginx 端口"的透传
@@ -214,7 +215,8 @@
   1f8b→tar.gz），zip 解压依次回退 PowerShell Expand-Archive（win）/ ditto
   （macOS）/ unzip → python3 → bsdtar（Linux）；`.exe` 缓存路径与 binPath
   匹配；npm 工具 Windows 用拷贝代替 symlink（symlink 需管理员权限）；
-- 内置工具表：ngrok（equinox）、frpc/cloudflared/authelia（GitHub + ghproxy）、
+- 内置工具表：ngrok（equinox）、frpc/cloudflared/authelia/bore（GitHub + ghproxy；
+  bore 资产为 Rust target triple，走 `{rust_target}` 占位）、
   localtunnel（npm/npmmirror）；nginx/redis 走系统（无下载，apt 提示）；
 - CLI `tools list/resolve/download`；库 `st.tools.ensure/resolve/list`。
 

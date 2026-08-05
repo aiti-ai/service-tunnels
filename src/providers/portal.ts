@@ -77,12 +77,18 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     this.#serverFile = join(this.#dir, "server.mjs");
     this.#port = opts.port ?? 0;
     this.#basePath = opts.basePath ?? "/portal";
-    // per-instance secret, persisted so sessions survive restarts
-    this.#secret = readSecret(join(this.#dir, "secret"));
+    // per-instance random secret — NOT persisted: exposes are lifecycle-only,
+    // so a restart kills the tunnels and the public hosts change. A persisted
+    // cookie secret would keep sessions valid only for the OLD (dead) hosts.
+    this.#secret = randomBytes(32).toString("hex");
   }
 
   get port(): number {
     return this.#port;
+  }
+
+  get basePath(): string {
+    return this.#basePath;
   }
 
   /** Re-bind base path (registry caches instances per type). */
@@ -130,6 +136,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
         stdio: ["ignore", "pipe", "pipe"],
       });
       this.#proc = p;
+      this.#ctx.registerPid("portal", p.pid ?? 0);
       p.stdout?.on("data", (d) => this.#ctx.log(`[portal] ${String(d).trim()}`));
       p.stderr?.on("data", (d) => this.#ctx.log(`[portal] ${String(d).trim()}`));
       try {
@@ -292,7 +299,7 @@ export function hashPassword(password: string, salt: string): string {
 }
 
 const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-function base32Encode(buf: Buffer): string {
+export function base32Encode(buf: Buffer): string {
   let bits = 0;
   let value = 0;
   let out = "";
@@ -306,21 +313,6 @@ function base32Encode(buf: Buffer): string {
   }
   if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
   return out;
-}
-
-function readSecret(file: string): string {
-  try {
-    return readFileSync(file, "utf8").trim();
-  } catch {
-    const secret = randomBytes(32).toString("hex");
-    mkdirSync(dirnameOf(file), { recursive: true });
-    writeFileSync(file, secret, "utf8");
-    return secret;
-  }
-}
-
-function dirnameOf(p: string): string {
-  return p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : ".";
 }
 
 async function probePortal(port: number, basePath: string): Promise<void> {
@@ -455,6 +447,13 @@ function verifyTotp(secretB32, code) {
   return false;
 }
 
+function escapeAttr(s) {
+  // raw next in the hidden field (NOT URL-encoded): the browser form-encodes
+  // on submit + URLSearchParams decodes server-side, so pre-encoding would
+  // stack encodings every redirect and break the post-login redirect to /
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 function totpPage(next, error) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
   return '<!doctype html><html><head><meta charset="utf-8"><title>Two-factor</title>'
@@ -466,7 +465,7 @@ function totpPage(next, error) {
     + '</head><body><form method="post" action="' + BASE + '/login/2fa">'
     + '<h1>Two-factor authentication</h1>'
     + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
-    + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err
     + '<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>'
     + '<button type="submit">Verify</button></form></body></html>';
 }
@@ -589,7 +588,7 @@ function html(next, error, keyId, publicKey) {
     + '</head><body>' + enc
     + '<form id="login" method="post" action="' + BASE + '/login">'
     + '<h1>Sign in to access this service</h1>'
-    + '<input type="hidden" name="next" value="' + encodeURIComponent(next) + '">' + err + noJs
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err + noJs
     + '<input type="hidden" name="encrypted" id="encrypted">'
     + '<input type="hidden" name="keyId" id="keyId">'
     + '<label>Username</label><input name="username" autocomplete="username" required autofocus>'
