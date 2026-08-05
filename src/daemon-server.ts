@@ -16,6 +16,7 @@ import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
+import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
 import { readConfigFile, writeConfigFile } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
@@ -27,6 +28,8 @@ import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 import { AuthRegistry, authProviderSchemas } from "./auth-registry.ts";
+import { DEFAULT_SUFFIXES } from "./proxy.ts";
+import { ProxyManager } from "./proxy-manager.ts";
 import type { AutheliaProvider } from "./authelia.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
@@ -135,6 +138,31 @@ const methods = new Map<string, Handler>([
       return { allowToolDownload: toolAllowDownload };
     },
   ],
+  ["proxy.start", (params) => proxy.start((params as { port?: number })?.port).then((port) => ({ port }))],
+  ["proxy.stop", () => proxy.stop().then(() => ({ ok: true }))],
+  ["proxy.status", () => proxy.status()],
+  ["proxy.bindings", () => proxy.bindings()],
+  ["site.list", () => {
+    const sites = readSites(configDir);
+    return ["default", ...Object.keys(sites)].map((name) => ({ ...(sites[name] ?? defaultSiteConfig()), name }));
+  }],
+  ["site.add", (params) => {
+    const { name, ...cfg } = params as { name: string } & Record<string, unknown>;
+    validateSiteName(name);
+    const sites = readSites(configDir);
+    sites[name] = { ...(cfg as unknown as SiteConfig), name };
+    writeSites(configDir, sites);
+    return { ok: true };
+  }],
+  ["site.remove", (params) => {
+    const name = String(params);
+    validateSiteName(name);
+    const sites = readSites(configDir);
+    if (!sites[name]) throw new Error(`site ${name} not registered`);
+    delete sites[name];
+    writeSites(configDir, sites);
+    return { ok: true };
+  }],
   ["schemas", async () => ({
     tunnels: tunnelParamSchemas(),
     metas: tunnelMetas(),
@@ -143,65 +171,67 @@ const methods = new Map<string, Handler>([
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
   ["auth.totp.enroll", (params) => {
-    const p = params as { name?: string; provider?: string };
-    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+    const p = params as { name?: string; provider?: string; site?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }>;
     };
     return mgr.totpEnroll(p.name ?? "");
   }],
   ["auth.totp.disable", (params) => {
-    const p = params as { name?: string; provider?: string };
-    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+    const p = params as { name?: string; provider?: string; site?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpDisable(name: string): Promise<void>;
     };
     return mgr.totpDisable(p.name ?? "").then(() => ({ ok: true }));
   }],
   ["auth.totp.status", (params) => {
-    const p = params as { name?: string; provider?: string };
-    const mgr = authRegistry.userManager(p.provider ?? "portal") as unknown as {
+    const p = params as { name?: string; provider?: string; site?: string };
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpStatus(name: string): Promise<{ enrolled: boolean }>;
     };
     return mgr.totpStatus(p.name ?? "");
   }],
   ["auth.user.list", (params) => {
-    const provider = (params as { provider?: string } | undefined)?.provider;
-    const targets = resolveDaemonUserTargets(authRegistry, provider);
-    return Promise.all(targets.map(async (t) => ({ provider: t, users: await authRegistry.userManager(t).listUsers() })));
+    const p = (params as { provider?: string; site?: string } | undefined) ?? {};
+    const targets = resolveDaemonUserTargets(authRegistry, p.provider);
+    return Promise.all(targets.map(async (t) => ({ provider: t, users: await authRegistry.userManager(t, p.site).listUsers() })));
   }],
   [
     "auth.user.add",
     (params) => {
-      const { name, password, displayName, email, provider } = params as {
+      const { name, password, displayName, email, provider, site } = params as {
         name: string;
         password: string;
         displayName?: string;
         email?: string;
         provider?: string | string[];
+        site?: string;
       };
       const targets = resolveDaemonUserTargets(authRegistry, provider);
-      return Promise.all(targets.map((t) => authRegistry.userManager(t).addUser(name, password, displayName, email)))
+      return Promise.all(targets.map((t) => authRegistry.userManager(t, site).addUser(name, password, displayName, email)))
         .then(() => ({ ok: true, providers: targets }));
     },
   ],
   [
     "auth.user.set-password",
     (params) => {
-      const { name, password, provider } = params as {
+      const { name, password, provider, site } = params as {
         name: string;
         password: string;
         provider?: string | string[];
+        site?: string;
       };
       const targets = resolveDaemonUserTargets(authRegistry, provider);
-      return Promise.all(targets.map((t) => authRegistry.userManager(t).setUserPassword(name, password)))
+      return Promise.all(targets.map((t) => authRegistry.userManager(t, site).setUserPassword(name, password)))
         .then(() => ({ ok: true, providers: targets }));
     },
   ],
   [
     "auth.user.remove",
     (params) => {
-      const p = params as { name?: string; provider?: string | string[] };
+      const p = params as { name?: string; provider?: string | string[]; site?: string };
       const targets = resolveDaemonUserTargets(authRegistry, p.provider);
-      return Promise.all(targets.map((t) => authRegistry.userManager(t).removeUser(p.name ?? "")))
+      return Promise.all(targets.map((t) => authRegistry.userManager(t, p.site).removeUser(p.name ?? "")))
         .then(() => ({ ok: true, providers: targets }));
     },
   ],
@@ -221,6 +251,7 @@ const methods = new Map<string, Handler>([
         internal,
         tunnels,
         auth: authRegistry,
+        proxy,
         log: (line) => console.error(`[service-tunnels] ${line}`),
       });
     },
@@ -361,6 +392,25 @@ const authRegistry = new AuthRegistry({
     } catch {}
   },
 });
+
+// Shared proxy transport + enrollment registry (D4). Enrollment is the ONLY
+// gate (resolveSite): expose already verified port ownership at enrollment
+// time; the daemon cannot see the caller's process tree anyway.
+const proxy = new ProxyManager({
+  suffixes: DEFAULT_SUFFIXES,
+  registry: authRegistry,
+  getSites: () => readSites(configDir),
+  // persist enrollments; the arrow captures `proxy` (assigned after this
+  // constructor; only invoked on later addBinding/removeBinding)
+  onChange: () => writeState(stateFile, { ...readState(stateFile), bindings: proxy.persisted() }),
+  isPortAllowed: () => true,
+  registerInternal: (role, port) =>
+    internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+  log: (line) => console.error(`[service-tunnels] ${line}`),
+});
+// restore persisted enrollments (P4): a restarted daemon re-serves the same
+// (port → site) bindings; providers come back lazily on first request.
+proxy.restore(readState(stateFile).bindings);
 
 function resolveDaemonUserTargets(registry: AuthRegistry, provider?: string | string[]): string[] {
   const all = registry.userManagers();

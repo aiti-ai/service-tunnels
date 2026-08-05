@@ -38,7 +38,7 @@ service-tunnels discover --refresh       # 绕过 5s 缓存
 ## proxy — 泛域名代理（本机/局域网，零依赖）
 
 ```bash
-service-tunnels proxy start [--port <p>] [--suffix .pi.localhost] \
+service-tunnels proxy start [--port <p>] [--suffix .st.localhost] \
     [--base-path <bp>] [--password <pw>] [--no-ws]
 service-tunnels proxy stop
 service-tunnels proxy status
@@ -77,7 +77,8 @@ service-tunnels tunnel add api --type frpc --target 8080 [--auth authelia]
 service-tunnels tunnel add ssh1 --type ssh --target 3000            # serveo：ssh -R 80:127.0.0.1:3000 serveo.net
 service-tunnels tunnel add lt1  --type localtunnel --target 5173    # lt --port 5173；随机域名走动态登记即可，--subdomain 可选
 service-tunnels tunnel add b1   --type bore --target 5173 [--server localhost] [--remote-port 8080] [--token s3cret]  # 自建 bore server，URL 自动 http://host:port
-service-tunnels tunnel add nat1 --type natapp --target 5173 --token <authtoken>   # 国内内网穿透（natapp.cn），免费版随机 natappfree.cc
+service-tunnels tunnel add nat1 --type natapp --target 5173 --token <authtoken>   # 国内内网穿透（natapp.cn），免费版随机 natappfree.cc；客户端需先安装：
+#   注册 https://natapp.cn → 下载页执行 curl -fsSL 'https://natapp.cn/get.sh?authtoken=<token>' | bash（Linux/macOS）/ get.ps1（Windows）
 service-tunnels tunnel add nat2 --type natapp --target 5173 --token <token> --server server.natapp.cc  # VIP 绑定自定义域名
 service-tunnels tunnel add ssh2 --type ssh --target 5173 --host localhost --user wind --remote-port 8080   # ssh -R 8080:127.0.0.1:5173 wind@localhost（本机快速测）
 service-tunnels tunnel add cf1 --type cloudflared --target 4180

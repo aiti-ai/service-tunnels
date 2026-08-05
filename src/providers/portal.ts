@@ -34,6 +34,10 @@ export interface PortalAuthProviderOptions {
   basePath?: string;
   /** Bootstrap user (only created when the db is empty). */
   user?: { name: string; password: string; displayName?: string };
+  /** Per-site storage dir (P1); default = cacheDir/tmp/portal. */
+  storageDir?: string;
+  /** Site (auth realm) this instance belongs to. */
+  site?: string;
 }
 
 interface PortalUserRecord {
@@ -87,6 +91,8 @@ function verifyTotpParent(secretB32: string, code: string): boolean {
 
 export class PortalAuthProvider implements AuthProvider, UserManager {
   readonly type = "portal";
+  /** Site (auth realm) this instance belongs to ("default" when absent). */
+  readonly site: string;
   readonly capabilities = {
     localGateway: true,
     edgeAuth: false,
@@ -113,11 +119,12 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
       name: opts.user?.name ?? "admin",
       password: opts.user?.password ?? randomBytes(9).toString("base64url"),
     };
-    this.#dir = join(ctx.cacheDir, "tmp", "portal");
+    this.#dir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "portal");
     this.#usersFile = join(this.#dir, "users.json");
     this.#serverFile = join(this.#dir, "server.mjs");
     this.#port = opts.port ?? 0;
     this.#basePath = opts.basePath ?? "/portal";
+    this.site = opts.site ?? "default";
     // per-instance random secret — NOT persisted: exposes are lifecycle-only,
     // so a restart kills the tunnels and the public hosts change. A persisted
     // cookie secret would keep sessions valid only for the OLD (dead) hosts.

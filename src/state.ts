@@ -22,15 +22,27 @@ export interface TunnelRuntimeState {
   url: string | null;
 }
 
+/** A persisted proxy enrollment (D4): port → site/label → auth backend. */
+export interface BindingRuntimeState {
+  port: number;
+  label: string;
+  site: string;
+  provider: string;
+  policy?: { policy?: "one_factor" | "two_factor" | "deny"; subject?: string[]; methods?: string[] };
+  providerParams?: Record<string, unknown>;
+}
+
 export interface RuntimeState {
   daemon?: DaemonState;
   internal: InternalPortState[];
   tunnels: Record<string, TunnelRuntimeState>;
   auth: { registered: string[] };
+  /** Persisted proxy enrollments (mode proxy/both) — restored on daemon restart. */
+  bindings: BindingRuntimeState[];
 }
 
 export function emptyState(): RuntimeState {
-  return { internal: [], tunnels: {}, auth: { registered: [] } };
+  return { internal: [], tunnels: {}, auth: { registered: [] }, bindings: [] };
 }
 
 export function readState(stateFile: string): RuntimeState {
@@ -43,6 +55,7 @@ export function readState(stateFile: string): RuntimeState {
       internal: Array.isArray(parsed.internal) ? parsed.internal : [],
       tunnels: parsed.tunnels ?? {},
       auth: { ...emptyState().auth, ...parsed.auth },
+      bindings: Array.isArray(parsed.bindings) ? parsed.bindings : [],
     };
   } catch {
     return emptyState();

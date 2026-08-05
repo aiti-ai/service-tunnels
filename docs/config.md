@@ -14,7 +14,7 @@
 
 ```jsonc
 {
-  "suffixes": [".pi.localhost"],          // 泛域名代理后缀；可加 ".pi.lan"
+  "suffixes": [".st.localhost"],          // 泛域名代理后缀；可加 ".pi.lan"
   "allowedHosts": [],                      // 公网部署域名（proxy 反代同样接受 <port>.<域名>）
   "basePath": "",                          // 部署在子路径时剥离（如 /dev）
   "password": "",                          // proxy 模式的 Basic 密码（空=关闭）

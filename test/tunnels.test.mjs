@@ -51,11 +51,11 @@ function tempDirs() {
 }
 
 /**
- * 等待 ssh 隧道 URL 合成(11s 连接窗口后)。若 ssh 进程提前退出(并发时 sshd
- * 偶发初始化失败 exit 255——系统级问题,单文件/手动连接均正常),自动 stop +
- * restart 重试一次,吸收该偶发失败。返回合成 URL。
+ * 等待 ssh 隧道 URL 合成(注入 sshUrlSynthDelayMs=500 后秒级出现)。若 ssh 进程
+ * 提前退出(并发时 sshd 偶发初始化失败 exit 255——系统级问题,单文件/手动连接均
+ * 正常),自动 stop + restart 重试一次,吸收该偶发失败。返回合成 URL。
  */
-async function waitSshUrl(tm, name, ms = 35_000, retries = 1) {
+async function waitSshUrl(tm, name, ms = 5_000, retries = 1) {
   for (let attempt = 0; ; attempt++) {
     const dl = Date.now() + ms;
     while (Date.now() < dl && !tm.get(name)?.url) await sleep(200);
@@ -159,6 +159,7 @@ test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", {
     const tm = new TunnelManager({
       cacheDir,
       resolveTool: async (n) => (n === "ssh" ? sshBin : null),
+      sshUrlSynthDelayMs: 500, // 本机 ssh 秒级就绪,无需等 ConnectTimeout 窗口
     });
 
     // full config: user@localhost + custom remotePort
@@ -485,12 +486,12 @@ test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { time
   const server = createHttpServer((req, res) => res.end("SYNTH_OK"));
   await new Promise((r) => server.listen(target, "127.0.0.1", r));
   try {
-    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null) });
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null), sshUrlSynthDelayMs: 500 });
     const remotePort = 42985;
     tm.add({ name: "my", type: "ssh", target, host: "localhost", user, remotePort });
     const info = await tm.start("my");
     // 端点确定,但只在 ssh 存活过连接窗口后报 URL(11s);sshd 偶发失败自动重启重试
-    assert.equal(await waitSshUrl(tm, "my", 30_000), `http://localhost:${remotePort}`, "ssh 合成 http://host:remotePort");
+    assert.equal(await waitSshUrl(tm, "my"), `http://localhost:${remotePort}`, "ssh 合成 http://host:remotePort");
     assert.equal(tm.get("my")?.running, true);
     assert.ok(info.pid && info.pid > 0);
     // 真实转发:curl sshd 侧 remotePort 到达 target 服务
@@ -513,7 +514,7 @@ test("ssh: real connection refused does NOT report a URL; stop revokes it", { ti
   const server = createHttpServer((req, res) => res.end("UP"));
   await new Promise((r) => server.listen(target, "127.0.0.1", r));
   try {
-    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null) });
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null), sshUrlSynthDelayMs: 500 });
 
     // 1. unreachable: ssh 到未监听端口立即 Connection refused 退出
     tm.add({ name: "bad", type: "ssh", target, host: "127.0.0.1", port: 1, remotePort: 8080 });
@@ -528,14 +529,14 @@ test("ssh: real connection refused does NOT report a URL; stop revokes it", { ti
     const remotePort = 42987;
     tm.add({ name: "ok", type: "ssh", target, host: "localhost", user, remotePort });
     await tm.start("ok");
-    assert.equal(await waitSshUrl(tm, "ok", 30_000), `http://localhost:${remotePort}`, "可达 → 合成 URL");
+    assert.equal(await waitSshUrl(tm, "ok"), `http://localhost:${remotePort}`, "可达 → 合成 URL");
     assert.equal(await httpGetUntil(`http://127.0.0.1:${remotePort}/`, "UP", 10_000), "UP", "真实转发");
 
     // 3. 进程被强杀(SIGKILL → 非零退出)→ 撤销 URL(不报假成功)
     const killPort = 42988;
     tm.add({ name: "kill", type: "ssh", target, host: "localhost", user, remotePort: killPort });
     await tm.start("kill");
-    assert.equal(await waitSshUrl(tm, "kill", 30_000), `http://localhost:${killPort}`, "隧道建立后 URL 合成");
+    assert.equal(await waitSshUrl(tm, "kill"), `http://localhost:${killPort}`, "隧道建立后 URL 合成");
     const killInfo = tm.get("kill");
     const killPid = killInfo?.pid;
     if (killPid) {

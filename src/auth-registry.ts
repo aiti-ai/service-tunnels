@@ -17,6 +17,12 @@ import type { ParamSpec } from "./tunnels.ts";
  *   2. providers/*.js in configDir (ESM modules exporting a factory).
  * Each factory receives a ProviderContext; the registry exposes list() /
  * create() so expose() can pick providers by name.
+ *
+ * Site isolation (P1, sites-design.md §5.1): instances are cached per
+ * `type#site`. The first create() for a site injects the site's storageDir
+ * (cacheDir/tmp/sites/<site>/<type>) so every provider keeps its own user
+ * db / htpasswd / sqlite — sites never share config or users. The default
+ * site keeps the legacy paths (zero migration).
  */
 
 export type AnyProviderOptions =
@@ -29,9 +35,9 @@ export type AnyProviderOptions =
 export class AuthRegistry {
   #factories = new Map<string, AuthProviderFactory>();
   #ctx: ProviderContext;
-  /** Cached singleton per type — one authelia/portal/basic process serves
-   *  ALL exposes (registerHost adds hosts to the shared instance). Without
-   *  this every expose() spawned a fresh provider+process and they collided. */
+  /** Cached singleton per `type#site` — one portal/authelia/basic process per
+   *  SITE serves that site's hosts (registerHost adds hosts to the shared
+   *  instance). Per-site storageDir keeps user dbs isolated. */
   #instances = new Map<string, AuthProvider>();
 
   constructor(ctx: ProviderContext, plugins: AuthProviderFactory[] = []) {
@@ -90,40 +96,87 @@ export class AuthRegistry {
     });
   }
 
-  /** Resolve a user-manager instance by type (errors for non-user providers).
-   *  Reuses the cached singleton when one exists (so user changes restart the
-   *  running provider); otherwise creates a THROWAWAY probe — never caching
-   *  an empty-opts instance that would later starve expose() of its opts
-   *  (policy/basePath/oidc...). */
-  userManager(type: string): UserManager {
-    const cached = this.#instances.get(type);
-    const p = cached ?? this.#probeFactory(type);
+  /** Resolve a user-manager instance by type + site (errors for non-user
+   *  providers). Reuses the cached singleton when one exists (so user changes
+   *  restart the running provider); otherwise creates a THROWAWAY probe — never
+   *  caching an empty-opts instance that would later starve expose() of its
+   *  opts (policy/basePath/oidc...). */
+  userManager(type: string, site = "default"): UserManager {
+    const cached = this.#instances.get(this.#key(type, site));
+    const p = cached ?? this.#probeFactory(type, site);
     if (!isUserManager(p)) throw new Error(`provider ${type} does not support user management`);
     return p;
   }
 
   /** Create an instance WITHOUT caching (probes / user ops before any expose). */
-  #probeFactory(type: string): AuthProvider {
+  #probeFactory(type: string, site = "default"): AuthProvider {
     const factory = this.#factories.get(type);
     if (!factory) throw new Error(`unknown auth provider: ${type} (available: ${this.list().join(", ")})`);
-    return factory(this.#ctx, {});
+    return factory(this.#ctx, this.#siteOpts(type, site));
   }
 
   has(type: string): boolean {
     return this.#factories.has(type);
   }
 
-  /** Create (or return the cached singleton) provider instance. The FIRST
-   *  call per type constructs it with `opts` (basePath/port/user); later
-   *  calls reuse the same instance so all exposes share one process. */
-  create(type: string, opts: AnyProviderOptions = {}): AuthProvider {
-    const cached = this.#instances.get(type);
+  /** Create (or return the cached singleton) provider instance for a site. The
+   *  FIRST call per `type#site` constructs it with `opts` (basePath/port/user);
+   *  later calls reuse the same instance so all exposes of that site share one
+   *  process and one user db. */
+  create(type: string, opts: AnyProviderOptions = {}, site = "default"): AuthProvider {
+    const key = this.#key(type, site);
+    const cached = this.#instances.get(key);
     if (cached) return cached;
     const factory = this.#factories.get(type);
     if (!factory) throw new Error(`unknown auth provider: ${type} (available: ${this.list().join(", ")})`);
-    const instance = factory(this.#ctx, opts as Record<string, unknown>);
-    this.#instances.set(type, instance);
+    const instance = factory(this.#ctx, { ...opts, ...this.#siteOpts(type, site) } as Record<string, unknown>);
+    this.#instances.set(key, instance);
     return instance;
+  }
+
+  /** Whether any provider instance of this site is running (site status). */
+  siteStatus(site: string): { running: boolean; port?: number } {
+    for (const [key, p] of this.#instances) {
+      if (key.endsWith(`#${site}`)) {
+        try {
+          const s = p.status();
+          if (s.running) return { running: true, port: s.port };
+        } catch {
+          // instance may be a broken plugin — ignore
+        }
+      }
+    }
+    return { running: false };
+  }
+
+  /** Stop every cached provider instance (shutdown). Idempotent. */
+  async stopAll(): Promise<void> {
+    const seen = new Set<string>();
+    for (const [, p] of this.#instances) {
+      if (seen.has(p.type)) continue;
+      seen.add(p.type);
+      try {
+        await p.stop();
+      } catch {
+        // best-effort per instance
+      }
+    }
+    this.#instances.clear();
+  }
+
+  #key(type: string, site: string): string {
+    return `${type}#${site || "default"}`;
+  }
+
+  /** Per-site opts: the site name, plus isolated storage dirs for NON-default
+   *  sites (default keeps the legacy paths — zero migration). */
+  #siteOpts(type: string, site: string): Record<string, unknown> {
+    if (!site || site === "default") return { site: "default" };
+    return {
+      site,
+      storageDir: join(this.#ctx.cacheDir, "tmp", "sites", site, type),
+      dataDir: join(this.#ctx.cacheDir, "data", "sites", site, type),
+    };
   }
 }
 

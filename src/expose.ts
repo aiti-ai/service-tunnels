@@ -1,4 +1,6 @@
 import { GatewayController, type GatewayAuthMode, detectProtocol } from "./gateway.ts";
+import { ProxyManager } from "./proxy-manager.ts";
+import { readSites, type SiteConfig } from "./sites.ts";
 import { readConfigFile } from "./config.ts";
 import { RedisController } from "./redis.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
@@ -58,6 +60,22 @@ function unflattenParams(params: Record<string, unknown>): Record<string, unknow
 
 export interface ExposeOptions {
   port: number;
+  /** Exposure mode (sites-design.md §4): "tunnel" (default, existing),
+   *  "proxy" (local virtual host only, NO tunnel process), "both" (local
+   *  vhost + public tunnel sharing one site). */
+  mode?: "tunnel" | "proxy" | "both";
+  /** Auth realm (site) for mode proxy/both. Default "default" (vhost label
+   *  "auth"); an explicit provider without --site creates an implicit
+   *  provider site (vhost label = provider name). */
+  site?: string;
+  /** Proxy transport port for mode proxy/both (default 4180, busy → random). */
+  proxyPort?: number;
+  /**
+   * User's wildcard-DNS base domain (e.g. "pi.example.com") — overrides
+   * config service-tunnels.json `baseDomain`. expose also returns a PORTLESS
+   * base URL `<port>[-<label>].<baseDomain>` (user reverse-proxies it).
+   */
+  baseDomain?: string;
   /** true = gateway auth (default provider), false = no auth, "auto" = pick
    *  the best available provider (authelia > portal > basic). */
   auth?: boolean | "auto";
@@ -106,6 +124,22 @@ export interface ExposeResult {
   /** Failure reason when `url` is null (e.g. ngrok "not authenticated").
    *  Surfaced so callers/UI aren't left with a silent null URL. */
   error?: string;
+  /** Mode used ("tunnel" | "proxy" | "both"). */
+  mode?: "tunnel" | "proxy" | "both";
+  /** Site (auth realm) the expose belongs to; "" for open bindings. */
+  site?: string;
+  /** Vhost dash label ("auth" for the default site, site name otherwise,
+   *  "" for open). */
+  label?: string;
+  /** Local virtual-host URL (mode proxy/both), e.g.
+   *  http://5173-portal.st.localhost:4180. */
+  localUrl?: string;
+  /** Portless URL under the user's base domain (mode proxy/both, when
+   *  baseDomain is configured), e.g. http://5173-portal.pi.example.com. */
+  baseUrl?: string;
+  /** Portless URL under the site's OWN domain (`<port>.<site-domain>`, when
+   *  the site has a domain), e.g. http://5173.web.pi.example.com. */
+  domainUrl?: string;
 }
 
 export interface ExposeContext {
@@ -125,6 +159,9 @@ export interface ExposeContext {
   /** Shared nginx gateway singleton (one instance for all exposes). When
    *  omitted, expose() falls back to a local GatewayController. */
   gateway?: GatewayController;
+  /** Shared proxy transport + enrollment registry (mode proxy/both). When
+   *  omitted, expose() falls back to a local ProxyManager. */
+  proxy?: ProxyManager;
   /** Shared redis singleton (one session store for all authelia exposes). */
   redis?: RedisController;
   log?: (line: string) => void;
@@ -148,7 +185,135 @@ async function pickPort(): Promise<number> {
   });
 }
 
+/** Mode dispatch (sites-design.md §4): "proxy" is a first-class expose mode
+ *  — explicit enrollment, no tunnel process, same site/auth realm as tunnel
+ *  mode. "both" = local vhost + public tunnel sharing one site. */
 export async function expose(port: number, opts: ExposeOptions, ctx: ExposeContext): Promise<ExposeResult> {
+  const mode = opts.mode ?? "tunnel";
+  if (opts.protocol === "tcp" && mode !== "tunnel") {
+    return { url: null, tunnel: "", protocol: "tcp", error: "protocol tcp requires --mode tunnel" };
+  }
+  // Unified site resolution (P1): explicit --site > implicit provider site >
+  // default. Resolved ONCE so the proxy and tunnel branches share the SAME
+  // site instance (one provider process / one user db per realm).
+  const sites = readSites(ctx.configDir);
+  const site = opts.site ?? (opts.provider ? opts.provider : "default");
+  const siteCfg = sites[site];
+  const opts2 = { ...opts, site };
+  if (mode === "proxy") return await proxyExpose(port, opts2, ctx, siteCfg);
+  const proxyResult = mode === "both" ? await proxyExpose(port, opts2, ctx, siteCfg) : null;
+  const result = await exposeTunnel(port, opts2, ctx, siteCfg);
+  return proxyResult
+    ? { ...result, mode: "both", site: proxyResult.site, label: proxyResult.label, localUrl: proxyResult.localUrl }
+    : result;
+}
+
+/**
+ * proxy mode — local virtual host, NO tunnel (sites-design.md §5.4).
+ *
+ * Enrollment is the ONLY way to expose a port through the wildcard proxy
+ * (D4): the binding is registered with the shared ProxyManager; the first
+ * request lazily starts the site's provider and registers the vhost.
+ *
+ *   --auth none           → open binding      <port>.<suffix>
+ *   --auth auto           → default site      <port>-auth.<suffix>
+ *   --auth <provider>     → implicit provider site (site = provider name)
+ *   --auth ... --site <s> → named site        <port>-<s>.<suffix>
+ */
+async function proxyExpose(
+  port: number,
+  opts: ExposeOptions,
+  ctx: ExposeContext,
+  siteCfg: SiteConfig | undefined,
+): Promise<ExposeResult> {
+  const log = ctx.log ?? (() => {});
+  const cfgFile = readConfigFile(ctx.configDir);
+  const proxy = ctx.proxy ?? new ProxyManager({
+    registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+    log,
+  });
+  // base domain (portless public URL): explicit option > config file.
+  const baseDomain = opts.baseDomain ?? cfgFile.baseDomain;
+  if (baseDomain) await proxy.setBaseDomain(baseDomain);
+  const authRequested =
+    opts.auth === true || opts.auth === "auto" || (typeof opts.auth === "string" && opts.auth !== "none");
+  const providerType = opts.provider
+    ?? siteCfg?.provider
+    ?? (opts.auth === "auto"
+      ? getDefaultAuthProvider()
+      : typeof opts.auth === "string" && opts.auth !== "none" ? opts.auth : "portal");
+  const site = authRequested ? (opts.site ?? "default") : "";
+  const label = site === "" ? "" : site === "default" ? "auth" : site;
+
+  if (authRequested) {
+    const pctx = providerCtx(ctx);
+    const registry = ctx.auth ?? new AuthRegistry(pctx);
+    const basePath = opts.basePath
+      ?? siteCfg?.basePath
+      ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+      ?? defaultBasePath(providerType);
+    const provider = registry.create(
+      providerType,
+      {
+        ...unflattenParams(opts.providerParams ?? {}),
+        ...(siteCfg?.providerParams ?? {}),
+        basePath: providerType === "basic" ? "" : sanitizeBasePath(basePath),
+        policy: opts.policy ?? siteCfg?.policy,
+        user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
+        sessionSecret: opts.sessionSecret,
+        externalReloadCmd: opts.autheliaReloadCmd,
+      },
+      site,
+    );
+    const problems = (await provider.validate?.()) ?? [];
+    if (problems.length) {
+      throw new Error(`auth provider ${providerType} not ready:\n  - ${problems.join("\n  - ")}`);
+    }
+    if (provider.capabilities.needsSessionStore) {
+      let redis = ctx.redis ?? null;
+      if (!redis) redis = new RedisController({ cacheDir: ctx.cacheDir, port: opts.redisPort, log });
+      const redisPort = await redis.start();
+      ctx.internal.register("redis", { port: redisPort, pid: 0, process: "redis", cmdline: "redis", addresses: ["127.0.0.1"] });
+    }
+    await provider.start();
+    log(`expose ${port} (proxy): provider ${providerType} up (site ${site})`);
+  }
+
+  const transportPort = await proxy.start(opts.proxyPort);
+  proxy.addBinding({
+    port,
+    label,
+    site: site || "default",
+    provider: authRequested ? providerType : "",
+    policy: opts.policy ? { policy: opts.policy } : undefined,
+    providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
+  });
+  const localUrl = `http://${proxy.vhost(port, label)}:${transportPort}`;
+  const baseVhost = proxy.baseVhost(port, label);
+  const baseUrl = baseVhost ? `http://${baseVhost}` : undefined;
+  const domainUrl = siteCfg?.domain ? `http://${port}.${siteCfg.domain.replace(/^\./, "")}` : undefined;
+  log(`expose ${port} (proxy): ${localUrl}${baseUrl ? ` / ${baseUrl}` : ""}${domainUrl ? ` / ${domainUrl}` : ""}${authRequested ? ` (auth via ${providerType}, site ${site || "default"})` : " (open)"}`);
+  return {
+    url: null,
+    tunnel: "",
+    provider: authRequested ? providerType : undefined,
+    mode: "proxy",
+    site,
+    label,
+    localUrl,
+    baseUrl,
+    domainUrl,
+    protocol: "http",
+  };
+}
+
+/** The existing one-shot tunnel flow (tunnel + optional gateway auth). */
+async function exposeTunnel(
+  port: number,
+  opts: ExposeOptions,
+  ctx: ExposeContext,
+  siteCfg: SiteConfig | undefined,
+): Promise<ExposeResult> {
   const log = ctx.log ?? (() => {});
   
   // Security check: verify port ownership (unless --force is specified)
@@ -168,7 +333,8 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     log(`--force specified: skipping port ownership check for port ${port}`);
   }
   
-  const providerType = opts.provider ?? (opts.auth === "auto" ? getDefaultAuthProvider() : "authelia");
+  const providerType = opts.provider ?? siteCfg?.provider ?? (opts.auth === "auto" ? getDefaultAuthProvider() : "authelia");
+  const site = opts.site ?? "default";
   // "none" is a first-class provider = expose WITHOUT auth (like basic but
   // no auth): skip the whole gateway/auth flow and make a plain tunnel.
   const useAuth = (opts.auth === true || opts.auth === "auto") && providerType !== "none";
@@ -252,26 +418,32 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   // (/{provider}) never collide with app routes (portal → /portal-sneaky-capybara).
   const cfgFile = readConfigFile(ctx.configDir);
   const initialBasePath = opts.basePath
+    ?? siteCfg?.basePath
     ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
     ?? defaultBasePath(providerType);
   // basePath is interpolated into nginx locations + 302 redirects + authelia's
   // server.address — allow a plain URL path only (no ; {} whitespace quotes
   // which would inject nginx directives or break the config).
   const basePath = providerType === "basic" ? "" : sanitizeBasePath(initialBasePath);
-  const provider: AuthProvider = registry.create(providerType, {
-    ...unflattenParams(opts.providerParams ?? {}),
-    port: opts.autheliaPort,
-    basePath,
-    sessionSecret: opts.sessionSecret,
-    policy: opts.policy,
-    user: opts.user,
-    externalReloadCmd: opts.autheliaReloadCmd,
-  });
-  // The registry caches ONE provider per type (singleton): every expose of
-  // this provider shares the SAME process + basePath. Use the provider's own
-  // basePath (the first expose set it) — do NOT regenerate or setBasePath,
+  const provider: AuthProvider = registry.create(
+    providerType,
+    {
+      ...unflattenParams(opts.providerParams ?? {}),
+      ...(siteCfg?.providerParams ?? {}),
+      port: opts.autheliaPort,
+      basePath,
+      sessionSecret: opts.sessionSecret,
+      policy: opts.policy ?? siteCfg?.policy,
+      user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
+      externalReloadCmd: opts.autheliaReloadCmd,
+    },
+    site,
+  );
+  // The registry caches ONE provider per `type#site` (P1): every expose of
+  // this site shares the SAME process + basePath + user db. Use the provider's
+  // own basePath (the first expose set it) — do NOT regenerate or setBasePath,
   // that would rebind the shared provider + restart it and break every other
-  // expose of this type (multiple authelia instances colliding → authz 400).
+  // expose of this site (multiple authelia instances colliding → authz 400).
   const providerBasePath = (provider as { basePath?: string }).basePath ?? initialBasePath;
 
   const problems = (await provider.validate?.()) ?? [];
@@ -413,6 +585,14 @@ const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
 export function randomAlnum(len: number): string {
   let out = "";
   for (let i = 0; i < len; i++) out += ALNUM[Math.floor(Math.random() * ALNUM.length)];
+  return out;
+}
+
+/** Random secret for bootstrap users without an explicit password. */
+function randomSecret(len = 12): string {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
   return out;
 }
 

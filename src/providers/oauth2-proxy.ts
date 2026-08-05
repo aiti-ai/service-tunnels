@@ -24,6 +24,10 @@ export interface OAuth2ProxyProviderOptions {
     clientSecret: string;
     cookieSecret?: string;
   };
+  /** Per-site storage dir (P1); default = cacheDir/tmp/oauth2-proxy. */
+  storageDir?: string;
+  /** Site (auth realm) this instance belongs to. */
+  site?: string;
 }
 
 function alive(pid: number): boolean {
@@ -42,6 +46,8 @@ function alive(pid: number): boolean {
 
 export class OAuth2ProxyProvider implements AuthProvider {
   readonly type = "oauth2-proxy";
+  /** Site (auth realm) this instance belongs to ("default" when absent). */
+  readonly site: string;
   readonly capabilities = {
     localGateway: true,
     edgeAuth: false,
@@ -55,11 +61,14 @@ export class OAuth2ProxyProvider implements AuthProvider {
   #child: ChildProcess | null = null;
   #port: number;
   #bin: string | null = null;
+  #dir: string;
 
   constructor(ctx: ProviderContext, opts: OAuth2ProxyProviderOptions = {}) {
     this.#ctx = ctx;
     this.#opts = opts;
     this.#port = opts.port ?? 0;
+    this.#dir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "oauth2-proxy");
+    this.site = opts.site ?? "default";
   }
 
   get port(): number {
@@ -93,7 +102,7 @@ export class OAuth2ProxyProvider implements AuthProvider {
   async prepare(): Promise<AuthProviderStatus> {
     this.#bin = await this.#ctx.resolveTool("oauth2-proxy");
     if (!this.#port) this.#port = await this.#ctx.pickPort();
-    const dir = join(this.#ctx.cacheDir, "tmp", "oauth2-proxy");
+    const dir = this.#dir;
     mkdirSync(dir, { recursive: true });
     const oidc = this.#opts.oidc!;
     const cookieSecret = oidc.cookieSecret ?? randomSecret(32);
@@ -121,7 +130,7 @@ export class OAuth2ProxyProvider implements AuthProvider {
     const bin = this.#bin!;
     const child = spawn(
       bin,
-      ["--config", join(this.#ctx.cacheDir, "tmp", "oauth2-proxy", "oauth2-proxy.conf")],
+      ["--config", join(this.#dir, "oauth2-proxy.conf")],
       { env: { ...process.env, ...roleEnv("oauth2-proxy") }, stdio: ["ignore", "pipe", "pipe"] },
     );
     child.stderr?.on("data", (c) => this.#ctx.log(`oauth2-proxy: ${c.toString().trim()}`));

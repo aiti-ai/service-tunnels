@@ -30,7 +30,7 @@ await st.shutdown();  // 清理全部子进程（进程退出时也会自动清�
 ```ts
 create(opts?: {
   port?: number;              // 监听端口（默认 4180，0=随机）
-  suffixes?: string[];        // 虚拟主机后缀（默认 [".pi.localhost"]）
+  suffixes?: string[];        // 虚拟主机后缀（默认 [".st.localhost"]）
   allowedHosts?: string[];    // 公网部署域名（<port>.<域名> 同样接受）
   basePath?: string;          // 转发前剥离（/dev/foo → /foo）
   password?: string;          // Basic 密码门（空=关）

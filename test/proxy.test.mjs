@@ -91,7 +91,10 @@ async function startProxy(opts) {
   const { InternalRegistry } = await loadDiscovery();
   const server = createProxyServer({
     port: 0,
-    suffixes: [".pi.localhost"],
+    suffixes: [".st.localhost"],
+    // D4: explicit resolver = open binding for every port (legacy behavior);
+    // enrollment tests pass their own resolver instead.
+    resolveSite: async () => ({}),
     ...opts,
     internal: new InternalRegistry(),
   });
@@ -100,15 +103,20 @@ async function startProxy(opts) {
   return { server, port, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); }) };
 }
 
-test("parseServiceHost matches <port>.<suffix>", async () => {
+test("parseServiceHost matches <port>.<suffix> (open) and <port>-<label>.<suffix> (dash form)", async () => {
   const { parseServiceHost } = await loadProxy();
-  assert.deepEqual(parseServiceHost("5173.pi.localhost", [".pi.localhost"]), { port: 5173, suffix: "pi.localhost" });
-  assert.deepEqual(parseServiceHost("5173.pi.localhost:8080", [".pi.localhost"]), { port: 5173, suffix: "pi.localhost" });
-  assert.deepEqual(parseServiceHost("80.pi.lan", [".pi.localhost", ".pi.lan"]), { port: 80, suffix: "pi.lan" });
-  assert.equal(parseServiceHost("pi.localhost", [".pi.localhost"]), null);
-  assert.equal(parseServiceHost("5173.evil.com", [".pi.localhost"]), null);
-  assert.equal(parseServiceHost("99999.pi.localhost", [".pi.localhost"]), null); // port out of range
-  assert.equal(parseServiceHost(undefined, [".pi.localhost"]), null);
+  assert.deepEqual(parseServiceHost("5173.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: undefined });
+  assert.deepEqual(parseServiceHost("5173.st.localhost:8080", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: undefined });
+  assert.deepEqual(parseServiceHost("80.pi.lan", [".st.localhost", ".pi.lan"]), { port: 80, suffix: "pi.lan", label: undefined });
+  // dash form: label = provider / site name (may itself contain dashes)
+  assert.deepEqual(parseServiceHost("5173-portal.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "portal" });
+  assert.deepEqual(parseServiceHost("5173-pi-web.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "pi-web" });
+  assert.deepEqual(parseServiceHost("5173-auth.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "auth" });
+  assert.equal(parseServiceHost("st.localhost", [".st.localhost"]), null);
+  assert.equal(parseServiceHost("5173.evil.com", [".st.localhost"]), null);
+  assert.equal(parseServiceHost("5173-.st.localhost", [".st.localhost"]), null); // empty label
+  assert.equal(parseServiceHost("99999.st.localhost", [".st.localhost"]), null); // port out of range
+  assert.equal(parseServiceHost(undefined, [".st.localhost"]), null);
 });
 
 test("basic auth validation", async () => {
@@ -137,12 +145,12 @@ test("proxy forwards to a discovered service, preserving path/host/body", { time
 
     const proxy = await startProxy({ isPortAllowed: allow });
     try {
-      const res = await rawGet(proxy.port, `${servicePort}.pi.localhost`, "/hello?a=1");
+      const res = await rawGet(proxy.port, `${servicePort}.st.localhost`, "/hello?a=1");
       assert.equal(res.status, 200);
       const body = JSON.parse(res.body);
       assert.equal(body.url, "/hello?a=1");
       assert.equal(body.method, "GET");
-      assert.equal(body.host, `${servicePort}.pi.localhost`); // virtual host preserved
+      assert.equal(body.host, `${servicePort}.st.localhost`); // virtual host preserved
     } finally {
       await proxy.close();
     }
@@ -166,7 +174,7 @@ test("proxy POST body forwarding", { timeout: 20_000 }, async () => {
     try {
       const res = await new Promise((resolve, reject) => {
         const req = httpRequest(
-          { host: "127.0.0.1", port: proxy.port, method: "POST", path: "/submit", headers: { host: `${servicePort}.pi.localhost`, "content-type": "text/plain", connection: "close" } },
+          { host: "127.0.0.1", port: proxy.port, method: "POST", path: "/submit", headers: { host: `${servicePort}.st.localhost`, "content-type": "text/plain", connection: "close" } },
           (r) => {
             let b = "";
             r.on("data", (c) => (b += c));
@@ -191,7 +199,7 @@ test("proxy POST body forwarding", { timeout: 20_000 }, async () => {
 test("proxy denies ports outside the allow-list (403)", { timeout: 20_000 }, async () => {
   const proxy = await startProxy({ isPortAllowed: () => false });
   try {
-    const res = await rawGet(proxy.port, "9999.pi.localhost", "/");
+    const res = await rawGet(proxy.port, "9999.st.localhost", "/");
     assert.equal(res.status, 403);
     assert.match(res.body, /not allowed/);
   } finally {
@@ -211,7 +219,7 @@ test("proxy strips the basePath before forwarding", { timeout: 20_000 }, async (
     const allow = (port) => getServicePorts(internal, { force: true }).some((p) => p.port === port);
     const proxy = await startProxy({ isPortAllowed: allow, basePath: "/dev" });
     try {
-      const res = await rawGet(proxy.port, `${servicePort}.pi.localhost`, "/dev/foo?a=1");
+      const res = await rawGet(proxy.port, `${servicePort}.st.localhost`, "/dev/foo?a=1");
       assert.equal(res.status, 200);
       assert.equal(JSON.parse(res.body).url, "/foo?a=1");
     } finally {
@@ -235,13 +243,13 @@ test("proxy password gate: 401 without creds, 200 with", { timeout: 20_000 }, as
     const allow = (port) => getServicePorts(internal, { force: true }).some((p) => p.port === port);
     const proxy = await startProxy({ isPortAllowed: allow, password: "pw123" });
     try {
-      const noAuth = await rawGet(proxy.port, `${servicePort}.pi.localhost`, "/");
+      const noAuth = await rawGet(proxy.port, `${servicePort}.st.localhost`, "/");
       assert.equal(noAuth.status, 401);
       assert.match(noAuth.headers["www-authenticate"], /Basic/);
 
       const good = await new Promise((resolve, reject) => {
         const req = httpRequest(
-          { host: "127.0.0.1", port: proxy.port, path: "/", headers: { host: `${servicePort}.pi.localhost`, authorization: authHeader("pw123"), connection: "close" } },
+          { host: "127.0.0.1", port: proxy.port, path: "/", headers: { host: `${servicePort}.st.localhost`, authorization: authHeader("pw123"), connection: "close" } },
           (r) => {
             let b = "";
             r.on("data", (c) => (b += c));
@@ -286,7 +294,7 @@ test("SSE-style streaming: chunks arrive before the stream ends", { timeout: 20_
       const events = [];
       await new Promise((resolve, reject) => {
         const req = httpRequest(
-          { host: "127.0.0.1", port: proxy.port, path: "/events", headers: { host: `${servicePort}.pi.localhost`, connection: "close" } },
+          { host: "127.0.0.1", port: proxy.port, path: "/events", headers: { host: `${servicePort}.st.localhost`, connection: "close" } },
           (res) => {
             res.setEncoding("utf8");
             res.on("data", (c) => {
@@ -343,7 +351,7 @@ test("WebSocket upgrade forwarding", { timeout: 20_000 }, async () => {
         const timer = setTimeout(() => { socket.destroy(); reject(new Error("timeout")); }, 5000);
         socket.on("connect", () => {
           socket.write(
-            `GET /ws HTTP/1.1\r\nHost: ${servicePort}.pi.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+            `GET /ws HTTP/1.1\r\nHost: ${servicePort}.st.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`,
           );
         });
         socket.on("data", (d) => {
@@ -369,3 +377,274 @@ test("WebSocket upgrade forwarding", { timeout: 20_000 }, async () => {
 async function loadInternal() {
   return import("../src/internal.ts");
 }
+
+test("proxy forward-auth gate (portal): unauthenticated 302, cookie-authenticated passes", { timeout: 30_000 }, async () => {
+  const { createProxyServer } = await loadProxy();
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { mkdtempSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+
+  // backends: echo service on 127.0.0.1:<svcPort>; portal provider on its port
+  const svc = httpServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("echo:" + req.url);
+  });
+  await new Promise((r) => svc.listen(0, "127.0.0.1", r));
+  const svcPort = svc.address().port;
+
+  const base = mkdtempSync(join(tmpdir(), "st-proxy-auth-"));
+  const net = await import("node:net");
+  const pickPort = () =>
+    new Promise((resolve) => {
+      const s = net.createServer();
+      s.listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => resolve(p)); });
+    });
+  const provider = new PortalAuthProvider(
+    { configDir: join(base, "config"), cacheDir: join(base, "cache"), resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, registerPid: () => {}, pickPort, log: () => {} },
+    { user: { name: "admin", password: "pw" } },
+  );
+  await provider.prepare();
+  await provider.start();
+  const authPort = provider.port;
+
+  const proxy = createProxyServer({
+    port: 0,
+    suffixes: [".st.localhost"],
+    isPortAllowed: (p) => p === svcPort,
+    auth: {
+      port: authPort,
+      basePath: "/portal",
+      loginRedirect: "https://$host/portal/login?next=$request_uri",
+    },
+  });
+  await new Promise((r) => proxy.once("listening", r));
+  const proxyPort = proxy.address().port;
+
+  const host = `${svcPort}.st.localhost`;
+  const get = (path, cookie) =>
+    new Promise((resolve) => {
+      const req = httpRequest({ host: "127.0.0.1", port: proxyPort, path, headers: { host, ...(cookie ? { cookie } : {}) } }, (res) => {
+        let body = "";
+        res.on("data", (c) => (body += c));
+        res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body }));
+      });
+      req.end();
+    });
+
+  // 1. no cookie → 302 to the portal login
+  const unauth = await get("/hello");
+  assert.equal(unauth.status, 302, "unauthenticated → 302");
+  assert.ok(unauth.location.includes("/portal/login?next="), `redirect to portal login, got ${unauth.location}`);
+
+  // 2. bogus cookie → still 302
+  const bogus = await get("/hello", "st_portal_session=deadbeef.invalid");
+  assert.equal(bogus.status, 302);
+
+  // 3. real portal session cookie → passes through to the service
+  //    (login via portal's own login form is heavy; issue a session through
+  //    the provider's session issuance — the authz endpoint only checks the
+  //    cookie, so craft one via the sign helper is not exposed; instead do a
+  //    full portal login through its HTTP endpoint)
+  const loginRes = await new Promise((resolve) => {
+    const body = "username=admin&password=pw";
+    const req = httpRequest(
+      { host: "127.0.0.1", port: authPort, path: "/portal/login", method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": body.length } },
+      (res) => {
+        let b = "";
+        res.on("data", (c) => (b += c));
+        res.on("end", () => resolve({ status: res.statusCode, setCookie: String(res.headers["set-cookie"] ?? "") }));
+      },
+    );
+    req.end(body);
+  });
+  const cookie = loginRes.setCookie.match(/st_portal_session=([^;]+)/)?.[0];
+  assert.ok(cookie, "portal login yields session cookie");
+
+  const authed = await get("/secret-path", cookie);
+  assert.equal(authed.status, 200, "authenticated → 200");
+  assert.equal(authed.body, "echo:/secret-path", "path forwarded intact");
+
+  proxy.close();
+  await provider.stop();
+  await new Promise((r) => svc.close(r));
+});
+
+// ── P2: enrollment (D4) + labeled vhost auth ────────────────────────────────
+
+/** In-process echo server (url/host echoed back as JSON). */
+function spawnInProcEcho() {
+  const svc = httpServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ url: req.url, host: req.headers.host }));
+    });
+  });
+  return new Promise((r) => svc.listen(0, "127.0.0.1", () => r(svc)));
+}
+
+test("D4 enrollment: open vhost 403 without a binding, 200 with an open binding", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+
+  // resolver denies everything (default D4 posture)
+  const denied = await startProxy({ resolveSite: async () => null });
+  try {
+    const res = await rawGet(denied.port, `${svcPort}.st.localhost`, "/");
+    assert.equal(res.status, 403);
+    assert.match(res.body, /not enrolled/);
+  } finally {
+    await denied.close();
+  }
+
+  // open binding: resolver returns {} for the open form
+  const open = await startProxy({ resolveSite: async (port, site) => (site ? null : {}) });
+  try {
+    const res = await rawGet(open.port, `${svcPort}.st.localhost`, "/x");
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(res.body).url, "/x");
+  } finally {
+    await open.close();
+  }
+  await new Promise((r) => svc.close(r));
+});
+
+test("D4 labeled vhost: unknown label → 403", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+  const proxy = await startProxy({
+    resolveLabel: () => null, // nothing registered
+    resolveSite: async () => null,
+  });
+  try {
+    const res = await rawGet(proxy.port, `${svcPort}-nope.st.localhost`, "/");
+    assert.equal(res.status, 403);
+    assert.match(res.body, /unknown site label/);
+  } finally {
+    await proxy.close();
+  }
+  await new Promise((r) => svc.close(r));
+});
+
+test("labeled vhost forward-auth: 302 → login page via basePath → 200 with cookie", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+
+  // fake provider speaking the portal forward-auth contract
+  const provider = httpServer((req, res) => {
+    if (req.url.startsWith("/portal/api/authz/auth-request")) {
+      if (req.headers.cookie?.includes("good=1")) {
+        res.writeHead(200);
+        res.end("ok");
+      } else {
+        res.writeHead(401);
+        res.end("deny");
+      }
+    } else if (req.url.startsWith("/portal/")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<html>login</html>");
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((r) => provider.listen(0, "127.0.0.1", r));
+  const providerPort = provider.address().port;
+
+  const proxy = await startProxy({
+    // "auth" is the reserved default-site label; "portal" = implicit provider site
+    resolveLabel: (label) => (label === "auth" || label === "portal" ? "portal" : null),
+    resolveSite: async (port, site) => {
+      if (!site) return null; // open form: not enrolled
+      return {
+        forwardAuth: {
+          port: providerPort,
+          basePath: "/portal",
+          loginRedirect: "http://$host/portal/login?next=$request_uri",
+        },
+      };
+    },
+  });
+  try {
+    const vhost = `${svcPort}-portal.st.localhost`;
+    const get = (path, cookie) =>
+      new Promise((resolve) => {
+        const req = httpRequest({ host: "127.0.0.1", port: proxy.port, path, headers: { host: vhost, ...(cookie ? { cookie } : {}) } }, (res) => {
+          let body = "";
+          res.on("data", (c) => (body += c));
+          res.on("end", () => resolve({ status: res.statusCode, location: res.headers.location, body }));
+        });
+        req.end();
+      });
+
+    // unauthenticated app path → 302 to the portal login (http scheme, local)
+    const unauth = await get("/app");
+    assert.equal(unauth.status, 302);
+    assert.ok(unauth.location.startsWith("http://"), `local scheme is http, got ${unauth.location}`);
+    assert.ok(unauth.location.includes("/portal/login?next="), `redirect target, got ${unauth.location}`);
+
+    // login page served THROUGH the virtual host (basePath → provider port)
+    const login = await get("/portal/login");
+    assert.equal(login.status, 200);
+    assert.match(login.body, /login/);
+
+    // authenticated cookie → passes to the app with path intact
+    const authed = await get("/app", "good=1");
+    assert.equal(authed.status, 200);
+    assert.equal(JSON.parse(authed.body).host, vhost, "virtual host preserved");
+    assert.equal(JSON.parse(authed.body).url, "/app");
+  } finally {
+    await proxy.close();
+  }
+  await new Promise((r) => provider.close(r));
+  await new Promise((r) => svc.close(r));
+});
+
+test("labeled vhost basic (D2): request piped to the nginx gateway with Host preserved", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+
+  // fake nginx gateway: would run auth_basic + backend routing; here just
+  // echoes the Host it received (proves the proxy piped the vhost through)
+  const gateway = httpServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ host: req.headers.host, url: req.url }));
+  });
+  await new Promise((r) => gateway.listen(0, "127.0.0.1", r));
+  const gatewayPort = gateway.address().port;
+
+  const proxy = await startProxy({
+    resolveLabel: (label) => (label === "services" ? "services" : null),
+    resolveSite: async (port, site) => (site === "services" ? { basicGatewayPort: gatewayPort } : null),
+  });
+  try {
+    const res = await rawGet(proxy.port, `${svcPort}-services.st.localhost`, "/deep?a=1");
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body);
+    assert.equal(body.host, `${svcPort}-services.st.localhost`, "vhost piped to gateway");
+    assert.equal(body.url, "/deep?a=1");
+  } finally {
+    await proxy.close();
+  }
+  await new Promise((r) => gateway.close(r));
+  await new Promise((r) => svc.close(r));
+});
+
+test("D4 labeled vhost not enrolled for its site → 403", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+  const proxy = await startProxy({
+    resolveLabel: (label) => (label === "portal" ? "portal" : null),
+    resolveSite: async () => null, // no enrollments at all
+  });
+  try {
+    const res = await rawGet(proxy.port, `${svcPort}-portal.st.localhost`, "/");
+    assert.equal(res.status, 403);
+    assert.match(res.body, /not enrolled/);
+  } finally {
+    await proxy.close();
+  }
+  await new Promise((r) => svc.close(r));
+});

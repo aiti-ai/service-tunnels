@@ -251,9 +251,16 @@ function sshSpec(opts: {
   if (opts.forwardOnly !== false) args.push("-N");
   args.push(
     "-R", opts.forward,
+    // 无交互隧道: 密钥认证失败立即退出(而非挂起等密码), 防止无 tty 挂死
+    "-o", "BatchMode=yes",
+    // 主机密钥: 首次自动接受(隧道目标多为自建/测试服务器)
     "-o", "StrictHostKeyChecking=accept-new",
     "-o", "ConnectTimeout=10",
+    // keepalive: 30s 探测 + 3 次未应答判定断线(~90s), 长隧道不因空闲被掐断
     "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "TCPKeepAlive=yes",
+    // 转发端口绑定失败立即退出(而非静默继续)
     "-o", "ExitOnForwardFailure=yes",
   );
   if (opts.port) args.push("-p", String(opts.port));
@@ -511,7 +518,17 @@ export class TunnelManager {
       case "natapp": {
         // natapp 国内内网穿透: -authtoken 认证, -weburl 本地端口。
         // 免费版输出随机 natappfree.cc 域名;VIP 可加 -server 绑定自定义域名。
-        const bin = await tool("natapp");
+        // 客户端无公开直链(官网 get.sh 安装脚本分发),缺失时给出安装命令。
+        let bin: string;
+        try {
+          bin = await tool("natapp");
+        } catch {
+          throw new Error(
+            `tunnel '${cfg.name}': natapp 客户端未安装。安装: 注册 https://natapp.cn 后执行 ` +
+              `curl -fsSL 'https://natapp.cn/get.sh?authtoken=<你的token>' | bash (Linux/macOS) ` +
+              `或官网下载页 get.ps1 (Windows);或 toolPaths.natapp 指定路径`,
+          );
+        }
         const token = cfg.token ?? process.env.SERVICE_TUNNELS_NATAPP_TOKEN;
         if (!token) {
           throw new Error(`tunnel '${cfg.name}': natapp requires token (authtoken, 注册 https://natapp.cn 获取)`);
@@ -641,15 +658,21 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
       key: "token",
       type: "password",
       label: "Authtoken",
-      description: "natapp 认证令牌(注册后获取)",
-      link: "https://natapp.cn/#panel",
-      linkTitle: "获取 token",
+      description: "natapp 认证令牌(注册后从隧道列表复制);客户端需先经官网安装脚本下载",
+      link: "https://natapp.cn/download",
+      linkTitle: "下载客户端 + 获取 token",
     },
     {
       key: "domain",
       label: "自定义域名",
       description: "绑定固定域名(需 VIP);留空用随机域名",
       placeholder: "xxx.natappfree.cc",
+    },
+    {
+      key: "server",
+      label: "服务器",
+      description: "VIP 绑定自定义域名时填分配的服务器(可选)",
+      placeholder: "server.natapp.cc",
     },
   ],
   localtunnel: [

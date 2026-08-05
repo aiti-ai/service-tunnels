@@ -45,6 +45,12 @@ export interface AutheliaProviderOptions {
   policy?: AuthPolicy["policy"];
   user?: { name: string; password: string; displayName?: string };
   externalReloadCmd?: string;
+  /** Per-site storage dir (P1); default = cacheDir/tmp/authelia. */
+  storageDir?: string;
+  /** Per-site data dir (sqlite/notifications); default = cacheDir/data/authelia. */
+  dataDir?: string;
+  /** Site (auth realm) this instance belongs to. */
+  site?: string;
 }
 
 interface UserRecord {
@@ -106,6 +112,8 @@ async function readUsersFile(usersDb: string): Promise<UserRecord[]> {
 
 export class AutheliaProvider implements AuthProvider {
   readonly type = "authelia";
+  /** Site (auth realm) this instance belongs to ("default" when absent). */
+  readonly site: string;
   readonly capabilities = {
     localGateway: true,
     edgeAuth: false,
@@ -133,11 +141,12 @@ export class AutheliaProvider implements AuthProvider {
     this.#opts = opts;
     this.#port = opts.port ?? 0;
     this.#basePath = opts.basePath ?? DEFAULT_BASE_PATH;
-    this.#tmpDir = join(ctx.cacheDir, "tmp", "authelia");
-    this.#dataDir = join(ctx.cacheDir, "data", "authelia");
+    this.#tmpDir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "authelia");
+    this.#dataDir = opts.dataDir ?? join(ctx.cacheDir, "data", "authelia");
     this.#mainConfig = join(this.#tmpDir, "configuration.yml");
     this.#tunnelConfig = join(this.#tmpDir, "config-tunnels.yml");
     this.#usersDb = join(this.#tmpDir, "users_database.yml");
+    this.site = opts.site ?? "default";
   }
 
   get port(): number {

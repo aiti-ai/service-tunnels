@@ -14,7 +14,7 @@
 | 能力 | 说明 |
 |---|---|
 | **发现** | 列出"当前进程"（或指定 pid）及其**子进程树**中监听的所有 TCP 端口（跨平台：Linux /proc、macOS ps+lsof、Windows PowerShell+netstat），发现缓存即代理白名单 |
-| **泛域名代理** | 零依赖 Node 反代：`<port>.pi.localhost`（及可配置后缀）→ `http://127.0.0.1:<port>`，路径原样透传（绝对路径资源/SPA/表单天然可用），basePath 可选剥离 |
+| **泛域名代理** | 零依赖 Node 反代：`<port>.st.localhost`（及可配置后缀）→ `http://127.0.0.1:<port>`，路径原样透传（绝对路径资源/SPA/表单天然可用），basePath 可选剥离 |
 | **公网隧道** | ngrok / frpc / ssh -R / cloudflared 的启停、URL 解析、状态管理；**配合本地 nginx 网关 + 可插拔认证 provider** 提供统一访问控制（见 §5；内置 Authelia，预留插件） |
 | **绿色启动** | 自动检测/下载 Authelia、nginx 单二进制到缓存目录；Redis 检测或包管理器安装；全部进程可一键启停、退出清理 |
 | **双形态** | npm 库（调用方指定 config/cache 目录）+ CLI（接受端口或 pid） |
@@ -69,7 +69,7 @@
 
 | 模式 | 组成 | 适用 |
 |---|---|---|
-| **proxy（局域网/本机）** | 内置 Node 泛域名反代，零依赖 | 同机/局域网访问测试服务（`5173.pi.localhost`），无认证 |
+| **proxy（局域网/本机）** | 内置 Node 泛域名反代，零依赖 | 同机/局域网访问测试服务（`5173.st.localhost`），无认证 |
 | **expose（公网 + 认证）** | 隧道进程 + nginx 网关 + Authelia + Redis | 公网暴露并统一登录（见 §5），隧道按需启停 |
 
 ## 4. 模块设计
@@ -100,7 +100,7 @@
 ### 4.2 proxy.ts —— 泛域名反代（零依赖）
 
 - 原生 `node:http` 服务器，`Host: <port><suffix>` 正则匹配（端口 2-5 位 + 后缀
-  列表：`.pi.localhost` 内置 + 配置后缀 + 配置域名，优先级排列）。
+  列表：`.st.localhost` 内置 + 配置后缀 + 配置域名，优先级排列）。
 - 匹配到 → `http.request` 转发到 `127.0.0.1:<port>`，路径/查询原样透传
   （可选 `stripBasePath`，配置 `basePath`）；流式透传（SSE ✅），WebSocket
   upgrade 转发（Node `http` + `'upgrade'` 事件，可选开关）。

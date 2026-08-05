@@ -1,15 +1,85 @@
 ## 0.2.4 (unreleased)
 
+### P5：UI 站点管理 + pi-web 集成示例（sites-design.md §5.8）
+- **UI 站点管理页**：`service-tunnels ui` 新增导航「站点管理」——/sites 列表
+  （站点/provider/认证/域名/运行态/地址），添加/删除站点，`/sites/<name>/users`
+  每 site 独立用户增删改密；快速暴露表单加 `mode`（tunnel/proxy/both）+ `site` 选择
+- **pi-web 集成示例**（examples/pi-web-integration.ts）：`ensureSites()` 预置
+  site pi-web（自身，portal + web.pi.example.com）+ site services（子进程，basic +
+  dev.pi.example.com）；`exposeSelf`/`exposeService` 各自独立认证域
+
+### P3/P4 收尾：site.domain 后缀 + bindings 持久化（sites-design.md §3.2/§5.7）
+- **site.domain → domainUrl**：site 配了 `domain` 后 expose 返回无端口
+  `http://<port>.<site-domain>`；`<port>.<site-domain>` 虚拟主机隐含该 site
+  （proxy `resolveSuffixSite` + `#findBySite`），与 label 形式同一认证域
+- **bindings 持久化（state.json）**：proxy enrollment 落盘；daemon 重启后
+  `proxy.restore` 恢复，provider 懒接线重新拉起——`stop-all` → `daemon start`
+  → `proxy status` 绑定仍在；库模式同步持久化
+- `st.proxy.restore/persisted`；daemon RPC `site.*`；`st.exposes()` 增加 domainUrl
+
+### 默认虚拟主机后缀改为中性 `.st.localhost`（去品牌化）
+- 默认后缀从 `.pi.localhost`（pi-web 品牌名）改为 **`.st.localhost`**，并保留
+  `.service-tunnel.localhost` 别名——`5173.st.localhost` / `5173-auth.st.localhost` /
+  `5173-portal.st.localhost`；`--suffix` / `suffixes` 配置仍可完全自定义
+
+### baseDomain —— 用户自有泛解析域名的无端口地址（sites-design.md §3.4）
+- `config set base-domain pi.example.com`：proxy 模式 expose 额外返回**无端口地址**
+  `baseUrl`（如 `http://5173-portal.pi.example.com`），默认带端口 `localUrl`
+  （`http://5173-portal.st.localhost:4180`）仍为兜底——两个域名并存
+- baseDomain 自动加入 proxy 后缀集合；懒接线按**实际 Host** 注册 provider
+  （authelia cookie domain per-host）；`loginRedirect` 跟随请求 scheme
+- 端口可指定：`--proxy-port <p>` / `config set proxy-port <n>`（默认 4180，busy→随机）
+- CLI/库：`expose --base-domain <d>` 覆盖 config；`st.exposes()` 增加 baseUrl
+
+### Site（认证域）隔离 + st.sites（sites-design.md P1）
+- **site = 独立认证域**：registry 实例缓存键从 `type` → `type#site`，每 site 独立
+  存储 `cacheDir/tmp/sites/<site>/<provider>/`（portal users.json / basic htpasswd /
+  authelia 全套配置+sqlite / oauth2-proxy conf）——**不同 site 不共享配置和用户**
+- **`st.sites` / CLI `site list|show|add|remove`**：sites.json（0600）+ 隐式 default
+  （兼容现状路径，零迁移）；校验收紧（`[a-z0-9-]`、禁 `auth`/`default` 名）
+- **expose 统一 site 解析**：dispatcher 一次解析 site（显式 `--site` > 隐式 provider
+  site > default），proxy 与 tunnel 分支共享同一实例；site 配置（provider/basePath/
+  policy/providerParams/user）自动接入 expose
+- **用户管理 site 作用域**：`auth user/totp * --site <s>`（缺省 default）——同名用户
+  在不同 site 密码/删除互不影响；daemon RPC `auth.user.*/auth.totp.*` 同
+- **proxy-manager**：懒接线按 `binding.site` 建实例；`getSites` 活取数（运行时新增
+  site 即时可解析虚拟主机 label）
+- 测试：test/sites.test.mjs（同名用户双 site 独立 + 路径隔离 + 端到端双向登录拒绝）
+
+### expose --mode proxy:本地虚拟主机 + enrollment(D4)+ per-host 认证(sites-design.md P2)
+- **`expose <port> --mode proxy|both`**：不建隧道、在本地虚拟主机上暴露（`--mode both`
+  同时建公网隧道，同一 site 同一批用户）。`--mode proxy` 返回 `localUrl`（默认端口
+  4180，`--proxy-port` 可配，0=随机）
+- **hostsubfix 短横线语法（D3）**：`5173.st.localhost`（开放）、`5173-auth.st.localhost`
+  （默认 site 认证）、`5173-portal.st.localhost` / `5173-pi-web.st.localhost`（provider/
+  site 标签）；未知 label → 403
+- **D4 安全默认（破坏性变更）**：proxy **默认零转发**——任何虚拟主机必须显式
+  enrollment（`expose --mode proxy/both`）后才可达，未 enroll → 403（not enrolled）；
+  旧"发现缓存全放行"行为移除，无 `--open` 兼容开关
+- **per-host 认证后端**：forward-auth（portal/authelia/oauth2-proxy，`{basePath}/*`
+  登录页经虚拟主机可达、scheme 跟随本地 http）；basic **退回 nginx auth_basic**
+  （D2，Node 不实现 APR1）；首请求懒接线（validate → start → registerHost）
+- **CLI**：`expose --mode/--site/--proxy-port`；`proxy start|stop|status` 降级为传输层
+  管理（daemon 持有，enrollment 一律经 expose）；daemon RPC `proxy.*`
+- **库 API**：`st.proxy.start/stop/status/bindings/addBinding/removeBinding`；
+  `st.auth.expose(port, { mode, site })`；`st.exposes()` 增加 site/label/localUrl
+- **修复**：proxy 转发响应不再透传上游 `Connection` 头（keep-alive 复用 400）
+- 测试：test/expose-proxy.test.mjs（enrollment + portal 登录 + both 双入口）；
+  proxy.test.mjs 扩展（语法/未知 label/basic→gateway 管道）
+
 ### 默认认证 auto + natapp 内置 + 网页管理界面
 - `expose --auth auto`(默认):按平台选认证 provider——Windows=portal(Node 内置),
   Linux/macOS=authelia;`--auth none` 显式关闭认证(纯透传隧道)
 - 新增内置 tunnel 类型 `natapp`(国内内网穿透):`--type natapp --token <authtoken>`,
   免费版随机 natappfree.cc 域名,VIP 加 `--server` 绑定自定义域名;URL 解析支持
-  natappfree.cc/natapp.cc 等域名;tools 定义 CDN 直链下载(失败提示手动安装)
+  natappfree.cc/natapp.cc 等域名。**无公开直链**——客户端经官网安装脚本分发
+  (get.sh/get.ps1,需 authtoken),缺失时给安装命令;tools 解析走 PATH/缓存/toolPaths
 - 新增 `service-tunnels ui [--port <p>] [--no-browser]`:零依赖网页管理界面
   (node:http),监听 127.0.0.1 并自动弹浏览器;概览/隧道管理(启停删增)/用户管理
   (增删改密/2FA 启用禁用)/配置查看/快速暴露表单
 - daemon IPC 新增 `tunnel.get`(UI 切换开关用)
+- ssh 隧道 URL 合成延迟可配置(`sshUrlSynthDelayMs`,默认 11s;本机/局域网可注入
+  小值让 URL 秒级出现);测试改用真实本机 ssh(user@localhost)验证转发/合成/撤销
 
 ## 0.2.3 (unreleased)
 

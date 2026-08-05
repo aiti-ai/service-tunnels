@@ -17,10 +17,16 @@ import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, Aut
 
 export interface BasicAuthProviderOptions {
   user?: { name: string; password: string };
+  /** Per-site storage dir (P1); default = cacheDir/tmp/basic. */
+  storageDir?: string;
+  /** Site (auth realm) this instance belongs to. */
+  site?: string;
 }
 
 export class BasicAuthProvider implements AuthProvider, UserManager {
   readonly type = "basic";
+  /** Site (auth realm) this instance belongs to ("default" when absent). */
+  readonly site: string;
   readonly capabilities = {
     localGateway: true,
     edgeAuth: false,
@@ -41,7 +47,8 @@ export class BasicAuthProvider implements AuthProvider, UserManager {
       name: opts.user?.name ?? "admin",
       password: opts.user?.password ?? randomSecret(12),
     };
-    this.#htpasswd = join(ctx.cacheDir, "tmp", "basic", "htpasswd");
+    this.#htpasswd = opts.storageDir ? join(opts.storageDir, "htpasswd") : join(ctx.cacheDir, "tmp", "basic", "htpasswd");
+    this.site = opts.site ?? "default";
   }
 
   get htpasswdFile(): string {

@@ -54,6 +54,8 @@ export interface AuthProviderCapabilities {
 
 export interface AuthProvider {
   readonly type: string;
+  /** Site (auth realm) this instance belongs to ("default" when absent). */
+  readonly site?: string;
   readonly capabilities: AuthProviderCapabilities;
 
   /** Green start / config prepare (idempotent). */

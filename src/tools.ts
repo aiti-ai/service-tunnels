@@ -668,14 +668,13 @@ export const TOOLS: Record<string, ToolDef> = {
   },
   natapp: {
     // natapp: 国内内网穿透（natapp.cn）。免费版随机域名 (natappfree.cc),
-    // VIP 绑定自定义域名。CDN 直链无 GitHub 镜像;下载失败时手动安装
-    // (natapp.cn 下载页) 或 toolPaths.natapp。
+    // VIP 绑定自定义域名。**无公开直链**——客户端经官网安装脚本分发
+    // (https://natapp.cn/get.sh?authtoken=<token>, 需注册后取 token),所以
+    // 不配自动下载;解析走 PATH / toolPaths.natapp / 缓存,缺失时 tunnels.ts
+    // 给出官网安装命令。
     name: "natapp",
     platforms: ["linux", "darwin", "win32"],
-    download: {
-      official: "https://cdn.natapp.cn/dist/{dl_platform}_{arch}/natapp{exe}",
-      kind: "binary",
-    },
+    download: { official: "", kind: "binary" },
   },
   "oauth2-proxy": {
     name: "oauth2-proxy",

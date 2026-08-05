@@ -13,7 +13,7 @@ service-tunnels daemon start          # 常驻守护（持有隧道/网关进程
 service-tunnels discover              # 发现调用方进程树中的服务端口
 service-tunnels tunnel add web --type ngrok --target 4180
 service-tunnels tunnel add loc --type bore --target 4180     # 自建 bore server（本机/局域网），零账号
-service-tunnels tunnel add nat --type natapp --token <authtoken> --target 4180  # 国内内网穿透（natapp.cn）
+service-tunnels tunnel add nat --type natapp --token <authtoken> --target 4180  # 国内内网穿透(natapp.cn);客户端先经官网安装: curl -fsSL 'https://natapp.cn/get.sh?authtoken=<token>' | bash
 service-tunnels tunnel add ssh1 --type ssh --target 4180 --host localhost --user wind --remote-port 8080  # ssh -R 到本机
 service-tunnels tunnel start web      # 启动隧道 → URL 自动解析
 service-tunnels expose 5173           # 一键暴露（默认 ngrok，无认证）

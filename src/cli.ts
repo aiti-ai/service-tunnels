@@ -17,19 +17,23 @@ function usage(): void {
   internal list [--json]
   tools list | resolve <name> | download <name> | path <name>
   proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
+  proxy stop | status              # 传输层管理（enrollment 一律经 expose --mode proxy）
   tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
                  [--host <h>] [--user <u>] [--port <p>] [--remote-port <rp>] |
                  [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
   schemas [--type <tunnel-type|auth>]   # 数据驱动参数 schema(客户端据此渲染表单)
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--allow-tool-download <true|false>] [--force]
-  auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--provider ...]
+  site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
+       [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--allow-tool-download <true|false>] [--force]
+  auth providers list | auth user list|add|set-password|remove [--site <s>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
   config path | show
   config get <key> | set <key> <value>   # key: allow-tool-download | prefer-mirrors
                                         #      | base-path | base-path-by-provider <prov:path>
+                                        #      | base-domain <domain> | proxy-port <port>
                                         #      | tool-mirrors <tool:url>
 
 全局：--config-dir <dir> / --cache-dir <dir>（或 SERVICE_TUNNELS_CONFIG/CACHE）`);
@@ -72,6 +76,16 @@ interface CliArgs {
   provider?: string;
   /** --force: skip port ownership check. */
   force?: boolean;
+  /** --mode tunnel|proxy|both (expose): local vhost without/with tunnel. */
+  mode?: string;
+  /** --site <name> (expose): auth realm for the local vhost. */
+  site?: string;
+  /** --policy <one_factor|two_factor|deny> (site add). */
+  policy?: string;
+  /** --proxy-port <p>: proxy transport port (mode proxy/both). */
+  proxyPort?: number;
+  /** --base-domain <d>: user's wildcard-DNS domain for portless base URLs. */
+  baseDomain?: string;
   /** --allow-tool-download <true|false>: per-expose tool-download override. */
   allowToolDownload?: boolean;
   [k: string]: unknown;
@@ -121,6 +135,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--domain":
         args.domain = argv[++i];
+        break;
+      case "--policy":
+        args.policy = argv[++i];
         break;
       case "--host":
         args.host = argv[++i];
@@ -173,6 +190,18 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--nginx-port":
         args.nginxPort = Number(argv[++i]!);
+        break;
+      case "--mode":
+        args.mode = argv[++i]!;
+        break;
+      case "--site":
+        args.site = argv[++i]!;
+        break;
+      case "--proxy-port":
+        args.proxyPort = Number(argv[++i]!);
+        break;
+      case "--base-domain":
+        args.baseDomain = argv[++i]!;
         break;
       case "--allow-tool-download": {
         const raw = (argv[++i] ?? "true").toLowerCase();
@@ -317,6 +346,8 @@ const CONFIG_KEYS: Record<string, keyof ServiceTunnelsConfigFile> = {
   "prefer-mirrors": "preferMirrors",
   "base-path": "basePath",
   "base-path-by-provider": "basePathByProvider",
+  "base-domain": "baseDomain",
+  "proxy-port": "proxyPort",
   "tool-mirrors": "toolMirrors",
 };
 
@@ -335,6 +366,18 @@ function parseCliConfigValue(key: keyof ServiceTunnelsConfigFile, value: string)
       return boolVal();
     case "basePath":
       return value.startsWith("/") ? value.replace(/\/+$/, "") : undefined;
+    case "baseDomain": {
+      // bare domain (no scheme/path/port) — validated before it becomes a
+      // virtual-host suffix / base URL
+      const d = value.trim().replace(/^\./, "").toLowerCase();
+      if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(d) || d.includes("..")) return undefined;
+      return d;
+    }
+    case "proxyPort": {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0 || n > 65535) return undefined;
+      return n;
+    }
     case "basePathByProvider": {
       const idx = value.indexOf(":");
       if (idx <= 0 || !value.slice(idx + 1).startsWith("/")) return undefined;
@@ -494,8 +537,23 @@ async function main(): Promise<void> {
     case "proxy": {
       const op = cmd[1] ?? "";
       if (op === "start") {
+        if (!args.foreground) {
+          // daemon-owned transport (long-lived, D4: serves only enrolled ports)
+          let dstat = st.daemon.status();
+          if (!dstat.running) {
+            st.daemon.start();
+            const deadline = Date.now() + 5_000;
+            while (Date.now() < deadline && !st.daemon.status().running) {
+              await new Promise((r) => setTimeout(r, 100));
+            }
+          }
+          const res = await st.daemon.request("proxy.start", { port: args.port ? Number(args.port) : undefined });
+          jsonOut(res ?? { error: "proxy start failed" });
+          break;
+        }
+        // foreground: in-process transport (tests/dev)
         const port = Number(args.port ?? 4180);
-        const suffix = args.suffix ?? ".pi.localhost";
+        const suffix = args.suffix ?? ".st.localhost";
         const basePath = args.basePath ?? "";
         const password = args.password ?? "";
         const server = st.proxy.create({
@@ -511,11 +569,17 @@ async function main(): Promise<void> {
           const p = typeof addr === "object" && addr ? addr.port : port;
           process.stdout.write(`proxy listening on 127.0.0.1:${p} (suffix: ${suffix})\n`);
         });
-        if (!args.foreground) {
-          // non-foreground: spawn as child of the daemon in a later milestone;
-          // M2 keeps the server in this process.
-        }
         await new Promise(() => {});
+      } else if (op === "stop") {
+        const res = await st.daemon.request("proxy.stop");
+        jsonOut(res ?? { stopped: false });
+      } else if (op === "status" || op === "") {
+        const d = st.daemon.status();
+        if (!d.running) {
+          jsonOut({ running: false, port: 0, bindings: [] });
+          break;
+        }
+        jsonOut((await st.daemon.request("proxy.status")) ?? { running: false, port: 0, bindings: [] });
       } else {
         usage();
         process.exit(2);
@@ -634,6 +698,10 @@ async function main(): Promise<void> {
           ? "auto"
           : args.auth === "none" ? false : Boolean(args.auth),
         provider: typeof args.auth === "string" && args.auth !== "auto" ? args.auth : undefined,
+        mode: args.mode as "tunnel" | "proxy" | "both" | undefined,
+        site: args.site,
+        proxyPort: args.proxyPort != null ? Number(args.proxyPort) : undefined,
+        baseDomain: args.baseDomain,
         tunnelType: args.tunnel,
         tunnelName: args.name,
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
@@ -649,49 +717,101 @@ async function main(): Promise<void> {
 
     case "auth": {
       const op = cmd[1] ?? "list";
+      const site = args.site ?? "default";
       if ((op === "provider" || op === "providers") && cmd[2] === "list") {
         jsonOut(st.auth.providers());
       } else if (op === "user" && cmd[2] === "list") {
-        jsonOut(await st.auth.users(args.provider));
+        jsonOut(await st.auth.users(args.provider, site));
       } else if (op === "user" && cmd[2] === "add") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth user add <name> [--password <pw>] [--display-name <n>] [--provider basic|authelia|all]");
+          console.error("auth user add <name> [--password <pw>] [--display-name <n>] [--provider basic|authelia|all] [--site <s>]");
           process.exit(2);
         }
         const password = args.password ?? randomCliPassword();
         const providers = await st.auth.addUser(name, password, {
           provider: args.provider,
+          site,
           displayName: args.displayName,
         });
-        jsonOut({ added: name, providers, password: args.password ? undefined : password });
+        jsonOut({ added: name, site, providers, password: args.password ? undefined : password });
       } else if (op === "user" && cmd[2] === "set-password") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth user set-password <name> [--password <pw>] [--provider ...]");
+          console.error("auth user set-password <name> [--password <pw>] [--provider ...] [--site <s>]");
           process.exit(2);
         }
         const password = args.password ?? randomCliPassword();
-        const providers = await st.auth.setUserPassword(name, password, args.provider);
-        jsonOut({ updated: name, providers, password: args.password ? undefined : password });
+        const providers = await st.auth.setUserPassword(name, password, args.provider, site);
+        jsonOut({ updated: name, site, providers, password: args.password ? undefined : password });
       } else if (op === "user" && cmd[2] === "remove") {
         const name = cmd[3] ?? "";
-        const providers = await st.auth.removeUser(name, args.provider);
-        jsonOut({ removed: name, providers });
+        const providers = await st.auth.removeUser(name, args.provider, site);
+        jsonOut({ removed: name, site, providers });
       } else if (op === "totp" && cmd[2] === "enroll") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth totp enroll <name> [--provider portal]");
+          console.error("auth totp enroll <name> [--provider portal] [--site <s>]");
           process.exit(2);
         }
-        jsonOut(await st.auth.totpEnroll(name, args.provider));
+        jsonOut({ site, ...(await st.auth.totpEnroll(name, args.provider, site)) });
       } else if (op === "totp" && cmd[2] === "disable") {
-        await st.auth.totpDisable(cmd[3] ?? "", args.provider);
-        jsonOut({ disabled: cmd[3] });
+        await st.auth.totpDisable(cmd[3] ?? "", args.provider, site);
+        jsonOut({ disabled: cmd[3], site });
       } else if (op === "totp" && cmd[2] === "status") {
-        jsonOut(await st.auth.totpStatus(cmd[3] ?? "", args.provider));
+        jsonOut({ site, ...(await st.auth.totpStatus(cmd[3] ?? "", args.provider, site)) });
       } else {
-        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--provider ...]");
+        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--site <s>] [--provider ...]");
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "site": {
+      const op = cmd[1] ?? "list";
+      const name = cmd[2];
+      if (op === "list") {
+        jsonOut(st.sites.list());
+      } else if (op === "show") {
+        if (!name) {
+          console.error("site show <name>");
+          process.exit(2);
+        }
+        jsonOut(st.sites.get(name) ?? { error: `site ${name} not found` });
+      } else if (op === "add") {
+        if (!name) {
+          console.error("site add <name> [--provider portal|authelia|basic|oauth2-proxy] [--auth true|false] [--base-path <p>] [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...]");
+          process.exit(2);
+        }
+        let providerParams: Record<string, unknown> | undefined;
+        try {
+          const schemas = await st.schemas.authProviders();
+          providerParams = Object.keys(args.providerSets ?? {}).length
+            ? await applyParamSets(schemas[args.provider ?? "portal"] ?? [], args.providerSets ?? {}, `auth provider "${args.provider ?? "portal"}"`)
+            : undefined;
+        } catch (err) {
+          console.error(String(err instanceof Error ? err.message : err));
+          process.exit(2);
+        }
+        st.sites.add(name, {
+          provider: args.provider,
+          auth: args.auth === undefined ? undefined : !(args.auth === false || args.auth === "false"),
+          basePath: args.basePath,
+          policy: (args.policy as "one_factor" | "two_factor" | "deny") ?? undefined,
+          domain: args.domain,
+          suffix: args.suffix,
+          providerParams,
+        });
+        jsonOut({ added: name });
+      } else if (op === "remove") {
+        if (!name) {
+          console.error("site remove <name>");
+          process.exit(2);
+        }
+        st.sites.remove(name);
+        jsonOut({ removed: name });
+      } else {
+        console.error("site list | show <name> | add <name> | remove <name>");
         process.exit(2);
       }
       break;

@@ -31,9 +31,10 @@ import {
   type DaemonStatus,
 } from "./daemon.ts";
 import { readState } from "./state.ts";
+import { platform } from "os";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths, type ToolRegistryOptions } from "./tools.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
-import { createProxyServer, parseServiceHost, validBasicAuth, type ProxyOptions } from "./proxy.ts";
+import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAULT_SUFFIXES, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
@@ -41,6 +42,8 @@ import { GatewayController } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins, authProviderSchemas } from "./auth-registry.ts";
+import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
+import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
 import type { AuthUser } from "./auth-provider.ts";
 
@@ -54,6 +57,8 @@ export { authProviderSchemas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
+export { ProxyManager } from "./proxy-manager.ts";
+export type { ProxyBinding, ProxyManagerStatus, ProxyManagerOptions } from "./proxy-manager.ts";
 export { RedisController } from "./redis.ts";
 export { startUi } from "./ui.ts";
 
@@ -66,7 +71,7 @@ export {
   stripBasePath,
 } from "./discovery.ts";
 export { findOnPath } from "./tools.ts";
-export { createProxyServer, parseServiceHost, validBasicAuth, authHeader } from "./proxy.ts";
+export { createProxyServer, parseServiceHost, validBasicAuth, authHeader, proxyTarget, DEFAULT_SUFFIXES } from "./proxy.ts";
 export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 
 export { InternalRegistry } from "./internal.ts";
@@ -127,9 +132,22 @@ export interface ServiceTunnels {
     setAllowDownload(allowed: boolean): void;
   };
   proxy: {
-    /** Create a wildcard-host reverse proxy (allow-list = discovery cache). */
+    /** Create a wildcard-host reverse proxy (allow-list = discovery cache).
+     *  Low-level transport; the shared D4-wired transport is st.proxy.start(). */
     create(opts?: ProxyOptions): import("http").Server;
     parseHost(host: string | undefined): import("./proxy.ts").ServiceHostMatch | null;
+    /** Shared proxy transport + enrollment registry (D4, mode proxy/both).
+     *  Idempotent start on the default port 4180 (busy → random); 0 = random. */
+    start(opts?: { port?: number; refresh?: boolean; rootPid?: number }): Promise<number>;
+    stop(): Promise<void>;
+    status(): import("./proxy-manager.ts").ProxyManagerStatus;
+    bindings(): import("./proxy-manager.ts").ProxyBinding[];
+    addBinding(b: import("./proxy-manager.ts").ProxyBinding): void;
+    removeBinding(port: number, label: string): void;
+    /** Restore persisted bindings (daemon restart). */
+    restore(bindings: import("./proxy-manager.ts").ProxyBinding[]): void;
+    /** Persisted snapshot for state.json. */
+    persisted(): import("./proxy-manager.ts").ProxyBinding[];
   };
   tunnels: {
     /** Declarative configs from configDir/tunnels.json. */
@@ -168,38 +186,63 @@ export interface ServiceTunnels {
     /**
      * Provider-local users (no secrets). `provider` = "all" (default) →
      * [{provider, users}] for every provider supporting user management.
+     * `site` scopes to an auth realm (default "default").
      */
-    users(provider?: string): Promise<{ provider: string; users: AuthUser[] }[]>;
+    users(provider?: string, site?: string): Promise<{ provider: string; users: AuthUser[] }[]>;
     /**
      * Add/update a user across `provider` (default "all" → every supporting
      * provider; also accepts a single type or an array). Returns the
-     * providers the user was written to.
+     * providers the user was written to. `site` scopes to an auth realm.
      */
     addUser(
       name: string,
       password: string,
-      opts?: { provider?: string | string[]; displayName?: string },
+      opts?: { provider?: string | string[]; site?: string; displayName?: string },
     ): Promise<string[]>;
     /** Change a user's password across `provider` (default "all"). */
     setUserPassword(
       name: string,
       password: string,
       provider?: string | string[],
+      site?: string,
     ): Promise<string[]>;
     /** Remove a user across `provider` (default "all"). */
-    removeUser(name: string, provider?: string | string[]): Promise<string[]>;
+    removeUser(name: string, provider?: string | string[], site?: string): Promise<string[]>;
     /** Provider types with local user databases (e.g. ["authelia","basic"]). */
     userManagers(): string[];
     /** Provider types that expose TOTP 2FA management (portal). */
     totpProviders(): string[];
+    /**
+     * Providers in UI-recommendation order: authelia > portal > basic >
+     * oauth2-proxy, plugins appended. Clients render this list as-is — no
+     * provider-specific knowledge in the caller.
+     */
+    providerOrder(): string[];
+    /**
+     * The provider a new expose should default to: the highest-priority
+     * provider that is actually usable right now (authelia needs a binary +
+     * non-Windows; portal/basic/oauth2-proxy always are). Clients use this
+     * instead of hardcoding provider names.
+     */
+    defaultProvider(): string;
     /** Enroll TOTP 2FA for a user (portal) — returns secret + otpauth URL. */
-    totpEnroll(name: string, provider?: string): Promise<{ secret: string; otpauthUrl: string }>;
+    totpEnroll(name: string, provider?: string, site?: string): Promise<{ secret: string; otpauthUrl: string }>;
     /** Disable TOTP 2FA for a user (portal). */
-    totpDisable(name: string, provider?: string): Promise<void>;
+    totpDisable(name: string, provider?: string, site?: string): Promise<void>;
     /** TOTP enrollment status for a user (portal). */
-    totpStatus(name: string, provider?: string): Promise<{ enrolled: boolean; pending: boolean }>;
+    totpStatus(name: string, provider?: string, site?: string): Promise<{ enrolled: boolean; pending: boolean }>;
     /** Activate a pending TOTP enrollment with the user's first code. */
-    totpActivate(name: string, code: string, provider?: string): Promise<{ activated: boolean }>;
+    totpActivate(name: string, code: string, provider?: string, site?: string): Promise<{ activated: boolean }>;
+  };
+  /** Auth realms (sites): independent provider instances + user dbs. */
+  sites: {
+    /** All sites (config + running status), including the implicit default. */
+    list(): import("./sites.ts").SiteInfo[];
+    get(name: string): import("./sites.ts").SiteInfo | undefined;
+    /** Add/replace a site (configDir/sites.json, 0600). */
+    add(name: string, cfg: Omit<import("./sites.ts").SiteConfig, "name">): void;
+    /** Remove a site (default and reserved names rejected). */
+    remove(name: string): void;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -209,7 +252,7 @@ export interface ServiceTunnels {
   shutdown(): Promise<void>;
   /** Exposes made in this process lifecycle with their metadata (port, tunnel
    *  type, auth provider, url, running, pid). For display; not persisted. */
-  exposes(): Array<{ name: string; port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; url: string | null; running: boolean; pid: number | null; accessLog: string | null; errorLog: string | null }>;
+  exposes(): Array<{ name: string; port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; url: string | null; running: boolean; pid: number | null; accessLog: string | null; errorLog: string | null; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string }>;
 }
 
 /**
@@ -285,10 +328,50 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     log: () => {},
   });
   const redis = new RedisController({ cacheDir: dirs.cacheDir, port: 0, log: () => {}, registerPid });
+  // Auth provider registry — hoisted so the proxy transport's lazy provider
+  // wiring (mode proxy/both) shares the SAME instances as expose() (tunnel).
+  const authRegistry = new AuthRegistry(
+    {
+      configDir: dirs.configDir,
+      cacheDir: dirs.cacheDir,
+      resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
+      registerInternal: (role, port) =>
+        internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+      unregisterInternal: (role) => internal.unregister(role),
+      registerPid,
+      pickPort,
+      log: () => {},
+    },
+    [...(opts.authPlugins as AuthProviderFactory[]) ?? []],
+  );
+  void loadProviderPlugins(dirs.configDir).then((plugins) => {
+    for (const f of plugins) authRegistry.register(f);
+  });
+  // Shared proxy transport + enrollment registry (D4) — the ONLY way ports are
+  // served through the wildcard proxy (mode proxy/both): a binding must exist.
+  // isPortAllowed is deliberately permissive: enrollment (resolveSite) is the
+  // gate, and expose already verified port ownership at enrollment time; the
+  // discovery allow-list still guards the low-level st.proxy.create().
+  const proxy = new ProxyManager({
+    suffixes: DEFAULT_SUFFIXES,
+    baseDomain: readConfigFile(dirs.configDir).baseDomain,
+    registry: authRegistry,
+    gateway,
+    getSites: () => readSites(dirs.configDir),
+    // persist enrollments (mode proxy/both) to state.json — the daemon restores
+    // them on restart (P4). The arrow captures `proxy` (assigned after this
+    // constructor returns; only ever invoked on later addBinding/removeBinding).
+    onChange: () => _updateState(cachePaths(dirs.cacheDir).stateFile, (s) => {
+      s.bindings = proxy.persisted();
+    }),
+    isPortAllowed: () => true,
+    registerInternal: (role, p) => internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+    log: () => {},
+  });
   // In-memory record of exposes made in THIS process lifecycle (port + tunnel
   // type + auth provider + url), so callers (pi-web) can display active exposes
   // with their metadata. Not persisted across restarts.
-  const exposes = new Map<string, { port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string }>();
+  const exposes = new Map<string, { port: number; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string }>();
 
   /** Unregister the gateway host an expose registered (so stopping one expose
    *  doesn't leave a stale nginx server block — localhost:PORT hosts would
@@ -369,7 +452,17 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
                 (p) => p.port === port,
               )),
         }),
-      parseHost: (host: string | undefined) => parseServiceHost(host, [".pi.localhost"]),
+      parseHost: (host: string | undefined) => parseServiceHost(host, DEFAULT_SUFFIXES),
+      // P2: shared transport + enrollment registry (D4) — mode proxy/both
+      start: (o: { port?: number; refresh?: boolean; rootPid?: number } = {}) =>
+        proxy.start(o.port),
+      stop: () => proxy.stop(),
+      status: () => proxy.status(),
+      bindings: () => proxy.bindings(),
+      addBinding: (b: ProxyBinding) => proxy.addBinding(b),
+      removeBinding: (port: number, label: string) => proxy.removeBinding(port, label),
+      restore: (bindings: ProxyBinding[]) => proxy.restore(bindings),
+      persisted: () => proxy.persisted(),
     },
     tunnels: (() => {
       const persistState = () => {
@@ -419,23 +512,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       };
     })(),
     auth: (() => {
-      const registry = new AuthRegistry(
-        {
-          configDir: dirs.configDir,
-          cacheDir: dirs.cacheDir,
-          resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
-          registerInternal: (role, port) =>
-            internal.register(role, { port, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
-          unregisterInternal: (role) => internal.unregister(role),
-          registerPid,
-          pickPort,
-          log: () => {},
-        },
-        [...(opts.authPlugins as AuthProviderFactory[]) ?? []],
-      );
-      void loadProviderPlugins(dirs.configDir).then((plugins) => {
-        for (const f of plugins) registry.register(f);
-      });
+      // registry is hoisted (shared with the proxy transport's lazy wiring)
+      const registry = authRegistry;
       return {
         providers: () => ["none", ...registry.list()],
         registerProvider: (f: AuthProviderFactory) => registry.register(f),
@@ -452,61 +530,126 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
             tunnels: tm,
             auth: registry,
             gateway,
+            proxy,
             redis,
             registerPid,
             onTunnelStop: unregisterExposeHost,
             log: () => {},
           });
-          // record this expose's metadata for the lifecycle display
-          exposes.set(r.tunnel, { port, tunnelType: o.tunnelType, provider: r.provider, loginUrl: r.loginUrl, protocol: r.protocol, host: r.url ? new URL(r.url).host : undefined });
+          // record this expose's metadata for the lifecycle display (proxy-mode
+          // records have no tunnel → synthetic key `proxy:port:label`)
+          exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
+            port,
+            tunnelName: r.tunnel || undefined,
+            tunnelType: o.tunnelType,
+            provider: r.provider,
+            loginUrl: r.loginUrl,
+            protocol: r.protocol,
+            host: r.url ? new URL(r.url).host : undefined,
+            site: r.site,
+            label: r.label,
+            localUrl: r.localUrl,
+            baseUrl: r.baseUrl,
+            domainUrl: r.domainUrl,
+          });
           return r;
         },
         userManagers: () => registry.userManagers(),
         totpProviders: () => registry.totpProviders(),
-        totpEnroll: async (name: string, provider?: string) => {
-          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+        totpEnroll: async (name: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
             totpEnroll(n: string): Promise<{ secret: string; otpauthUrl: string }>;
           };
           return mgr.totpEnroll(name);
         },
-        totpDisable: async (name: string, provider?: string) => {
-          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+        totpDisable: async (name: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
             totpDisable(n: string): Promise<void>;
           };
           await mgr.totpDisable(name);
         },
-        totpStatus: async (name: string, provider?: string) => {
-          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+        totpStatus: async (name: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
             totpStatus(n: string): Promise<{ enrolled: boolean; pending: boolean }>;
           };
           return mgr.totpStatus(name);
         },
-        totpActivate: async (name: string, code: string, provider?: string) => {
-          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+        totpActivate: async (name: string, code: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
             totpActivate(n: string, code: string): Promise<{ activated: boolean }>;
           };
           return mgr.totpActivate(name, code);
         },
-        users: async (provider = "all") => {
+        providerOrder: () => {
+          const KNOWN = ["authelia", "portal", "basic", "oauth2-proxy"];
+          const list = registry.list();
+          return [...KNOWN.filter((p) => list.includes(p)), ...list.filter((p) => !KNOWN.includes(p))];
+        },
+        defaultProvider: () => {
+          const order = ["authelia", "portal", "basic", "oauth2-proxy"].filter((p) => registry.list().includes(p));
+          for (const p of order) {
+            // authelia ships no Windows binary and needs the tool present
+            if (p === "authelia" && (platform() === "win32" || !resolveToolPath("authelia", toolOpts))) continue;
+            return p;
+          }
+          return "portal";
+        },
+        users: async (provider = "all", site = "default") => {
           const targets = resolveUserTargets(registry, provider);
           const out: { provider: string; users: AuthUser[] }[] = [];
-          for (const t of targets) out.push({ provider: t, users: await registry.userManager(t).listUsers() });
+          for (const t of targets) out.push({ provider: t, users: await registry.userManager(t, site).listUsers() });
           return out;
         },
-        addUser: async (name: string, password: string, opts: { provider?: string | string[]; displayName?: string } = {}) => {
+        addUser: async (name: string, password: string, opts: { provider?: string | string[]; site?: string; displayName?: string } = {}) => {
           const targets = resolveUserTargets(registry, opts.provider);
-          for (const t of targets) await registry.userManager(t).addUser(name, password, opts.displayName);
+          for (const t of targets) await registry.userManager(t, opts.site).addUser(name, password, opts.displayName);
           return targets;
         },
-        setUserPassword: async (name: string, password: string, provider?: string | string[]) => {
+        setUserPassword: async (name: string, password: string, provider?: string | string[], site?: string) => {
           const targets = resolveUserTargets(registry, provider);
-          for (const t of targets) await registry.userManager(t).setUserPassword(name, password);
+          for (const t of targets) await registry.userManager(t, site).setUserPassword(name, password);
           return targets;
         },
-        removeUser: async (name: string, provider?: string | string[]) => {
+        removeUser: async (name: string, provider?: string | string[], site?: string) => {
           const targets = resolveUserTargets(registry, provider);
-          for (const t of targets) await registry.userManager(t).removeUser(name);
+          for (const t of targets) await registry.userManager(t, site).removeUser(name);
           return targets;
+        },
+      };
+    })(),
+    /** Auth realms (sites) — independent provider instances + user dbs. */
+    sites: (() => {
+      const all = (): Record<string, SiteConfig> => readSites(dirs.configDir);
+      return {
+        list: (): SiteInfo[] => {
+          const sites = all();
+          const names = new Set(["default", ...Object.keys(sites)]);
+          const out: SiteInfo[] = [];
+          for (const name of names) {
+            const cfg = sites[name] ?? defaultSiteConfig();
+            const status = authRegistry.siteStatus(name);
+            out.push({ ...cfg, running: status.running, port: status.port, hosts: [] });
+          }
+          return out;
+        },
+        get: (name: string): SiteInfo | undefined => {
+          const cfg = name === "default" ? defaultSiteConfig() : all()[name];
+          if (!cfg) return undefined;
+          const status = authRegistry.siteStatus(name);
+          return { ...cfg, running: status.running, port: status.port, hosts: [] };
+        },
+        add: (name: string, cfg: Omit<SiteConfig, "name">): void => {
+          validateSiteName(name);
+          const sites = all();
+          sites[name] = { ...cfg, name };
+          writeSites(dirs.configDir, sites);
+        },
+        remove: (name: string): void => {
+          validateSiteName(name);
+          const sites = all();
+          if (!sites[name]) throw new Error(`site ${name} not registered`);
+          delete sites[name];
+          writeSites(dirs.configDir, sites);
         },
       };
     })(),
@@ -521,14 +664,16 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
     shutdown: async () => {
       await tm.stopAll();
+      try { await authRegistry.stopAll(); } catch {}
       try { await gateway.stop(); } catch {}
       try { await redis.stop(); } catch {}
+      try { await proxy.stop(); } catch {}
     },
     /** Exposes made in this process lifecycle (port + tunnel type + auth
      *  provider + url + running), for display. Not persisted. */
     exposes: () =>
       [...exposes.entries()].map(([name, m]) => {
-        const tun = tm.get(name);
+        const tun = m.tunnelName ? tm.get(m.tunnelName) : null;
         const host = tun?.url ? new URL(tun.url).host : null;
         const logs = host ? gateway.logPaths(host) : null;
         return {
@@ -543,6 +688,11 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           pid: tun?.pid ?? null,
           accessLog: logs?.access ?? null,
           errorLog: logs?.error ?? null,
+          site: m.site,
+          label: m.label,
+          localUrl: m.localUrl,
+          baseUrl: m.baseUrl,
+          domainUrl: m.domainUrl,
         };
       }),
   };

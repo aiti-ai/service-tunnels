@@ -24,6 +24,16 @@ export interface ServiceTunnelsConfigFile {
   basePath?: string;
   /** Per-provider base path override, e.g. { portal: "/login" }. */
   basePathByProvider?: Record<string, string>;
+  /**
+   * User's wildcard-DNS base domain (e.g. "pi.example.com"): expose --mode
+   * proxy also returns a PORTLESS base URL (`<port>[-<label>].<baseDomain>`)
+   * in addition to the default portful local URL. The user points
+   * `*.<baseDomain>` at this machine and reverse-proxies to the proxy port
+   * (nginx/DNS) — hiding the local port entirely.
+   */
+  baseDomain?: string;
+  /** Default proxy transport port (mode proxy/both); CLI --proxy-port wins. */
+  proxyPort?: number;
   /** China-mirror download templates per tool (see src/tools.ts candidateUrls). */
   toolMirrors?: Record<string, string[]>;
   /** Try mirrors before official sources (CN networks). CLI-level default; library opts win. */

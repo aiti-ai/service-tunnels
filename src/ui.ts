@@ -80,6 +80,7 @@ const TEMPLATES = {
         <a href="/" class="${content.includes("dashboard") ? "active" : ""}">概览</a>
         <a href="/tunnels" class="${content.includes("tunnels") ? "active" : ""}">隧道管理</a>
         <a href="/users" class="${content.includes("users") ? "active" : ""}">用户管理</a>
+        <a href="/sites" class="${content.includes("sites") ? "active" : ""}">站点管理</a>
         <a href="/config" class="${content.includes("config") ? "active" : ""}">配置</a>
         <a href="/expose" class="${content.includes("expose") ? "active" : ""}">快速暴露</a>
       </div>
@@ -136,6 +137,38 @@ const TEMPLATES = {
       if (confirm('确定禁用 2FA?')) {
         httpPost('/users/' + encodeURIComponent(name) + '/totp-disable').then(() => location.reload());
       }
+    }
+    function addSite() {
+      const name = prompt('站点名（小写字母/数字/短横线，如 pi-web）:');
+      if (!name) return;
+      const provider = prompt('认证 provider（portal/authelia/basic/oauth2-proxy，回车=auto）:') || '';
+      const domain = prompt('站点域名（可选，如 web.pi.example.com）:') || '';
+      const body = { name, provider, domain };
+      httpPost('/api/sites/add', body).then(r => r.json()).then(d => {
+        if (d.error) { alert('❌ ' + d.error); } else { location.reload(); }
+      });
+    }
+    function removeSite(name) {
+      if (confirm('确定删除站点 ' + name + '?')) {
+        httpPost('/sites/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
+      }
+    }
+    function siteAddUser(site) {
+      const name = prompt('用户名:');
+      if (!name) return;
+      const password = prompt('密码:');
+      if (!password) return;
+      httpPost('/sites/' + encodeURIComponent(site) + '/users/add', { name, password }).then(() => location.reload());
+    }
+    function siteRemoveUser(site, name) {
+      if (confirm('确定删除 ' + site + ' 的用户 ' + name + '?')) {
+        httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
+      }
+    }
+    function siteSetPassword(site, name) {
+      const password = prompt('新密码:');
+      if (!password) return;
+      httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
     }
   </script>
 </body>
@@ -235,13 +268,99 @@ const TEMPLATES = {
     </div>
   `,
 
-  expose: () => `
+  sites: (sites: any[], exposes: any[]) => `
+    <div class="card">
+      <h2>站点列表（认证域）</h2>
+      <p style="color:#666;font-size:13px;margin-bottom:12px;">每个站点 = 独立的 provider 实例 + 用户库，互不共享。虚拟主机：<code>&lt;port&gt;-&lt;label&gt;.st.localhost</code></p>
+      <table class="table">
+        <thead>
+          <tr><th>站点</th><th>provider</th><th>认证</th><th>域名</th><th>状态</th><th>地址</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          ${sites.map((s: any) => {
+            const urls = [
+              s.localUrl && `<code>${s.localUrl}</code>`,
+              s.baseUrl && `<code>${s.baseUrl}</code>`,
+              s.domainUrl && `<code>${s.domainUrl}</code>`,
+            ].filter(Boolean);
+            return `<tr>
+              <td><strong>${s.name}</strong>${s.name === "default" ? ' <span class="badge">默认</span>' : ""}</td>
+              <td>${s.provider || "auto"}</td>
+              <td>${s.auth === false ? "开放" : s.policy ? `认证(${s.policy})` : "认证"}</td>
+              <td>${s.domain || "-"}</td>
+              <td><span class="status ${s.running ? "running" : "stopped"}">${s.running ? "运行中" : "未启动"}</span></td>
+              <td>${urls.length ? urls.join("<br>") : "-"}</td>
+              <td>
+                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/users">用户</a>
+                ${s.name !== "default" ? `<button class="btn btn-sm btn-danger" onclick="removeSite('${s.name}')">删除</button>` : ""}
+              </td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+      <div style="margin-top:15px;">
+        <button class="btn btn-primary" onclick="addSite()">添加站点</button>
+        <span style="color:#999;font-size:12px;margin-left:8px;">如：<code>site add pi-web --provider portal --domain web.pi.example.com</code></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>本地暴露（proxy 模式）</h2>
+      <table class="table">
+        <thead><tr><th>端口</th><th>站点</th><th>provider</th><th>本地地址</th><th>base 域名</th></tr></thead>
+        <tbody>
+          ${exposes.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:#999;">暂无 proxy 暴露</td></tr>' : ""}
+          ${exposes.map((e: any) => `<tr>
+            <td>${e.port}</td>
+            <td>${e.site || "-"}</td>
+            <td>${e.provider || "开放"}</td>
+            <td><code>${e.localUrl || "-"}</code></td>
+            <td><code>${e.baseUrl || e.domainUrl || "-"}</code></td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `,
+
+  siteUsers: (site: any, users: AuthUser[]) => `
+    <div class="card">
+      <h2>站点 ${site.name} · 用户管理</h2>
+      <p style="color:#666;font-size:13px;margin-bottom:12px;">该站点（provider: ${site.provider || "auto"}）的独立用户库——与其它站点互不影响。</p>
+      <table class="table">
+        <thead><tr><th>用户名</th><th>显示名</th><th>操作</th></tr></thead>
+        <tbody>
+          ${users.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#999;">暂无用户</td></tr>' : ""}
+          ${users.map((u: AuthUser) => `<tr>
+            <td>${u.name}</td>
+            <td>${u.displayName || u.name}</td>
+            <td>
+              <button class="btn btn-sm btn-primary" onclick="siteSetPassword('${site.name}','${u.name}')">改密</button>
+              <button class="btn btn-sm btn-danger" onclick="siteRemoveUser('${site.name}','${u.name}')">删除</button>
+            </td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+      <div style="margin-top:15px;">
+        <button class="btn btn-primary" onclick="siteAddUser('${site.name}')">添加用户</button>
+        <a href="/sites" class="btn" style="background:#eee;color:#333;">返回站点列表</a>
+      </div>
+    </div>
+  `,
+
+  expose: (sites: string[]) => `
     <div class="card">
       <h2>快速暴露端口</h2>
       <form id="exposeForm" style="max-width: 400px;">
         <div class="form-group">
           <label>本地端口</label>
           <input type="number" name="port" class="form-control" required placeholder="例如: 3000">
+        </div>
+        <div class="form-group">
+          <label>模式</label>
+          <select name="mode" class="form-control">
+            <option value="tunnel">tunnel（公网隧道）</option>
+            <option value="proxy">proxy（本地虚拟主机，无隧道）</option>
+            <option value="both">both（两者）</option>
+          </select>
         </div>
         <div class="form-group">
           <label>认证方式</label>
@@ -254,7 +373,14 @@ const TEMPLATES = {
           </select>
         </div>
         <div class="form-group">
-          <label>隧道类型</label>
+          <label>站点（认证域）</label>
+          <select name="site" class="form-control">
+            <option value="">default（默认）</option>
+            ${sites.map((s: string) => `<option value="${s}">${s}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>隧道类型（tunnel/both 模式）</label>
           <select name="tunnel" class="form-control">
             <option value="ngrok">ngrok</option>
             <option value="cloudflared">cloudflared（推荐）</option>
@@ -275,17 +401,20 @@ const TEMPLATES = {
         const port = fd.get('port');
         const auth = fd.get('auth');
         const tunnel = fd.get('tunnel');
+        const mode = fd.get('mode');
+        const site = fd.get('site');
         const result = document.getElementById('result');
         result.innerHTML = '<p>正在暴露...</p>';
         try {
           const r = await fetch('/api/expose', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ port: Number(port), auth: auth === 'none' ? false : auth, tunnel })
+            body: JSON.stringify({ port: Number(port), auth: auth === 'none' ? false : auth, tunnel, mode, site: site || undefined })
           });
           const data = await r.json();
-          if (data.url) {
-            result.innerHTML = '<div class="alert alert-success">✅ 暴露成功！<br><strong>URL:</strong> <a href="' + data.url + '" target="_blank">' + data.url + '</a></div>';
+          if (data.url || data.localUrl) {
+            const urls = [data.url, data.localUrl, data.baseUrl, data.domainUrl].filter(Boolean);
+            result.innerHTML = '<div class="alert alert-success">✅ 暴露成功！<br>' + urls.map(u => '<strong>URL:</strong> <a href="' + u + '" target="_blank">' + u + '</a><br>').join('') + '</div>';
           } else {
             result.innerHTML = '<div class="alert alert-error">❌ 暴露失败: ' + (data.error || '未知错误') + '</div>';
           }
@@ -441,6 +570,111 @@ function createHandler(ctx: UiContext): RequestListener {
         return;
       }
 
+      // Sites (认证域)
+      if (path === "/sites") {
+        const sites = ctx.st.sites.list();
+        // merge running exposes' URLs onto each site (proxy mode)
+        const exposes = ctx.st.exposes().filter((e) => e.localUrl);
+        const withUrls = sites.map((s) => {
+          const ex = exposes.filter((e) => (e.site || "default") === s.name);
+          return {
+            ...s,
+            localUrl: ex.map((e) => e.localUrl).find(Boolean),
+            baseUrl: ex.map((e) => e.baseUrl).find(Boolean),
+            domainUrl: ex.map((e) => e.domainUrl).find(Boolean),
+          };
+        });
+        const html = TEMPLATES.layout("站点管理", TEMPLATES.sites(withUrls, exposes));
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
+
+      if (path === "/api/sites/add" && req.method === "POST") {
+        const body = await new Promise<any>((resolve) => {
+          let b = "";
+          req.on("data", (chunk) => b += chunk);
+          req.on("end", () => resolve(JSON.parse(b)));
+        });
+        try {
+          ctx.st.sites.add(body.name, {
+            provider: body.provider || undefined,
+            domain: body.domain || undefined,
+            basePath: body.basePath || undefined,
+            policy: body.policy || undefined,
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ added: body.name }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
+
+      if (path.startsWith("/sites/") && req.method === "POST" && path.endsWith("/remove")) {
+        const name = path.split("/")[2] ?? "";
+        try {
+          ctx.st.sites.remove(name);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ removed: name }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
+
+      // per-site users: page + add + per-user actions
+      const siteUsersPage = /^\/sites\/([^/]+)\/users$/.exec(path);
+      if (siteUsersPage && req.method === "GET") {
+        const name = decodeURIComponent(siteUsersPage[1]!);
+        const site = ctx.st.sites.get(name);
+        if (!site) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("site not found");
+          return;
+        }
+        const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users(undefined, name);
+        const users: AuthUser[] = groups.flatMap((g) => g.users);
+        const html = TEMPLATES.layout("站点用户", TEMPLATES.siteUsers(site, users));
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
+      const siteUsersAdd = /^\/sites\/([^/]+)\/users\/add$/.exec(path);
+      if (siteUsersAdd && req.method === "POST") {
+        const site = decodeURIComponent(siteUsersAdd[1]!);
+        const body = await new Promise<any>((resolve) => {
+          let b = "";
+          req.on("data", (chunk) => b += chunk);
+          req.on("end", () => resolve(JSON.parse(b)));
+        });
+        await ctx.st.auth.addUser(body.name, body.password, { site });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ added: body.name }));
+        return;
+      }
+      const siteUserAction = /^\/sites\/([^/]+)\/users\/([^/]+)\/([^/]+)$/.exec(path);
+      if (siteUserAction && req.method === "POST") {
+        const site = decodeURIComponent(siteUserAction[1]!);
+        const user = decodeURIComponent(siteUserAction[2]!);
+        const action = siteUserAction[3]!;
+        if (action === "remove") {
+          await ctx.st.auth.removeUser(user, undefined, site);
+        } else if (action === "password") {
+          const body = await new Promise<any>((resolve) => {
+            let b = "";
+            req.on("data", (chunk) => b += chunk);
+            req.on("end", () => resolve(JSON.parse(b)));
+          });
+          await ctx.st.auth.setUserPassword(user, body.password, undefined, site);
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
       // Config
       if (path === "/config") {
         const html = TEMPLATES.layout("配置", TEMPLATES.config(ctx.st.dirs));
@@ -451,7 +685,8 @@ function createHandler(ctx: UiContext): RequestListener {
 
       // Expose
       if (path === "/expose") {
-        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose());
+        const sites = ctx.st.sites.list().filter((s) => s.name !== "default").map((s) => s.name);
+        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites));
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -467,6 +702,8 @@ function createHandler(ctx: UiContext): RequestListener {
         const result = await ctx.st.daemon.request("expose", {
           port: body.port,
           auth: body.auth,
+          mode: body.mode,
+          site: body.site,
           tunnelType: body.tunnel,
           allowToolDownload: true,
         }, 90_000);
