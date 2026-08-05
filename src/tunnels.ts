@@ -25,6 +25,7 @@ export type TunnelType =
   | "cloudflared"
   | "localtunnel"
   | "bore"
+  | "natapp"
   | "command";
 
 /** Which tunnel types can carry raw TCP (non-HTTP) traffic.
@@ -140,6 +141,10 @@ export interface TunnelManagerOptions {
   onEvent?: (evt: { type: "start" | "url" | "stop" | "error"; name: string; url?: string | null; error?: string }) => void;
   /** Called after a tunnel process spawns (pid registration for cleanup). */
   registerPid?: (role: string, pid: number) => void;
+  /** ssh -R URL 合成延迟(ms)。默认 11s=ConnectTimeout 10s+余量(不可达主机在
+   * 该窗口内退出则永不报 URL,避免假成功)。可达主机无需等满——测试/局域网
+   * 可注入小值让 URL 秒级出现。 */
+  sshUrlSynthDelayMs?: number;
 }
 
 /** True while a pid is a live (non-zombie) process. */
@@ -191,7 +196,7 @@ async function detectLocalScheme(port: number, timeoutMs = 1500): Promise<"http"
 export function extractTunnelUrl(output: string, type?: string): string | null {
   if (!output) return null;
   const known =
-    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app|\-free\.dev)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to)[^\s"'<>)\]]*)/i.exec(
+    /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app|\-free\.dev)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to|natappfree\.cc|natapp\.cc|natapp\.shop|natapp\.top)[^\s"'<>)\]]*)/i.exec(
       output,
     );
   if (known && known[1]) return known[1];
@@ -371,7 +376,7 @@ export class TunnelManager {
             s.url = await synthUrl();
             this.#opts.onEvent?.({ type: "url", name, url: s.url });
           }
-        }, 11_000);
+        }, this.#opts.sshUrlSynthDelayMs ?? 11_000);
       }
     }
 
@@ -503,6 +508,19 @@ export class TunnelManager {
         args.push(...(cfg.args ?? []));
         return { bin, args };
       }
+      case "natapp": {
+        // natapp 国内内网穿透: -authtoken 认证, -weburl 本地端口。
+        // 免费版输出随机 natappfree.cc 域名;VIP 可加 -server 绑定自定义域名。
+        const bin = await tool("natapp");
+        const token = cfg.token ?? process.env.SERVICE_TUNNELS_NATAPP_TOKEN;
+        if (!token) {
+          throw new Error(`tunnel '${cfg.name}': natapp requires token (authtoken, 注册 https://natapp.cn 获取)`);
+        }
+        const args = [`-authtoken=${token}`, `-weburl=${target}`];
+        if (cfg.server) args.push(`-server=${cfg.server}`);
+        args.push(...(cfg.args ?? []));
+        return { bin, args };
+      }
       case "bore": {
         // bore: minimal TCP tunnel (Rust, single static binary). `bore local`
         // connects to an operator-run `bore server` — the lightest option for
@@ -618,6 +636,22 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
   cloudflared: [
     { key: "domain", label: "Hostname", description: "命名隧道主机名;留空=随机 trycloudflare", placeholder: "app.example.com" },
   ],
+  natapp: [
+    {
+      key: "token",
+      type: "password",
+      label: "Authtoken",
+      description: "natapp 认证令牌(注册后获取)",
+      link: "https://natapp.cn/#panel",
+      linkTitle: "获取 token",
+    },
+    {
+      key: "domain",
+      label: "自定义域名",
+      description: "绑定固定域名(需 VIP);留空用随机域名",
+      placeholder: "xxx.natappfree.cc",
+    },
+  ],
   localtunnel: [
     { key: "domain", label: "Subdomain", description: "固定子域名;留空=随机" },
   ],
@@ -635,6 +669,11 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
     { key: "cmd", label: "命令", required: true, description: "任意 shell 命令;URL 从输出解析", placeholder: "ssh -R 80:127.0.0.1:<port> serveo.net" },
   ],
 };
+
+/** Tunnel types that support random/assigned domains (not fixed-only). */
+export function tunnelSupportsRandomDomain(type: TunnelType): boolean {
+  return ["natapp", "localtunnel", "serveo", "cloudflared"].includes(type);
+}
 
 /** Param schema for one tunnel type ([] when unknown). */
 export function tunnelParamSchema(type: TunnelType): ParamSpec[] {
@@ -661,6 +700,7 @@ export const TUNNEL_META: Record<TunnelType, TunnelMeta> = {
   cloudflared: { favorite: true },
   localtunnel: { favorite: true },
   bore: { favorite: true },
+  natapp: { favorite: true },
   command: {},
 };
 

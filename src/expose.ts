@@ -6,6 +6,15 @@ import { AuthRegistry } from "./auth-registry.ts";
 import { tunnelSupportsTcp } from "./tunnels.ts";
 import type { TunnelManager } from "./tunnels.ts";
 import { InternalRegistry } from "./internal.ts";
+import { platform } from "os";
+
+/** Default auth provider by platform. */
+function getDefaultAuthProvider(): string {
+  // Windows: portal (Node-based, no external binaries)
+  // Linux/macOS: authelia (full-featured with 2FA)
+  if (platform() === "win32") return "portal";
+  return "authelia";
+}
 
 /** "oidc.issuerUrl" → { oidc: { issuerUrl } } — schema-driven form params
  *  arrive flat; provider options are nested. */
@@ -49,7 +58,9 @@ function unflattenParams(params: Record<string, unknown>): Record<string, unknow
 
 export interface ExposeOptions {
   port: number;
-  auth?: boolean;
+  /** true = gateway auth (default provider), false = no auth, "auto" = pick
+   *  the best available provider (authelia > portal > basic). */
+  auth?: boolean | "auto";
   provider?: string;
   tunnelName?: string;
   tunnelType?: string;
@@ -157,10 +168,10 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
     log(`--force specified: skipping port ownership check for port ${port}`);
   }
   
-  const providerType = opts.provider ?? "authelia";
+  const providerType = opts.provider ?? (opts.auth === "auto" ? getDefaultAuthProvider() : "authelia");
   // "none" is a first-class provider = expose WITHOUT auth (like basic but
   // no auth): skip the whole gateway/auth flow and make a plain tunnel.
-  const useAuth = (opts.auth ?? false) && providerType !== "none";
+  const useAuth = (opts.auth === true || opts.auth === "auto") && providerType !== "none";
   // Forwarding protocol: explicit opts win; else detect the app port
   // (http/https/tcp). tcp → direct raw tunnel; http/https → nginx gateway.
   const protocol = opts.protocol ?? (await detectProtocol(port));

@@ -60,11 +60,13 @@ service-tunnels expose stop 5173
 service-tunnels expose status
 ```
 
-`--auth [<provider>]`：**一律默认 `authelia`（统一本地网关认证），与隧道类型
-无关**——所有隧道都只是透传到本地 nginx 端口的通道，认证统一在 nginx 侧完成。
-未指定 provider 时自动选 `authelia`；可用 `--auth basic` / `--auth oauth2-proxy`
-/ 插件名显式指定。provider 未就绪自动绿色拉起（缺二进制/缺 OIDC 注册等会在
-validate 阶段给出修复提示）。流程见 `docs/design.md §4.7`。
+`--auth [<provider>]`：**默认 `auto`**——按平台选认证 provider：Windows 用
+`portal`（Node 内置 forward-auth 登录页，零外部二进制），Linux/macOS 用
+`authelia`（完整 2FA + Redis）。`--auth none` 显式关闭认证（纯透传隧道）。
+所有隧道都只是透传到本地 nginx 端口的通道，认证统一在 nginx 侧完成。
+可用 `--auth basic` / `--auth oauth2-proxy` / 插件名显式指定。provider
+未就绪自动绿色拉起（缺二进制/缺 OIDC 注册等会在 validate 阶段给出修复提示）。
+流程见 `docs/design.md §4.7`。
 
 ## tunnel — 隧道清单管理
 
@@ -75,6 +77,8 @@ service-tunnels tunnel add api --type frpc --target 8080 [--auth authelia]
 service-tunnels tunnel add ssh1 --type ssh --target 3000            # serveo：ssh -R 80:127.0.0.1:3000 serveo.net
 service-tunnels tunnel add lt1  --type localtunnel --target 5173    # lt --port 5173；随机域名走动态登记即可，--subdomain 可选
 service-tunnels tunnel add b1   --type bore --target 5173 [--server localhost] [--remote-port 8080] [--token s3cret]  # 自建 bore server，URL 自动 http://host:port
+service-tunnels tunnel add nat1 --type natapp --target 5173 --token <authtoken>   # 国内内网穿透（natapp.cn），免费版随机 natappfree.cc
+service-tunnels tunnel add nat2 --type natapp --target 5173 --token <token> --server server.natapp.cc  # VIP 绑定自定义域名
 service-tunnels tunnel add ssh2 --type ssh --target 5173 --host localhost --user wind --remote-port 8080   # ssh -R 8080:127.0.0.1:5173 wind@localhost（本机快速测）
 service-tunnels tunnel add cf1 --type cloudflared --target 4180
 service-tunnels tunnel start web
@@ -125,6 +129,28 @@ service-tunnels auth register alice.ngrok-free.app     # 写入 provider 的登�
 service-tunnels auth unregister alice.ngrok-free.app
 service-tunnels auth list
 ```
+
+## auth user — 用户与密码/2FA 管理
+
+```bash
+service-tunnels auth user list [--provider portal|authelia|basic|all]     # 列出各 provider 用户
+service-tunnels auth user add alice [--password pw] [--display-name 昵称]  # 未给密码则随机生成并打印
+service-tunnels auth user set-password alice [--password pw]               # 改密（未给则随机）
+service-tunnels auth user remove alice
+service-tunnels auth totp enroll alice            # 生成 TOTP 密钥/otpauth URL（2FA 激活需一次验证码）
+service-tunnels auth totp disable alice           # 禁用 2FA
+service-tunnels auth totp status alice            # 查询 2FA 启用状态
+```
+
+## ui — 网页管理界面
+
+```bash
+service-tunnels ui [--port 4181] [--no-browser]    # 零依赖网页管理（node:http），127.0.0.1，自动弹浏览器
+```
+
+- 概览：daemon/隧道/用户状态；隧道启停删增；用户增删改密/2FA 启用禁用；
+  配置查看；快速暴露表单（端口 + auth auto/none/provider + 隧道类型）
+- 只监听 127.0.0.1，无外部依赖，适合本机管理
 
 ## status / 配置
 

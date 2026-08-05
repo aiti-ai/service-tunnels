@@ -1,3 +1,16 @@
+## 0.2.4 (unreleased)
+
+### 默认认证 auto + natapp 内置 + 网页管理界面
+- `expose --auth auto`(默认):按平台选认证 provider——Windows=portal(Node 内置),
+  Linux/macOS=authelia;`--auth none` 显式关闭认证(纯透传隧道)
+- 新增内置 tunnel 类型 `natapp`(国内内网穿透):`--type natapp --token <authtoken>`,
+  免费版随机 natappfree.cc 域名,VIP 加 `--server` 绑定自定义域名;URL 解析支持
+  natappfree.cc/natapp.cc 等域名;tools 定义 CDN 直链下载(失败提示手动安装)
+- 新增 `service-tunnels ui [--port <p>] [--no-browser]`:零依赖网页管理界面
+  (node:http),监听 127.0.0.1 并自动弹浏览器;概览/隧道管理(启停删增)/用户管理
+  (增删改密/2FA 启用禁用)/配置查看/快速暴露表单
+- daemon IPC 新增 `tunnel.get`(UI 切换开关用)
+
 ## 0.2.3 (unreleased)
 
 ### 隧道/Auth 全面真实测试修复(6 bug)

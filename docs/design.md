@@ -156,6 +156,7 @@
   | `ssh` | `ssh -R 80:127.0.0.1:<端口> <host>`——**serveo.net** 等 SSH 反向隧道服务即此类型 | serveo.net 随机/固定前缀 | **统一走网关** |
   | `cloudflared` | quick tunnel（随机 trycloudflare，**无 SSE**）或 named tunnel 多 ingress | trycloudflare.com / 自有域名 | **统一走网关** |
   | `localtunnel` | `lt --port <端口>`（或 `npx localtunnel`），URL 从输出解析 | loca.lt 随机 | **统一走网关** |
+  | `natapp` | 国内内网穿透（natapp.cn）：`-authtoken=<token> -weburl=<端口>`，VIP 加 `-server` 绑定自定义域名 | natappfree.cc（免费随机）/ 自有 | **统一走网关** |
   | `bore` | `bore local <端口> --to <server>`，连自建 `bore server`（单二进制，本机/局域网零账号测试专用），URL 合成 `http://host:port` | host:port | **统一走网关** |
   | `command` | 任意命令兜底（同 pi-web 的 PI_WEB_TUNNELS cmd 形态） | 解析输出 | **统一走网关** |
 

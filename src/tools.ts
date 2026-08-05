@@ -49,6 +49,13 @@ const ARCH_ALIAS: Record<string, string> = {
   s390x: "s390x",
 };
 
+/** Node platform() → CDN dir naming (natapp uses "windows", not "win32"). */
+const DL_PLATFORM: Record<string, string> = {
+  win32: "windows",
+  linux: "linux",
+  darwin: "darwin",
+};
+
 /** Node (platform, arch) → Rust target triple, for Rust-built tools whose
  *  release assets are named with full triples (e.g. bore ships
  *  `bore-v0.5.1-x86_64-unknown-linux-musl.tar.gz`). Keyed `"<platform>_<arch>"`. */
@@ -147,6 +154,7 @@ export function candidateUrls(
     t
       .replaceAll("{version}", def.version ?? "")
       .replaceAll("{platform}", platform())
+      .replaceAll("{dl_platform}", DL_PLATFORM[platform()] ?? platform())
       .replaceAll("{arch}", ARCH_ALIAS[arch()] ?? arch())
       .replaceAll("{rust_target}", RUST_TARGET[`${platform()}_${arch()}`] ?? "{rust_target}")
       .replaceAll(
@@ -481,7 +489,6 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
       options: {
         timeout: timeoutMs,
         connectTimeout: Math.min(timeoutMs, 10_000),
-        primaryWarmupTime: 1_000, // 工具通常几 MB：预热 1s 后即可启动镜像
         retries: 0,
         retryDelay: 0,
       },
@@ -572,7 +579,10 @@ export const TOOLS: Record<string, ToolDef> = {
     download: {
       // equinox.io ships .tgz on POSIX, .zip on Windows ({ext} handles it)
       official: "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-{platform}-{arch}.{ext}",
-      // equinox.io has no GitHub mirror; operators can configure toolMirrors.ngrok
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/downloads/releases/download/ngrok-3.19.1/ngrok-v3-stable-{platform}-{arch}.{ext}",
+        ...GH_MIRRORS,
+      ],
       kind: "tar.gz", // kind is re-selected by ext at extraction time
       binPath: "ngrok",
     },
@@ -585,7 +595,10 @@ export const TOOLS: Record<string, ToolDef> = {
     download: {
       official:
         "https://github.com/fatedier/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
-      mirrors: GH_MIRRORS,
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/frp/releases/download/v{version}/frp_{version}_{platform}_{arch}.{ext}",
+        ...GH_MIRRORS,
+      ],
       kind: "tar.gz",
       exts: { posix: "tar.gz", win: "zip" },
       binPath: "frpc",
@@ -594,12 +607,15 @@ export const TOOLS: Record<string, ToolDef> = {
   },
   cloudflared: {
     name: "cloudflared",
-    version: "latest",
+    version: "2026.7.3",
     platforms: ["linux", "darwin", "win32"],
     download: {
       official:
-        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{platform}-{arch}{exe}",
-      mirrors: GH_MIRRORS,
+        "https://github.com/cloudflare/cloudflared/releases/download/v{version}/cloudflared-{platform}-{arch}{exe}",
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/downloads/releases/download/cloudflared-2026.7.3/cloudflared-{platform}-{arch}{exe}",
+        ...GH_MIRRORS,
+      ],
       kind: "binary",
     },
     verifyArgs: ["--version"],
@@ -611,7 +627,10 @@ export const TOOLS: Record<string, ToolDef> = {
     download: {
       official:
         "https://github.com/authelia/authelia/releases/download/v{version}/authelia-v{version}-{platform}-{arch}.tar.gz",
-      mirrors: GH_MIRRORS,
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/authelia/releases/download/v{version}/authelia-v{version}-{platform}-{arch}.tar.gz",
+        ...GH_MIRRORS,
+      ],
       kind: "tar.gz",
       exts: { posix: "tar.gz", win: "zip" },
       binPath: "authelia",
@@ -637,12 +656,26 @@ export const TOOLS: Record<string, ToolDef> = {
     download: {
       official:
         "https://github.com/ekzhang/bore/releases/download/v{version}/bore-v{version}-{rust_target}.{ext}",
-      mirrors: GH_MIRRORS,
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/downloads/releases/download/bore-0.6.0/bore-v{version}-{rust_target}.{ext}",
+        ...GH_MIRRORS,
+      ],
       kind: "tar.gz",
       exts: { posix: "tar.gz", win: "zip" },
       binPath: "bore",
     },
     verifyArgs: ["-V"],
+  },
+  natapp: {
+    // natapp: 国内内网穿透（natapp.cn）。免费版随机域名 (natappfree.cc),
+    // VIP 绑定自定义域名。CDN 直链无 GitHub 镜像;下载失败时手动安装
+    // (natapp.cn 下载页) 或 toolPaths.natapp。
+    name: "natapp",
+    platforms: ["linux", "darwin", "win32"],
+    download: {
+      official: "https://cdn.natapp.cn/dist/{dl_platform}_{arch}/natapp{exe}",
+      kind: "binary",
+    },
   },
   "oauth2-proxy": {
     name: "oauth2-proxy",
@@ -651,7 +684,10 @@ export const TOOLS: Record<string, ToolDef> = {
     download: {
       official:
         "https://github.com/oauth2-proxy/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz",
-      mirrors: GH_MIRRORS,
+      mirrors: [
+        "https://gitee.com/justdb-mirrors/oauth2-proxy/releases/download/v{version}/oauth2-proxy-v{version}.{platform}-{arch}.tar.gz",
+        ...GH_MIRRORS,
+      ],
       kind: "tar.gz",
       exts: { posix: "tar.gz", win: "zip" },
       binPath: "oauth2-proxy",

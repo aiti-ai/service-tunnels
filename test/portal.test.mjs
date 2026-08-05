@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request } from "node:http";
+import { createHmac } from "node:crypto";
 
 function tempDirs() {
   const base = mkdtempSync(join(tmpdir(), "st-portal-"));
@@ -284,8 +285,21 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   await provider2.addUser("alice", "alice-pw");
   const { secret, otpauthUrl } = await provider2.totpEnroll("alice");
   assert.match(otpauthUrl, /^otpauth:\/\/totp\//);
-  assert.equal((await provider2.totpStatus("alice")).enrolled, true);
+  // pending until activated (2FA-takeover guard): enrolling must NOT replace
+  // the enforced secret or force 2FA before the user proves the code.
+  assert.equal((await provider2.totpStatus("alice")).enrolled, false);
+  assert.equal((await provider2.totpStatus("alice")).pending, true);
   assert.equal((await provider2.totpStatus("admin")).enrolled, false);
+
+  // wrong activation code → rejected, still pending
+  await assert.rejects(() => provider2.totpActivate("alice", "000000"));
+  assert.equal((await provider2.totpStatus("alice")).pending, true);
+
+  // activate with the user's real code → now enforced
+  const activateCode = totp(secret);
+  await provider2.totpActivate("alice", activateCode);
+  assert.equal((await provider2.totpStatus("alice")).enrolled, true);
+  assert.equal((await provider2.totpStatus("alice")).pending, false);
 
   // password step → 200 + pending 2FA cookie (no session cookie yet)
   const step1 = await postForm("/portal/login", port2, { username: "alice", password: "alice-pw" });
@@ -300,7 +314,6 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   assert.equal(badCode2.status, 401);
 
   // correct TOTP code → 302 + real session cookie (fresh ticket for alice)
-  const { createHmac } = await import("node:crypto");
   function base32Decode(s) {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let bits = 0, value = 0;

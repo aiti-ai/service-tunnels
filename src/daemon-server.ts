@@ -93,6 +93,7 @@ const methods = new Map<string, Handler>([
   ],
   ["internal.list", () => internal.list()],
   ["tunnel.list", () => tunnels.list()],
+  ["tunnel.get", (params) => tunnels.get(String(params))],
   ["tunnel.configs", () => tunnels.configs],
   [
     "tunnel.add",

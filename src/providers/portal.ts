@@ -1,7 +1,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "fs";
 import { execFileSync, spawn } from "child_process";
 import { join } from "path";
-import { randomBytes, scryptSync } from "crypto";
+import { randomBytes, scryptSync, createHmac, timingSafeEqual } from "crypto";
 import { connect } from "net";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager } from "../auth-provider.ts";
 
@@ -42,6 +42,47 @@ interface PortalUserRecord {
   hash: string;
   /** Base32 TOTP secret (RFC 6238) when the user has 2FA enrolled. */
   totpSecret?: string;
+  /** New TOTP secret awaiting first-code activation (never enforced until
+   *  verified — prevents an API caller from silently replacing a user's 2FA). */
+  totpPending?: string;
+}
+
+/**
+ * TOTP verification for the PARENT process (used by totpActivate). The portal
+ * HTTP server is a generated subprocess script carrying its own copy of this
+ * logic; the parent needs an independent implementation to activate pending
+ * enrollments (RFC 6238, SHA-1, 30s steps, ±1 window).
+ */
+function verifyTotpParent(secretB32: string, code: string): boolean {
+  if (!/^\d{6}$/.test(code)) return false;
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = String(secretB32).toUpperCase().replace(/=+$/, "");
+  const key = Buffer.alloc((clean.length * 5) >> 3);
+  let bits = 0;
+  let value = 0;
+  let idx = 0;
+  for (const ch of clean) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) return false;
+    value = (value << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      key[idx++] = (value >>> (bits - 8)) & 0xff;
+      bits -= 8;
+    }
+  }
+  if (idx === 0) return false;
+  const step = Math.floor(Date.now() / 30_000);
+  for (let off = -1; off <= 1; off++) {
+    const counter = Buffer.alloc(8);
+    counter.writeBigUInt64BE(BigInt(step + off));
+    const hmac = createHmac("sha1", key).update(counter).digest();
+    const o = hmac[hmac.length - 1]! & 0x0f;
+    const num = ((hmac[o]! & 0x7f) << 24) | (hmac[o + 1]! << 16) | (hmac[o + 2]! << 8) | hmac[o + 3]!;
+    const otp = String(num % 1_000_000).padStart(6, "0");
+    if (timingSafeEqual(Buffer.from(otp), Buffer.from(code))) return true;
+  }
+  return false;
 }
 
 export class PortalAuthProvider implements AuthProvider, UserManager {
@@ -262,7 +303,10 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     const rec = rows.get(name);
     if (!rec) throw new Error(`user ${name} not registered`);
     const secret = base32Encode(randomBytes(20));
-    rec.totpSecret = secret;
+    // Pending until the user proves they hold the secret (first TOTP code) —
+    // the existing totpSecret (if any) stays enforced meanwhile, so a caller
+    // of the management API cannot silently take over a user's 2FA.
+    rec.totpPending = secret;
     await this.#writeDb(rows);
     const label = encodeURIComponent(`${name}@service-tunnels`);
     this.#ctx.log(`portal: TOTP enrolled for ${name}`);
@@ -283,12 +327,28 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     this.#ctx.log(`portal: TOTP disabled for ${name}`);
   }
 
-  /** Whether a user has TOTP enrolled. */
-  async totpStatus(name: string): Promise<{ enrolled: boolean }> {
+  /** Whether a user has TOTP enrolled (pending = awaiting activation). */
+  async totpStatus(name: string): Promise<{ enrolled: boolean; pending: boolean }> {
     const rows = await this.#readDb();
     const rec = rows.get(name);
     if (!rec) throw new Error(`user ${name} not registered`);
-    return { enrolled: Boolean(rec.totpSecret) };
+    return { enrolled: Boolean(rec.totpSecret), pending: Boolean(rec.totpPending) };
+  }
+
+  /** Activate a pending TOTP enrollment with the first code from the user's
+   *  authenticator. Only after a correct code is verified does the pending
+   *  secret replace the active one (standard TOTP flow). */
+  async totpActivate(name: string, code: string): Promise<{ activated: boolean }> {
+    const rows = await this.#readDb();
+    const rec = rows.get(name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    if (!rec.totpPending) throw new Error(`user ${name} has no pending TOTP enrollment`);
+    if (!verifyTotpParent(rec.totpPending, code)) throw new Error("invalid verification code");
+    rec.totpSecret = rec.totpPending;
+    delete rec.totpPending;
+    await this.#writeDb(rows);
+    this.#ctx.log(`portal: TOTP activated for ${name}`);
+    return { activated: true };
   }
 }
 

@@ -1,16 +1,77 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 
 async function loadSubject() {
   return import("../src/tunnels.ts");
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Pick a free local port (kernel-assigned; released right after). */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = createNetServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+/** Poll GET until the body matches (real forwarding check). */
+async function httpGetUntil(url, expect, ms) {
+  const dl = Date.now() + ms;
+  let lastErr = "";
+  while (Date.now() < dl) {
+    try {
+      const res = await fetch(url);
+      const body = await res.text();
+      if (body === expect) return body;
+      lastErr = `body=${JSON.stringify(body)}`;
+    } catch (err) {
+      lastErr = String(err?.message ?? err);
+    }
+    await sleep(200);
+  }
+  throw new Error(`timeout waiting ${url} → ${expect} (${lastErr})`);
+}
+
 function tempDirs() {
   const base = mkdtempSync(join(tmpdir(), "st-tunnels-"));
   return { cacheDir: join(base, "cache"), base };
+}
+
+/**
+ * 等待 ssh 隧道 URL 合成(11s 连接窗口后)。若 ssh 进程提前退出(并发时 sshd
+ * 偶发初始化失败 exit 255——系统级问题,单文件/手动连接均正常),自动 stop +
+ * restart 重试一次,吸收该偶发失败。返回合成 URL。
+ */
+async function waitSshUrl(tm, name, ms = 35_000, retries = 1) {
+  for (let attempt = 0; ; attempt++) {
+    const dl = Date.now() + ms;
+    while (Date.now() < dl && !tm.get(name)?.url) await sleep(200);
+    const url = tm.get(name)?.url;
+    if (url) return url;
+    const info = tm.get(name);
+    const exited = !info?.running;
+    if (exited && attempt < retries) {
+      await tm.stop(name).catch(() => {});
+      await tm.start(name);
+      continue;
+    }
+    throw new Error(
+      `no url for ${name} after ${attempt + 1} attempts: error=${info?.error}; running=${info?.running}; lastOutput=${JSON.stringify(info?.lastOutput)}`,
+    );
+  }
 }
 
 /** Build a fake tool binary that records its argv, prints a URL, then idles. */
@@ -81,73 +142,85 @@ test("lifecycle: start (tool resolved) → url parsed → stop (group kill)", { 
   }
 });
 
-test("serveo/ssh build correct `ssh` argv (user, port, host, remotePort, -R)", { timeout: 40_000 }, async () => {
-  // SSH forwarding needs more than host+target: a username (user@host), an
-  // optional server port (-p), and a remote forward port (-R remote:local).
-  // Drive #build through start() with a fake `ssh` on PATH that records argv.
+test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", { timeout: 200_000 }, async () => {
+  // 真实本机 ssh 测试:ssh -R <remotePort>:127.0.0.1:<target> user@localhost。
+  // 用户名取当前用户(os.userInfo().username)——不依赖任何 fake 脚本。
+  // 验证:1) 真实 -R 转发把 sshd 侧端口导到本地 target 服务 2) URL 合成
+  // http://localhost:<remotePort> 3) remotePort 默认 = target 4) 无 host 报错。
+  // 固定高端口(42981+):freePort() 在并发测试下可能被立即复用导致 -R 绑定失败。
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const user = userInfo().username;
+  const target = 42981;
+  const server = createHttpServer((req, res) => res.end("SSH_FWD_OK"));
+  await new Promise((r) => server.listen(target, "127.0.0.1", r));
+  try {
+    const tm = new TunnelManager({
+      cacheDir,
+      resolveTool: async (n) => (n === "ssh" ? sshBin : null),
+    });
+
+    // full config: user@localhost + custom remotePort
+    const remotePort = 42982;
+    tm.add({ name: "my", type: "ssh", target, host: "localhost", user, remotePort });
+    await tm.start("my");
+    // URL 合成窗口 ~11s(ConnectTimeout 10s 之后才报 URL);sshd 偶发失败自动重启重试
+    assert.equal(await waitSshUrl(tm, "my"), `http://localhost:${remotePort}`, "ssh -R 合成 URL (user@localhost)");
+    assert.equal(tm.get("my")?.running, true);
+    // 真实转发验证:请求 sshd 侧绑定的 remotePort 应到达 target 服务
+    assert.equal(await httpGetUntil(`http://127.0.0.1:${remotePort}/`, "SSH_FWD_OK", 10_000), "SSH_FWD_OK", "ssh -R 真实转发到 target");
+    await tm.stop("my");
+    // 正常 stop:ssh 优雅退出(SIGTERM → exit 0)→ URL 保留(状态显示上次 URL 是设计);
+    // 撤销只发生在非零退出(错误),见 "connection refused" 测试的 SIGKILL 场景。
+    assert.equal(tm.get("my")?.running, false, "stop 后停止");
+    assert.equal(tm.get("my")?.url, `http://localhost:${remotePort}`, "正常 stop 保留 URL(设计)");
+
+    // remotePort 默认 = target(未设置时 -R target:127.0.0.1:target)
+    const dTarget = 42983;
+    const dServer = createHttpServer((req, res) => res.end("DEF_OK"));
+    await new Promise((r) => dServer.listen(dTarget, "127.0.0.1", r));
+    tm.add({ name: "def", type: "ssh", target: dTarget, host: "localhost", user });
+    await tm.start("def");
+    assert.equal(await waitSshUrl(tm, "def"), `http://localhost:${dTarget}`, "ssh: remotePort 默认 = target");
+    assert.equal(await httpGetUntil(`http://127.0.0.1:${dTarget}/`, "DEF_OK", 10_000), "DEF_OK", "默认 remotePort 转发生效");
+    await tm.stop("def");
+    dServer.close();
+
+    // ssh without host still errors clearly
+    tm.add({ name: "bad", type: "ssh", target: 5000 });
+    await assert.rejects(tm.start("bad"), /type "ssh" requires host/);
+  } finally {
+    server.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("serveo: builds ssh argv for the serveo.net hosted service", { timeout: 15_000 }, async () => {
+  // serveo.net 是公网托管服务,本机无法真实连接(-R 80 由 serveo 服务端处理)。
+  // ssh/serveo 的 bin 硬编码 "ssh"(走 PATH,不经 resolveTool),所以把记录 argv
+  // 的替身 ssh 放到 PATH 前置;URL 从输出立即解析(serveo 无 11s 合成定时器)。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
   const origPath = process.env.PATH;
-  const argvFile = join(base, "ssh.argv");
-  // fake ssh: record args, print a serveo URL so waitForUrl resolves fast.
-  const fakeBinDir = join(base, "sbin");
-  mkdirSync(fakeBinDir, { recursive: true });
-  writeFileSync(join(fakeBinDir, "ssh"),
-    `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvFile}"\necho 'https://abc.serveo.net'\nsleep 60\n`, "utf8");
-  chmodSync(join(fakeBinDir, "ssh"), 0o755);
-  process.env.PATH = `${fakeBinDir}:${process.env.PATH}`;
   try {
-    const tm = new TunnelManager({ cacheDir, resolveTool: async () => join(fakeBinDir, "ssh") });
-    // start() returns right after spawn() (URL waiting is the caller's job),
-    // so poll tm.get(name).url — which only appears AFTER the fake ssh has
-    // written argv — before reading the recorded argv file.
-    const waitUrl = async (name, ms = 5_000) => {
-      const dl = Date.now() + ms;
-      // wait for url AND for the fake process to have produced output (so its
-      // argv file is written). ssh urls are now synthesized synchronously, so
-      // the lastOutput check is what actually gates the argv read.
-      while (Date.now() < dl && (!tm.get(name)?.url || !tm.get(name)?.lastOutput)) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      if (!tm.get(name)?.url) throw new Error(`no url for ${name}: ${tm.get(name)?.lastOutput}`);
-    };
-
-    // serveo: anonymous, remote port 80, host serveo.net
+    fakeTool(base, "ssh", "Forwarding HTTP traffic from https://abc.serveo.net");
+    process.env.PATH = `${join(base, "bin")}:${process.env.PATH}`;
+    const argvFile = join(base, "bin", "args-ssh");
+    const tm = new TunnelManager({ cacheDir, resolveTool: async () => "" });
     tm.add({ name: "s", type: "serveo", target: 8901 });
     assert.equal(tm.get("s").type, "serveo", "serveo stays serveo (not aliased to ssh)");
     await tm.start("s");
-    await waitUrl("s");
-    let argv = readFileSync(argvFile, "utf8").trim().split("\n");
+    const dl = Date.now() + 5_000;
+    while (Date.now() < dl && (!tm.get("s")?.url || !existsSync(argvFile))) await sleep(50);
+    assert.equal(tm.get("s")?.url, "https://abc.serveo.net");
+    const argv = readFileSync(argvFile, "utf8").trim().split("\n");
     assert.ok(argv.includes("-R"), "serveo: -R present");
     assert.equal(argv[argv.indexOf("-R") + 1], "80:127.0.0.1:8901", "serveo forwards remote port 80");
     assert.equal(argv[argv.length - 1], "serveo.net", "serveo dest is serveo.net");
     assert.ok(!argv.includes("-p"), "serveo: no -p when port unset");
     assert.ok(!argv.includes("-N"), "serveo: NO -N (URL is printed by serveo's forced session; -N suppresses it)");
     await tm.stop("s");
-
-    // ssh with full config: user@host, -p 2222, custom remotePort 8080
-    tm.add({ name: "my", type: "ssh", target: 3000, host: "box.example.com", user: "deploy", port: 2222, remotePort: 8080 });
-    await tm.start("my");
-    await waitUrl("my", 12000);
-    argv = readFileSync(argvFile, "utf8").trim().split("\n");
-    assert.equal(argv[argv.indexOf("-R") + 1], "8080:127.0.0.1:3000", "ssh: -R <remotePort>:127.0.0.1:<target>");
-    assert.equal(argv[argv.indexOf("-p") + 1], "2222", "ssh: -p <port>");
-    assert.equal(argv[argv.length - 1], "deploy@box.example.com", "ssh: user@host dest");
-    assert.ok(argv.includes("-N"), "ssh (generic): -N present (pure forward, no session)");
-    await tm.stop("my");
-
-    // ssh defaults remotePort to target when not set
-    tm.add({ name: "def", type: "ssh", target: 5000, host: "srv.lan" });
-    await tm.start("def");
-    await waitUrl("def", 12000);
-    argv = readFileSync(argvFile, "utf8").trim().split("\n");
-    assert.equal(argv[argv.indexOf("-R") + 1], "5000:127.0.0.1:5000", "ssh: remotePort defaults to target");
-    assert.ok(!argv.includes("-p"), "ssh: no -p when port unset");
-    await tm.stop("def");
-
-    // ssh without host still errors clearly
-    tm.add({ name: "bad", type: "ssh", target: 5000 });
-    await assert.rejects(tm.start("bad"), /type "ssh" requires host/);
   } finally {
     process.env.PATH = origPath;
     rmSync(base, { recursive: true, force: true });
@@ -325,7 +398,7 @@ test("hydrate restores URLs from persisted state (restart scenario)", async () =
 test("schemas: tunnel + auth provider param specs (data-driven forms)", async () => {
   const { tunnelParamSchema, tunnelParamSchemas } = await loadSubject();
   const all = tunnelParamSchemas();
-  assert.deepEqual(Object.keys(all).sort(), ["bore", "cloudflared", "command", "frpc", "localtunnel", "ngrok", "serveo", "ssh"]);
+  assert.deepEqual(Object.keys(all).sort(), ["bore", "cloudflared", "command", "frpc", "localtunnel", "natapp", "ngrok", "serveo", "ssh"]);
   const ssh = tunnelParamSchema("ssh");
   assert.ok(ssh.find((p) => p.key === "host")?.required, "ssh requires host");
   assert.equal(ssh.find((p) => p.key === "remotePort")?.type, "number");
@@ -401,81 +474,85 @@ test("bore: builds `bore local` argv + synthesizes url from 'listening at host:p
   }
 });
 
-test("ssh: synthesizes http://<host>:<remotePort> (generic ssh prints no URL)", { timeout: 30_000 }, async () => {
+test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { timeout: 120_000 }, async () => {
+  // 真实本机 ssh(-R 到 user@localhost)验证 URL 合成 + 真实转发。固定端口避免
+  // 并发 freePort 竞态导致 -R 绑定失败。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  const origPath = process.env.PATH;
-  const fakeBinDir = join(base, "sbin");
-  mkdirSync(fakeBinDir, { recursive: true });
-  // fake ssh: silent -N forward (a real -R to your own box prints nothing)
-  writeFileSync(join(fakeBinDir, "ssh"), "#!/bin/sh\nsleep 60\n", "utf8");
-  chmodSync(join(fakeBinDir, "ssh"), 0o755);
-  process.env.PATH = `${fakeBinDir}:${process.env.PATH}`;
+  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const user = userInfo().username;
+  const target = 42984;
+  const server = createHttpServer((req, res) => res.end("SYNTH_OK"));
+  await new Promise((r) => server.listen(target, "127.0.0.1", r));
   try {
-    const tm = new TunnelManager({ cacheDir, resolveTool: async () => join(fakeBinDir, "ssh") });
-    tm.add({ name: "my", type: "ssh", target: 3000, host: "localhost", user: "wind", remotePort: 8080 });
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null) });
+    const remotePort = 42985;
+    tm.add({ name: "my", type: "ssh", target, host: "localhost", user, remotePort });
     const info = await tm.start("my");
-    // endpoint is deterministic, but only reported once ssh survives startup
-    // (1.5s window) — unreachable hosts exit fast and must NOT show a URL.
-    const dl = Date.now() + 16000;
-    while (Date.now() < dl && !tm.get("my")?.url) await new Promise((r) => setTimeout(r, 50));
-    assert.equal(tm.get("my")?.url, "http://localhost:8080");
+    // 端点确定,但只在 ssh 存活过连接窗口后报 URL(11s);sshd 偶发失败自动重启重试
+    assert.equal(await waitSshUrl(tm, "my", 30_000), `http://localhost:${remotePort}`, "ssh 合成 http://host:remotePort");
     assert.equal(tm.get("my")?.running, true);
+    assert.ok(info.pid && info.pid > 0);
+    // 真实转发:curl sshd 侧 remotePort 到达 target 服务
+    assert.equal(await httpGetUntil(`http://127.0.0.1:${remotePort}/`, "SYNTH_OK", 10_000), "SYNTH_OK", "真实 -R 转发");
     await tm.stop("my");
   } finally {
-    process.env.PATH = origPath;
+    server.close();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("ssh: unreachable host does NOT report a URL (no false success); connected host synthesizes one", { timeout: 35_000 }, async () => {
+test("ssh: real connection refused does NOT report a URL; stop revokes it", { timeout: 150_000 }, async () => {
+  // 真实 ssh 测试:1) 不可达(127.0.0.1 关闭端口 → Connection refused 立即退出)
+  // → 无 URL + error;2) 可达(localhost)→ 合成 URL;3) stop 后退出非零 → 撤销 URL。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  const argvDir = join(base, "sbin");
-  mkdirSync(argvDir, { recursive: true });
-  const origPath = process.env.PATH;
+  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const user = userInfo().username;
+  const target = 42986;
+  const server = createHttpServer((req, res) => res.end("UP"));
+  await new Promise((r) => server.listen(target, "127.0.0.1", r));
   try {
-    // fake ssh that EXITS immediately (unreachable host: connect timeout)
-    writeFileSync(join(argvDir, "ssh"),
-      "#!/bin/sh\necho 'ssh: connect to host 192.0.2.1 port 22: Connection timed out'\nexit 255\n", "utf8");
-    chmodSync(join(argvDir, "ssh"), 0o755);
-    process.env.PATH = `${argvDir}:${process.env.PATH}`;
-    const tm = new TunnelManager({ cacheDir, resolveTool: async () => join(fakeBinDir, "ssh") });
-    tm.add({ name: "bad", type: "ssh", target: 3000, host: "192.0.2.1", remotePort: 8080 });
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null) });
+
+    // 1. unreachable: ssh 到未监听端口立即 Connection refused 退出
+    tm.add({ name: "bad", type: "ssh", target, host: "127.0.0.1", port: 1, remotePort: 8080 });
     await tm.start("bad");
-    await new Promise((r) => setTimeout(r, 2000)); // ssh exits immediately; URL never set
+    await sleep(2_500); // ssh 立即退出;URL 永不合成
     const bad = tm.get("bad");
-    assert.equal(bad.url, null, "unreachable host must NOT report a URL");
-    assert.ok(bad.error, "unreachable host must report an error");
+    assert.equal(bad.url, null, "不可达 → 不报 URL");
+    assert.ok(bad.error, "不可达 → 报错");
     await tm.stop("bad");
 
-    // fake ssh that STAYS connected (host reachable + forwarding)
-    writeFileSync(join(argvDir, "ssh"),
-      "#!/bin/sh\necho 'debug1: Entering interactive session.'\nsleep 60\n", "utf8");
-    chmodSync(join(argvDir, "ssh"), 0o755);
-    tm.add({ name: "ok", type: "ssh", target: 3000, host: "box.example.com", remotePort: 8080 });
+    // 2. reachable: 真实 localhost 转发 → 合成 URL + 转发生效(sshd 偶发失败自动重试)
+    const remotePort = 42987;
+    tm.add({ name: "ok", type: "ssh", target, host: "localhost", user, remotePort });
     await tm.start("ok");
-    await new Promise((r) => setTimeout(r, 11200)); // past the 11s synth window
-    const ok = tm.get("ok");
-    assert.equal(ok.url, "http://box.example.com:8080", "connected ssh synthesizes the endpoint URL");
-    await tm.stop("ok");
+    assert.equal(await waitSshUrl(tm, "ok", 30_000), `http://localhost:${remotePort}`, "可达 → 合成 URL");
+    assert.equal(await httpGetUntil(`http://127.0.0.1:${remotePort}/`, "UP", 10_000), "UP", "真实转发");
 
-    // fake ssh that STAYS up past the synth window then exits with error
-    // (real unreachable host: ConnectTimeout ~10s, synth at 1.5s, exit at 10s)
-    // → the provisional URL must be REVOKED on exit, not reported as success.
-    writeFileSync(join(argvDir, "ssh"),
-      "#!/bin/sh\nsleep 12\necho 'ssh: connect to host 192.0.2.1 port 22: Connection timed out'\nexit 255\n", "utf8");
-    chmodSync(join(argvDir, "ssh"), 0o755);
-    tm.add({ name: "late", type: "ssh", target: 3000, host: "192.0.2.1", remotePort: 8080 });
-    await tm.start("late");
-    await new Promise((r) => setTimeout(r, 11300)); // synth at 11s fired → url present
-    assert.equal(tm.get("late")?.url, "http://192.0.2.1:8080", "URL appears once ssh survives the connect window");
-    await new Promise((r) => setTimeout(r, 1200)); // ssh exits at 12s → revoke
-    const late = tm.get("late");
-    assert.equal(late.url, null, "URL revoked when ssh exits with error");
-    assert.ok(late.error, "error set when ssh exits with error");
+    // 3. 进程被强杀(SIGKILL → 非零退出)→ 撤销 URL(不报假成功)
+    const killPort = 42988;
+    tm.add({ name: "kill", type: "ssh", target, host: "localhost", user, remotePort: killPort });
+    await tm.start("kill");
+    assert.equal(await waitSshUrl(tm, "kill", 30_000), `http://localhost:${killPort}`, "隧道建立后 URL 合成");
+    const killInfo = tm.get("kill");
+    const killPid = killInfo?.pid;
+    if (killPid) {
+      try {
+        process.kill(-killPid, "SIGKILL"); // 杀进程组,模拟崩溃
+      } catch {
+        process.kill(killPid, "SIGKILL");
+      }
+    }
+    const dlRevoke = Date.now() + 5_000;
+    while (Date.now() < dlRevoke && tm.get("kill")?.url) await sleep(100);
+    const killed = tm.get("kill");
+    assert.equal(killed.url, null, "非零退出 → URL 撤销(不报假成功)");
+    assert.ok(killed.error, "非零退出 → error 记录");
+    await tm.stopAll(); // 清理 ok + kill(force-exit 不留 detached 残留)
   } finally {
-    process.env.PATH = origPath;
+    server.close();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -494,5 +571,15 @@ test("auth registry: totpProviders 探测不含缓存毒化 (authelia 现在支�
     assert.ok(um.includes("basic") && um.includes("portal") && um.includes("authelia"));
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+after(async () => {
+  // 兜底:force-exit 不会等 detached 子进程——测试若中途失败,真实 ssh -R
+  // 进程可能残留占用端口,影响后续测试。按本机反向隧道特征清理。
+  try {
+    execFileSync("pkill", ["-f", "ssh -N -R .*@localhost"], { stdio: "ignore" });
+  } catch {
+    // 没有匹配进程(pkill 非零退出)
   }
 });

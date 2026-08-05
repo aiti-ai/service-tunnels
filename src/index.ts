@@ -55,6 +55,7 @@ export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilitie
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
 export { RedisController } from "./redis.ts";
+export { startUi } from "./ui.ts";
 
 export {
   expandListeningAddresses,
@@ -196,7 +197,9 @@ export interface ServiceTunnels {
     /** Disable TOTP 2FA for a user (portal). */
     totpDisable(name: string, provider?: string): Promise<void>;
     /** TOTP enrollment status for a user (portal). */
-    totpStatus(name: string, provider?: string): Promise<{ enrolled: boolean }>;
+    totpStatus(name: string, provider?: string): Promise<{ enrolled: boolean; pending: boolean }>;
+    /** Activate a pending TOTP enrollment with the user's first code. */
+    totpActivate(name: string, code: string, provider?: string): Promise<{ activated: boolean }>;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -474,9 +477,15 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         },
         totpStatus: async (name: string, provider?: string) => {
           const mgr = registry.userManager(provider ?? "portal") as unknown as {
-            totpStatus(n: string): Promise<{ enrolled: boolean }>;
+            totpStatus(n: string): Promise<{ enrolled: boolean; pending: boolean }>;
           };
           return mgr.totpStatus(name);
+        },
+        totpActivate: async (name: string, code: string, provider?: string) => {
+          const mgr = registry.userManager(provider ?? "portal") as unknown as {
+            totpActivate(n: string, code: string): Promise<{ activated: boolean }>;
+          };
+          return mgr.totpActivate(name, code);
         },
         users: async (provider = "all") => {
           const targets = resolveUserTargets(registry, provider);

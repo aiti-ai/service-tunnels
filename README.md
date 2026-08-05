@@ -13,10 +13,15 @@ service-tunnels daemon start          # 常驻守护（持有隧道/网关进程
 service-tunnels discover              # 发现调用方进程树中的服务端口
 service-tunnels tunnel add web --type ngrok --target 4180
 service-tunnels tunnel add loc --type bore --target 4180     # 自建 bore server（本机/局域网），零账号
+service-tunnels tunnel add nat --type natapp --token <authtoken> --target 4180  # 国内内网穿透（natapp.cn）
 service-tunnels tunnel add ssh1 --type ssh --target 4180 --host localhost --user wind --remote-port 8080  # ssh -R 到本机
 service-tunnels tunnel start web      # 启动隧道 → URL 自动解析
 service-tunnels expose 5173           # 一键暴露（默认 ngrok，无认证）
-service-tunnels expose 5173 --auth    # 一键暴露 + nginx/Authelia/Redis 认证
+service-tunnels expose 5173 --auth    # 一键暴露 + 认证（默认 auto：win32=portal，Linux/macOS=authelia）
+service-tunnels expose 5173 --auth none   # 显式无认证
+service-tunnels auth user list | add | set-password | remove   # 用户管理
+service-tunnels auth totp enroll|disable|status <user>         # 2FA 管理
+service-tunnels ui                    # 网页管理界面（127.0.0.1，自动弹浏览器）
 service-tunnels stop-all              # 停止守护 + 清理全部子进程
 ```
 
@@ -56,8 +61,11 @@ internal list [--json]                  # 框架辅助端口（nginx/authelia/re
 tools list | resolve <n> | download <n> | path <n>
 proxy start [--port] [--suffix] [--base-path] [--password]
 tunnel list | add | start | stop | remove
-expose <port> [--tunnel <t>] [--auth [<provider>]] [--name <n>]
+expose <port> [--tunnel <t>] [--auth [auto|none|<provider>]] [--name <n>]
 auth provider list | register <host> | unregister <host>
+auth user list | add | set-password | remove [--provider ...]   # 用户管理
+auth totp enroll | disable | status <user> [--provider ...]     # 2FA 管理
+ui [--port <p>] [--no-browser]          # 网页管理界面（127.0.0.1，自动弹浏览器）
 gateway start|stop|status
 status [--json]
 stop-all

@@ -22,7 +22,9 @@ function usage(): void {
                  [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
   schemas [--type <tunnel-type|auth>]   # 数据驱动参数 schema(客户端据此渲染表单)
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--allow-tool-download <true|false>]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--allow-tool-download <true|false>] [--force]
+  auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--provider ...]
+  ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
   config path | show
@@ -185,6 +187,12 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--force":
         args.force = true;
+        break;
+      case "--port":
+        args.port = Number(argv[++i]!);
+        break;
+      case "--no-browser":
+        args.noBrowser = true;
         break;
       default:
         if (a!.startsWith("-")) {
@@ -620,8 +628,12 @@ async function main(): Promise<void> {
       }
       const res = await st.daemon.request("expose", {
         port,
-        auth: Boolean(args.auth),
-        provider: typeof args.auth === "string" ? args.auth : undefined,
+        // "auto" → expose 内部按平台解析默认 provider（win32=portal，其余=authelia）
+        // "none" → 显式无认证（纯透传隧道，走 none 网关路径）
+        auth: args.auth === "auto" || args.auth === true
+          ? "auto"
+          : args.auth === "none" ? false : Boolean(args.auth),
+        provider: typeof args.auth === "string" && args.auth !== "auto" ? args.auth : undefined,
         tunnelType: args.tunnel,
         tunnelName: args.name,
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
@@ -682,6 +694,17 @@ async function main(): Promise<void> {
         console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--provider ...]");
         process.exit(2);
       }
+      break;
+    }
+
+    case "ui": {
+      const { startUi } = await import("./ui.ts");
+      const ui = startUi(st, {
+        port: args.port ? Number(args.port) : undefined,
+        openBrowser: !args.noBrowser,
+      });
+      // Keep the process alive
+      await new Promise(() => {});
       break;
     }
 
