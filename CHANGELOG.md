@@ -1,4 +1,4 @@
-## 0.2.4 (unreleased)
+## 0.2.38
 
 ### P5：UI 站点管理 + pi-web 集成示例（sites-design.md §5.8）
 - **UI 站点管理页**：`service-tunnels ui` 新增导航「站点管理」——/sites 列表
