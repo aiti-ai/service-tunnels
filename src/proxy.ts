@@ -8,7 +8,7 @@ import { stripBasePath } from "./discovery.ts";
  * `.service-tunnel.localhost` alias. `pi.localhost` (the pi-web brand default)
  * is deliberately NOT part of the generic tool's defaults.
  */
-export const DEFAULT_SUFFIXES = [".st.localhost", ".service-tunnel.localhost"];
+export const DEFAULT_SUFFIXES = [".st.localhost", ".service-tunnel.localhost", ".localhost"];
 
 /**
  * Wildcard-host reverse proxy (zero dependencies).
