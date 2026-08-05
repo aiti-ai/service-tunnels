@@ -4,6 +4,7 @@ import {
   readConfigFile,
   writeConfigFile,
   hardenDir,
+  resolveBaseDomains,
   type DirOptions,
   type ServiceTunnelsDirs,
 } from "./config.ts";
@@ -94,6 +95,17 @@ export interface ServiceTunnelsOptions extends DirOptions {
   /** Spawn a parent-death guardian (default true): if this process exits
    *  without cleanup, a detached guardian kills our framework helpers. */
   guardian?: boolean;
+  /**
+   * User's wildcard-DNS base domain (e.g. "pi.example.com"): expose --mode
+   * proxy also returns a PORTLESS base URL (`<port>[-<label>].<baseDomain>`)
+   * and the proxy serves `<port>[-<label>].<baseDomain>`. Callers embedding
+   * service-tunnels (pi-web) pass their deployment domain here — beats env
+   * SERVICE_TUNNELS_BASE_DOMAIN and the config file base-domain.
+   */
+  baseDomain?: string;
+  /** Additional base domains served as proxy suffixes (primary first, beats
+   *  env SERVICE_TUNNELS_BASE_DOMAIN). */
+  baseDomains?: string[];
 }
 
 export interface ToolResolution {
@@ -352,10 +364,11 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   // isPortAllowed is deliberately permissive: enrollment (resolveSite) is the
   // gate, and expose already verified port ownership at enrollment time; the
   // discovery allow-list still guards the low-level st.proxy.create().
+  const { primary: primaryBase, list: baseDomains } = resolveBaseDomains(dirs.configDir, opts);
   const proxy = new ProxyManager({
     suffixes: DEFAULT_SUFFIXES,
-    baseDomain: readConfigFile(dirs.configDir).baseDomain,
-    baseDomains: (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean),
+    baseDomain: primaryBase,
+    baseDomains,
     registry: authRegistry,
     gateway,
     getSites: () => readSites(dirs.configDir),

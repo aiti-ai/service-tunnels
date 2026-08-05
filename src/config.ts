@@ -55,6 +55,32 @@ export function readConfigFile(configDir: string): ServiceTunnelsConfigFile {
   return {};
 }
 
+/**
+ * Resolve the proxy base-domain list. Precedence:
+ *   1. explicit primary (CLI --base-domain or createServiceTunnels baseDomain)
+ *   2. explicit extras (createServiceTunnels baseDomains)
+ *   3. env SERVICE_TUNNELS_BASE_DOMAIN (comma-separated)
+ *   4. config file base-domain
+ * The primary (first entry) drives the returned baseUrl; all entries are
+ * served as proxy suffixes. Empty → no base domain.
+ */
+export function resolveBaseDomains(
+  configDir: string,
+  explicit?: { baseDomain?: string; baseDomains?: string[] },
+): { primary: string; list: string[] } {
+  const clean = (d: string) => d.trim().toLowerCase().replace(/^\./, "");
+  const primary = clean(explicit?.baseDomain ?? "");
+  const env = (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "")
+    .split(",").map(clean).filter(Boolean);
+  const cfg = clean(readConfigFile(configDir).baseDomain ?? "");
+  const extras = [...(explicit?.baseDomains ?? []).map(clean), ...env, ...(cfg ? [cfg] : [])]
+    .filter((d) => d && d !== primary);
+  // No explicit primary: the first extra (env > config) becomes the primary.
+  const head = primary || extras[0] || "";
+  const list = [head, ...extras.filter((d) => d !== head)];
+  return { primary: head, list };
+}
+
 /** Persist configDir/service-tunnels.json (atomic tmp+rename, keeps other
  *  keys) — git-config style: `config set` writes here, everything reads it
  *  as the LOWEST-priority fallback (params > env > file > default). */

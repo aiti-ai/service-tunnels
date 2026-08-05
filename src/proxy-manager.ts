@@ -175,6 +175,11 @@ export class ProxyManager {
     return this.#baseDomain;
   }
 
+  /** All base domains, primary first (empty when unset). */
+  get baseDomains(): string[] {
+    return [...this.#baseDomains];
+  }
+
   /** All accepted suffixes (default + base domains + registered site domains). */
   get #allSuffixes(): string[] {
     const out = [...(this.#opts.suffixes ?? DEFAULT_SUFFIXES)];

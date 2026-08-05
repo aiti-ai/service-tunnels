@@ -1,7 +1,7 @@
 import { GatewayController, type GatewayAuthMode, detectProtocol } from "./gateway.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import { readSites, type SiteConfig } from "./sites.ts";
-import { readConfigFile } from "./config.ts";
+import { readConfigFile, resolveBaseDomains } from "./config.ts";
 import { RedisController } from "./redis.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 import { AuthRegistry } from "./auth-registry.ts";
@@ -239,16 +239,18 @@ async function proxyExpose(
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     log,
   });
-  // base domain (portless public URL): explicit option > config file.
-  const baseDomain = opts.baseDomain ?? cfgFile.baseDomain;
-  // Multi-domain base (env SERVICE_TUNNELS_BASE_DOMAIN, comma-separated,
-  // primary first): CLI --base-domain > env > config file. All are served as
-  // proxy suffixes; the primary drives the returned baseUrl.
-  const envBase = (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean);
-  const baseDomains = opts.baseDomain
-    ? [opts.baseDomain, ...envBase.filter((d) => d !== opts.baseDomain)]
-    : [...envBase, ...(cfgFile.baseDomain && !envBase.includes(cfgFile.baseDomain) ? [cfgFile.baseDomain] : [])];
-  if (baseDomains.length) await proxy.setBaseDomain(baseDomains);
+  // Base domain (portless public URL). The proxy already carries the
+  // constructor-resolved domains (createServiceTunnels opts / env
+  // SERVICE_TUNNELS_BASE_DOMAIN / config base-domain). An explicit CLI
+  // --base-domain swaps the primary, keeping the other configured domains;
+  // a fresh local proxy with none configured picks them up from env/config.
+  if (opts.baseDomain) {
+    const rest = proxy.baseDomains.filter((d) => d !== opts.baseDomain);
+    await proxy.setBaseDomain([opts.baseDomain, ...rest]);
+  } else if (proxy.baseDomains.length === 0) {
+    const { list } = resolveBaseDomains(ctx.configDir);
+    if (list.length) await proxy.setBaseDomain(list);
+  }
   const authRequested =
     opts.auth === true || opts.auth === "auto" || (typeof opts.auth === "string" && opts.auth !== "none");
   const providerType = opts.provider

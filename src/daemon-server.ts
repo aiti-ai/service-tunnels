@@ -17,7 +17,7 @@ import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
-import { readConfigFile, writeConfigFile } from "./config.ts";
+import { readConfigFile, writeConfigFile, resolveBaseDomains } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { registerPid } from "./pid-registry.ts";
@@ -398,7 +398,8 @@ const authRegistry = new AuthRegistry({
 // time; the daemon cannot see the caller's process tree anyway.
 const proxy = new ProxyManager({
   suffixes: DEFAULT_SUFFIXES,
-  baseDomains: (process.env.SERVICE_TUNNELS_BASE_DOMAIN ?? "").split(",").map((d) => d.trim()).filter(Boolean),
+  baseDomain: resolveBaseDomains(configDir).primary,
+  baseDomains: resolveBaseDomains(configDir).list,
   registry: authRegistry,
   getSites: () => readSites(configDir),
   // persist enrollments; the arrow captures `proxy` (assigned after this
