@@ -279,12 +279,18 @@ async function proxyExpose(
       ?? siteCfg?.basePath
       ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
       ?? defaultBasePath(providerType);
+    // Merge the embedder's deployment base path (pi-web /dev) under the
+    // provider's own base path: /dev + /portal → /dev/portal — login pages,
+    // authz probes and redirects all live under the combined path.
+    const mergedBasePath = providerType === "basic"
+      ? ""
+      : sanitizeBasePath(`${(proxy.basePath ?? "").replace(/\/+$/, "")}${basePath}`);
     const provider = registry.create(
       providerType,
       {
         ...unflattenParams(opts.providerParams ?? {}),
         ...(siteCfg?.providerParams ?? {}),
-        basePath: providerType === "basic" ? "" : sanitizeBasePath(basePath),
+        basePath: providerType === "basic" ? "" : mergedBasePath,
         policy: opts.policy ?? siteCfg?.policy,
         user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
         sessionSecret: opts.sessionSecret,

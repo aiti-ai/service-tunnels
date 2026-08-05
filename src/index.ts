@@ -106,6 +106,13 @@ export interface ServiceTunnelsOptions extends DirOptions {
   /** Additional base domains served as proxy suffixes (primary first, beats
    *  env SERVICE_TUNNELS_BASE_DOMAIN). */
   baseDomains?: string[];
+  /**
+   * Embedder's deployment base path (pi-web: PI_WEB_BASE_PATH, e.g. "/dev").
+   * App paths are stripped before forwarding, and auth-provider login paths
+   * (portal "/portal/login", authelia ...) are merged under it:
+   * "/dev/portal/login" — plain "/portal/login" when unset.
+   */
+  deployBasePath?: string;
 }
 
 export interface ToolResolution {
@@ -369,6 +376,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     suffixes: DEFAULT_SUFFIXES,
     baseDomain: primaryBase,
     baseDomains,
+    basePath: (opts.deployBasePath ?? "").replace(/\/+$/, ""),
     registry: authRegistry,
     gateway,
     getSites: () => readSites(dirs.configDir),

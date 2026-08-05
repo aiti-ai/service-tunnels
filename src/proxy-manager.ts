@@ -54,7 +54,10 @@ export interface ProxyManagerOptions {
   baseDomain?: string;
   /** Extra base domains (env SERVICE_TUNNELS_BASE_DOMAIN, comma-separated). */
   baseDomains?: string[];
-  /** Strip this base path before forwarding. */
+  /** Strip this base path before forwarding — the embedder's deployment
+   *  prefix (pi-web PI_WEB_BASE_PATH, e.g. "/dev"). Provider login paths
+   *  (e.g. portal "/portal/login") are MERGED under it: "/dev/portal/login",
+   *  plain "/portal/login" when unset. */
   basePath?: string;
   /** Optional Basic password gate for OPEN vhosts. */
   password?: string;
@@ -173,6 +176,11 @@ export class ProxyManager {
 
   get baseDomain(): string {
     return this.#baseDomain;
+  }
+
+  /** Deployment base path (forwarding strip prefix), e.g. "/dev". */
+  get basePath(): string {
+    return this.#opts.basePath ?? "";
   }
 
   /** All base domains, primary first (empty when unset). */
@@ -355,7 +363,14 @@ export class ProxyManager {
   async #ensureProvider(binding: ProxyBinding): Promise<AuthProvider> {
     const registry = this.#opts.registry;
     if (!registry) throw new Error("proxy: no auth registry wired");
-    const provider = registry.create(binding.provider, { ...(binding.providerParams ?? {}) }, binding.site);
+    const params = { ...(binding.providerParams ?? {}) };
+    // Merge the deployment base path under the provider base path when the
+    // binding carries one (daemon-restored bindings without an instance yet).
+    const deploy = this.#opts.basePath ?? "";
+    if (deploy && typeof params.basePath === "string" && params.basePath) {
+      params.basePath = `${deploy.replace(/\/+$/, "")}${params.basePath}`;
+    }
+    const provider = registry.create(binding.provider, params, binding.site);
     if (!provider.status().running) {
       const problems = (await provider.validate?.()) ?? [];
       if (problems.length) throw new Error(problems.join("; "));
