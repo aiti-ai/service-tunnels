@@ -246,14 +246,16 @@ export class ProxyManager {
   }
 
   // ── label → site ──────────────────────────────────────────────────────────
-  /** "auth" = default site; registered site names; provider types (implicit
-   *  site = provider name); anything else → unknown label (403). */
+  /** "auth" = default site (reserved); registered site names; provider types
+   *  (explicit provider without --site → vhost label = provider name, but the
+   *  auth realm is the DEFAULT site, matching `auth user *` defaults);
+   *  anything else → unknown label (403). */
   #resolveLabel(label: string): string | null {
     if (label === "auth") return "default";
     const sites = this.#opts.getSites?.() ?? {};
     if (Object.prototype.hasOwnProperty.call(sites, label)) return label;
     const types = this.#opts.registry?.list() ?? [];
-    if (types.includes(label)) return label;
+    if (types.includes(label)) return "default";
     return null;
   }
 

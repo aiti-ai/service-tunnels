@@ -37,8 +37,9 @@
   authelia 全套配置+sqlite / oauth2-proxy conf）——**不同 site 不共享配置和用户**
 - **`st.sites` / CLI `site list|show|add|remove`**：sites.json（0600）+ 隐式 default
   （兼容现状路径，零迁移）；校验收紧（`[a-z0-9-]`、禁 `auth`/`default` 名）
-- **expose 统一 site 解析**：dispatcher 一次解析 site（显式 `--site` > 隐式 provider
-  site > default），proxy 与 tunnel 分支共享同一实例；site 配置（provider/basePath/
+- **expose 统一 site 解析**：dispatcher 一次解析 site（显式 `--site` > default；
+  provider 只是 default 站上的认证方式，vhost label 带 provider 名，用户库与
+  `auth user *` 默认一致），proxy 与 tunnel 分支共享同一实例；site 配置（provider/basePath/
   policy/providerParams/user）自动接入 expose
 - **用户管理 site 作用域**：`auth user/totp * --site <s>`（缺省 default）——同名用户
   在不同 site 密码/删除互不影响；daemon RPC `auth.user.*/auth.totp.*` 同

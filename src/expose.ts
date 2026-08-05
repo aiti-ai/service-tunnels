@@ -64,9 +64,13 @@ export interface ExposeOptions {
    *  "proxy" (local virtual host only, NO tunnel process), "both" (local
    *  vhost + public tunnel sharing one site). */
   mode?: "tunnel" | "proxy" | "both";
+  /** @internal set by the dispatcher: whether the caller explicitly passed
+   *  --site (distinguishes `--site default` from no --site — the former keeps
+   *  the reserved "auth" label, the latter carries the provider name). */
+  siteExplicit?: boolean;
   /** Auth realm (site) for mode proxy/both. Default "default" (vhost label
-   *  "auth"); an explicit provider without --site creates an implicit
-   *  provider site (vhost label = provider name). */
+   *  "auth"); an explicit provider without --site stays on the DEFAULT realm
+   *  with a provider-name vhost label (D3: `5173-basic` = basic on default). */
   site?: string;
   /** Proxy transport port for mode proxy/both (default 4180, busy → random). */
   proxyPort?: number;
@@ -78,7 +82,7 @@ export interface ExposeOptions {
   baseDomain?: string;
   /** true = gateway auth (default provider), false = no auth, "auto" = pick
    *  the best available provider (authelia > portal > basic). */
-  auth?: boolean | "auto";
+  auth?: boolean | "auto" | string;
   provider?: string;
   tunnelName?: string;
   tunnelType?: string;
@@ -193,13 +197,16 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   if (opts.protocol === "tcp" && mode !== "tunnel") {
     return { url: null, tunnel: "", protocol: "tcp", error: "protocol tcp requires --mode tunnel" };
   }
-  // Unified site resolution (P1): explicit --site > implicit provider site >
-  // default. Resolved ONCE so the proxy and tunnel branches share the SAME
-  // site instance (one provider process / one user db per realm).
+  // Unified site resolution (P1): explicit --site > default. Resolved ONCE so
+  // the proxy and tunnel branches share the SAME site instance (one provider
+  // process / one user db per realm). An explicit provider (--auth <p> or
+  // --provider <p>) WITHOUT --site stays on the DEFAULT site — the vhost
+  // label carries the provider name (D3: `5173-basic` = basic on default),
+  // but the user db is the default realm's, matching `auth user *` defaults.
   const sites = readSites(ctx.configDir);
-  const site = opts.site ?? (opts.provider ? opts.provider : "default");
+  const site = opts.site ?? "default";
   const siteCfg = sites[site];
-  const opts2 = { ...opts, site };
+  const opts2 = { ...opts, site, siteExplicit: opts.site !== undefined };
   if (mode === "proxy") return await proxyExpose(port, opts2, ctx, siteCfg);
   const proxyResult = mode === "both" ? await proxyExpose(port, opts2, ctx, siteCfg) : null;
   const result = await exposeTunnel(port, opts2, ctx, siteCfg);
@@ -243,7 +250,18 @@ async function proxyExpose(
       ? getDefaultAuthProvider()
       : typeof opts.auth === "string" && opts.auth !== "none" ? opts.auth : "portal");
   const site = authRequested ? (opts.site ?? "default") : "";
-  const label = site === "" ? "" : site === "default" ? "auth" : site;
+  // D3: default-site vhosts carry the explicit provider name as the label
+  // (`5173-basic` = basic auth on the DEFAULT site — same user db as
+  // `auth user add --provider basic`); bare `--auth`/`--auth auto` keeps the
+  // reserved "auth" label; named sites label with the site name; an explicit
+  // `--site default` also keeps "auth".
+  const explicitProvider = Boolean(opts.provider) ||
+    (typeof opts.auth === "string" && opts.auth !== "none" && opts.auth !== "auto");
+  const label = site === ""
+    ? ""
+    : opts.siteExplicit
+      ? (site === "default" ? "auth" : site)
+      : (explicitProvider ? providerType : "auth");
 
   if (authRequested) {
     const pctx = providerCtx(ctx);

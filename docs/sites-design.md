@@ -160,8 +160,14 @@ type ProviderOpts = { site?: string; storageDir?: string; domain?: string; …�
 - **语法**：首个 `-` 前的数字是 port，其后整个字符串是 label（label 含 `-` 无妨，
   `5173-pi-web` → label `pi-web`）；port 段 `^\d{2,5}(?:-([a-z0-9-]+))?$`。
 - **label 解析优先级**：`auth`（保留字，= default site 认证）→ 已注册 site 名 →
-  内置 provider 类型（**隐式站点**：auth=true、独立用户库、懒启动，见 §5.2）→
+  内置 provider 类型（**default 站上的认证方式**：`5173-basic` = default 站的
+  basic，与 `auth user add --provider basic` 默认同一用户库，见 §5.2）→
   其余 **403（未知站点）**，不静默当开放端口。
+- **label 语义（0.2.39 修正）**：provider 类型 label 不再隐含新站点——
+  `expose --auth basic`（无 `--site`）的认证域就是 default 站（label 带 provider
+  名，用户库与 CLI/UI 用户管理默认一致）；独立站点必须显式 `--site <name>`
+  （label = site 名）。此前“隐式 provider 站点”导致 vhost 用户库与用户管理
+  默认站点不一致而无法登录。
 - **语义**：`port.<suffix>` 开放直连（白名单兜底）；带 label 即表示"这是站点"
   （是否认证跟随 site.auth / provider 隐式默认 true）。满足 R3 的
   "`port.host`（开放）或 `port-auth.host`（认证）"两种形态。
@@ -201,7 +207,7 @@ interface ServiceHostMatch {
 1. hostname 小写、去端口；
 2. 后缀集合按长度降序，取**最长匹配**；匹配失败 → 不代理；
 3. 剩余首段：`^\d{2,5}$`（开放）或 `^\d{2,5}-([a-z0-9-]+)$`（label）——label 按
-   §3.1 优先级解析出 site（`auth` 保留字 / 已注册 site / 隐式 provider 站点）；
+   §3.1 优先级解析出 site（`auth` 保留字 / 已注册 site / provider 类型 → default 站）；
 4. site 推导：后缀本身是某 site 的 domain → 该 site，此时**不允许 label**（冲突
    → 403）；否则用 label 指定的 site；
 5. 端口合法性 + `auth = (label 为 auth 保留字) || site.auth`。
@@ -458,8 +464,8 @@ st.exposes() → 增加 site / localUrl / domainUrl 字段
       provider 接线（site 隔离前的 default 实例）+ 返回 localUrl；
 - [x] `src/cli.ts`：`expose --mode proxy` 参数透传（daemon IPC）；`proxy start|stop|status`
       仅管理传输层；
-- [x] `src/index.ts`：`st.proxy.create` 接线 bindings/sites（隐式 provider label →
-      现有 default 实例）；`st.auth.ensure(label)` 供懒接线调用。
+- [x] `src/index.ts`：`st.proxy.create` 接线 bindings/sites（provider label →
+      default 站实例）；`st.auth.ensure(label)` 供懒接线调用。
 - **验收（test/proxy.test.mjs 扩展 + test/expose-proxy.test.mjs）**：
   - [x] 无任何 expose 时：`5173.st.localhost`、`5173-auth.st.localhost`、
     `5173-portal.st.localhost` **全部 403（not enrolled）**——默认零转发，已发现

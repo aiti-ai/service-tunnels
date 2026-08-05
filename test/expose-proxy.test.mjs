@@ -70,7 +70,9 @@ test("expose --mode proxy: enrollment (D4) + portal auth on a local vhost", { ti
     assert.equal(deny.status, 403);
     assert.match(deny.body, /not enrolled/);
 
-    // 2. enroll via expose --mode proxy (auth portal, implicit provider site)
+    // 2. enroll via expose --mode proxy (auth portal on the DEFAULT site —
+    // explicit provider without --site keeps the default realm; the vhost
+    // label carries the provider name)
     const r = await st.auth.expose(port, {
       mode: "proxy",
       auth: true,
@@ -79,8 +81,8 @@ test("expose --mode proxy: enrollment (D4) + portal auth on a local vhost", { ti
       proxyPort: 0,
     });
     assert.equal(r.mode, "proxy");
-    assert.equal(r.site, "portal");
-    assert.equal(r.label, "portal");
+    assert.equal(r.site, "default");   // auth realm stays default
+    assert.equal(r.label, "portal"); // vhost label = provider name
     assert.ok(r.localUrl, `localUrl present, got ${JSON.stringify(r)}`);
     const url = new URL(r.localUrl);
     const tp2 = Number(url.port);
@@ -116,7 +118,7 @@ test("expose --mode proxy: enrollment (D4) + portal auth on a local vhost", { ti
     // 7. st.exposes() surfaces site / localUrl
     const list = st.exposes();
     assert.ok(
-      list.some((e) => e.port === port && e.site === "portal" && e.localUrl === r.localUrl),
+      list.some((e) => e.port === port && e.site === "default" && e.label === "portal" && e.localUrl === r.localUrl),
       `exposes() has the proxy record, got ${JSON.stringify(list)}`,
     );
 
