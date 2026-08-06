@@ -188,7 +188,7 @@ const methods = new Map<string, Handler>([
     return { ok: true };
   }],
   ["schemas", async (params) => {
-    const lang = resolveLang(params?.lang);
+    const lang = resolveLang((params as { lang?: string } | undefined)?.lang);
     return {
       tunnels: localizeSchemas(tunnelParamSchemas(), lang),
       metas: tunnelMetas(),

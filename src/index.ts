@@ -201,9 +201,11 @@ export interface ServiceTunnels {
    *  (host renders inputs from these; adding a type/provider needs no
    *  client changes). */
   schemas: {
-    tunnels(): Record<string, ParamSpec[]>;
-    tunnel(type: string): ParamSpec[];
-    authProviders(): Promise<Record<string, ParamSpec[]>>;
+    /** 全部隧道类型 schema;lang: "zh" 返回中文,缺省/"en" 返回英文数据默认。 */
+    tunnels(lang?: string): Record<string, ParamSpec[]>;
+    /** 单类型 schema;lang 同上。 */
+    tunnel(type: string, lang?: string): ParamSpec[];
+    authProviders(lang?: string): Promise<Record<string, ParamSpec[]>>;
     /** Provider 页面元数据（label/已配置/待填）——picker 与「✓已配置」徽标。 */
     authMetas(): Record<string, import("./providers/oauth2-variants.ts").AuthProviderMeta>;
     metas(): Record<string, TunnelMeta>;
