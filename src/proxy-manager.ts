@@ -382,7 +382,7 @@ export class ProxyManager {
         const gw = await this.#ensureGateway();
         if (!this.#registered.has(key)) {
           const htpasswd = (provider as unknown as { htpasswdFile?: string }).htpasswdFile;
-          await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http" });
+          await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http", site: binding.site });
           this.#registered.add(key);
         }
         return { basicGatewayPort: gw.port };

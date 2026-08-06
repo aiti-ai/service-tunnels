@@ -466,6 +466,7 @@ const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
 const SECURE = process.env.SECURE === "1";
 const COOKIE = "st_portal${site === "default" ? "" : "_" + site}_session";
 const COOKIE2 = "st_portal${site === "default" ? "" : "_" + site}_2fa";
+const SITE = ${JSON.stringify(site)};
 const TTL_MS = 7 * 24 * 3600 * 1000;
 
 function loadUsers() {
@@ -547,17 +548,19 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function totpPage(next, error) {
+function totpPage(next, error, host) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
   return '<!doctype html><html><head><meta charset="utf-8"><title>Two-factor</title>'
     + '<style>body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7}'
     + 'form{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem}'
     + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .6rem}'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px;letter-spacing:.35em;text-align:center}'
     + 'button{margin-top:1.2rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}</style>'
     + '</head><body><form method="post" action="' + BASE + '/login/2fa">'
     + '<h1>Two-factor authentication</h1>'
     + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
+    + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
     + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err
     + '<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>'
     + '<button type="submit">Verify</button></form></body></html>';
@@ -647,7 +650,7 @@ function decryptPassword(keyId, encryptedB64) {
   }
 }
 
-function html(next, error, keyId, publicKey) {
+function html(next, error, keyId, publicKey, host) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
   const noJs = '<noscript><p class="warn">JavaScript is disabled — the password will be sent unencrypted. Enable JavaScript for encrypted sign-in.</p></noscript>'
     + '<p id="js-warn" class="warn" style="display:none">This browser has no WebCrypto (crypto.subtle) — the password will be sent unencrypted. Use a modern browser for encrypted sign-in.</p>';
@@ -677,10 +680,12 @@ function html(next, error, keyId, publicKey) {
     + 'h1{font-size:1.15rem;margin:0 0 1.2rem}label{display:block;font-size:.8rem;color:#666;margin:.8rem 0 .25rem}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px}'
     + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
-    + 'p.warn{background:#fdf3e0;border:1px solid #f0c36d;color:#8a6d1a;font-size:.8rem;padding:.5rem .7rem;border-radius:6px;margin:1rem 0 .2rem;line-height:1.4}</style>'
+    + 'p.warn{background:#fdf3e0;border:1px solid #f0c36d;color:#8a6d1a;font-size:.8rem;padding:.5rem .7rem;border-radius:6px;margin:1rem 0 .2rem;line-height:1.4}'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}</style>'
     + '</head><body>' + enc
     + '<form id="login" method="post" action="' + BASE + '/login">'
     + '<h1>Sign in to access this service</h1>'
+    + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
     + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err + noJs
     + '<input type="hidden" name="encrypted" id="encrypted">'
     + '<input type="hidden" name="keyId" id="keyId">'
@@ -721,7 +726,7 @@ createServer((req, res) => {
     const next = url.searchParams.get("next") || DEPLOY || "/";
     const { keyId, publicKey } = issueRsaKey();
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(html(next, "", keyId, publicKey));
+    res.end(html(next, "", keyId, publicKey, req.headers.host || ""));
     return;
   }
 
@@ -739,7 +744,7 @@ createServer((req, res) => {
           "Content-Type": "text/html",
           "Retry-After": String(Math.ceil((bannedUntil - Date.now()) / 1000)),
         });
-        res.end(html(next, "Too many failed attempts — account is temporarily locked."));
+        res.end(html(next, "Too many failed attempts — account is temporarily locked.", undefined, undefined, req.headers.host || ""));
         return;
       }
       let password = params.get("password") || "";
@@ -751,7 +756,7 @@ createServer((req, res) => {
           password = decryptPassword(keyId, encrypted);
         } catch {
           res.writeHead(401, { "Content-Type": "text/html" });
-          res.end(html(next, "Session expired — please reload and try again."));
+          res.end(html(next, "Session expired — please reload and try again.", undefined, undefined, req.headers.host || ""));
           return;
         }
       }
@@ -763,7 +768,7 @@ createServer((req, res) => {
       if (bad) {
         recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(html(next, "Invalid username or password."));
+        res.end(html(next, "Invalid username or password.", undefined, undefined, req.headers.host || ""));
         return;
       }
       clearFailures(name, ip);
@@ -774,7 +779,7 @@ createServer((req, res) => {
           "Content-Type": "text/html; charset=utf-8",
           "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
         });
-        res.end(totpPage(next));
+        res.end(totpPage(next, "", req.headers.host || ""));
         return;
       }
       setSession(res, name, next);
@@ -794,7 +799,7 @@ createServer((req, res) => {
       const name = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
       if (!name) {
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(totpPage(next, "Session expired — please sign in again."));
+        res.end(totpPage(next, "Session expired — please sign in again.", req.headers.host || ""));
         return;
       }
       const users = loadUsers();
@@ -802,7 +807,7 @@ createServer((req, res) => {
       if (!rec || !rec.totpSecret || !verifyTotp(rec.totpSecret, params.get("code") || "")) {
         recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(totpPage(next, "Invalid code."));
+        res.end(totpPage(next, "Invalid code.", req.headers.host || ""));
         return;
       }
       clearFailures(name, ip);

@@ -32,6 +32,8 @@ export interface GatewayHost {
   authMode?: GatewayAuthMode;
   /** htpasswd file for basic mode (per-host). */
   htpasswdFile?: string;
+  /** Auth realm (site) shown in the basic-auth browser prompt. */
+  site?: string;
   /** Backend scheme: "http" or "https" (detected by probing the app port).
    *  nginx proxy_pass uses this (https upstreams need proxy_ssl_verify off). */
   scheme?: "http" | "https";
@@ -135,7 +137,7 @@ export function generateHostNginx(
   const isOauth2 = authMode === "oauth2-proxy";
   const authLine =
     authMode === "basic"
-      ? `      auth_basic "service-tunnels";\n      auth_basic_user_file ${htpasswdFile};`
+      ? `      auth_basic "service-tunnels${h.site ? " " + h.site : ""}";\n      auth_basic_user_file ${htpasswdFile};`
       : isFwd || isOauth2
         ? `      auth_request /${authzPath};\n      error_page 401 @auth_redirect;`
         : ""; // "none" — plain proxy, no auth (but still logged)
@@ -525,7 +527,7 @@ export class GatewayController {
   async registerHost(
     host: string,
     port: number,
-    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[] },
+    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string },
   ): Promise<void> {
     const safe = this.#sanitizeHost(host);
     this.#hosts.set(safe, {
@@ -539,6 +541,7 @@ export class GatewayController {
       scheme: auth?.scheme,
       setup: auth?.setup,
       bypassPaths: auth?.bypassPaths,
+      site: auth?.site,
     });
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     this.#writeHostFile(this.#hosts.get(safe)!);
