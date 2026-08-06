@@ -1,6 +1,6 @@
 {
   "name": "service-tunnels",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
@@ -22,6 +22,7 @@
     "docs",
     "examples",
     "README.md",
+    "SECURITY.md",
     "CHANGELOG.md"
   ],
   "engines": {
