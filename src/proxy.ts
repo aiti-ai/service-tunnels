@@ -151,6 +151,8 @@ export interface ProxySiteBackend {
   basicGatewayPort?: number;
   /** per-site htpasswd file for the basic gate (decision-API verification). */
   htpasswdFile?: string;
+  /** 该 vhost 真实服务的 base path(per-binding 覆盖全局 serviceBasePath)。 */
+  serviceBasePath?: string;
 }
 
 /**
@@ -178,6 +180,8 @@ export interface ProxyOptions {
   allowedHosts?: string[];
   /** Strip this base path before forwarding (e.g. "/dev" → service sees "/"). */
   basePath?: string;
+  /** 真实服务的默认 base path(转发映射,见 mapServicePath)。 */
+  serviceBasePath?: string;
   /** Optional Basic password (empty = disabled). Open vhosts only. */
   password?: string;
   /**
@@ -278,6 +282,29 @@ export interface ServiceHostResolveContext {
   auth?: ProxyAuth;
   password?: string;
   basePath: string;
+  /** 真实服务的 base path(转发映射:URL 带 deployBasePath,服务端服务在 serviceBasePath)。 */
+  serviceBasePath?: string;
+}
+
+/**
+ * 转发路径映射:公共 URL 带 deployBasePath(/dev),真实服务服务于 serviceBasePath。
+ * 剥 deployBasePath 前缀 → 接 serviceBasePath;provider 路径(登录页等)不经过此
+ * 映射——它们直接 pipe 到 provider 端口,provider 已按 deployBasePath 合并监听。
+ * 例:deploy=/dev, svc="" → /dev/hello → /hello;svc=/app → /app/hello;svc=/dev → 不变。
+ */
+export function mapServicePath(url: string, deployBasePath: string, serviceBasePath: string): string {
+  const qIdx = url.indexOf("?");
+  const pathPart = qIdx >= 0 ? url.slice(0, qIdx) : url;
+  const query = qIdx >= 0 ? url.slice(qIdx) : "";
+  const deploy = (deployBasePath ?? "").replace(/\/+$/, "");
+  const svc = (serviceBasePath ?? "").replace(/\/+$/, "");
+  let p = pathPart || "/";
+  if (deploy) {
+    if (p === deploy) p = "/";
+    else if (p.startsWith(`${deploy}/`)) p = p.slice(deploy.length);
+  }
+  const out = svc ? `${svc}${p.startsWith("/") ? p : `/${p}`}` : (p || "/");
+  return out + query;
 }
 
 export async function resolveServiceHost(
@@ -306,7 +333,9 @@ export async function resolveServiceHost(
     // labeled / site-domain vhost 是应用的完整入口(如 pi-web 部署在 /dev):即使
     // open(无 auth)也原样转发,不 strip basePath——strip 仅用于裸 <port>.<suffix>
     // open vhost(部署前缀下的无 label 服务)
-    return { kind: "pipe", port: match.port, url: input.url ?? "/" };
+    // 转发到真实服务:剥 deployBasePath、接服务自身 base path(per-binding 优先)
+    const sb = backend.serviceBasePath ?? ctx.serviceBasePath ?? "";
+    return { kind: "pipe", port: match.port, url: mapServicePath(input.url ?? "/", ctx.basePath, sb) };
   } else {
     // open vhost → enrollment + optional global gates
     if (ctx.resolveSite) {
@@ -329,8 +358,7 @@ export async function resolveServiceHost(
     }
   }
 
-  const path = stripBasePath(input.url.split("?")[0] ?? "/", ctx.basePath)
-    + (input.url.includes("?") ? `?${input.url.split("?")[1]}` : "");
+  const path = mapServicePath(input.url ?? "/", ctx.basePath, ctx.serviceBasePath ?? "");
   return { kind: "forward", target: proxyTarget(match.port, path) };
 }
 
@@ -517,6 +545,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
   const {
     port = 4180,
     basePath = "",
+    serviceBasePath,
     password = "",
     auth,
     log = () => {},
@@ -564,6 +593,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
         auth,
         password,
         basePath,
+        serviceBasePath,
       },
     );
 
@@ -654,6 +684,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
           auth,
           password,
           basePath,
+          serviceBasePath,
         },
       );
       switch (decision.kind) {

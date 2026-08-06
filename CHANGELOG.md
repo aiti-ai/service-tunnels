@@ -16,7 +16,7 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
-## [0.3.13] - 2026-08-06
+## [0.3.15] - 2026-08-06
 
 ### Fixed
 - **oauth2 变体审核加固**：
@@ -29,6 +29,14 @@
   - 内置变体配置键统一 snake_case（oauth2-proxy TOML 约定：`github_org` /
     `gitlab_url` / `azure_tenant`，原 kebab 不生效）；`github_org` 等列表键
     写 TOML 数组。
+
+## [0.3.13] - 2026-08-06
+
+### Added
+- **serviceBasePath 转发映射**(`createServiceTunnels` / `ExposeOptions` / `mapServicePath`)：
+  外部只传 deployBasePath(URL 前缀,/dev)与 serviceBasePath(真实服务路径),转发时
+  库自动剥 deploy 前缀、接服务自身路径——provider 登录路径合并、显示 URL 带部署
+  前缀、路径映射全部库内处理,调用方不再自行拼接。
 
 ## [0.3.12] - 2026-08-06
 

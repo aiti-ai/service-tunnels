@@ -115,6 +115,8 @@ export interface ServiceTunnelsOptions extends DirOptions {
    * "/dev/portal/login" — plain "/portal/login" when unset.
    */
   deployBasePath?: string;
+  /** 真实服务的默认 base path(转发映射)。 */
+  serviceBasePath?: string;
 }
 
 export interface ToolResolution {
@@ -384,6 +386,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     baseDomain: primaryBase,
     baseDomains,
     basePath: (opts.deployBasePath ?? "").replace(/\/+$/, ""),
+    serviceBasePath: opts.serviceBasePath,
     registry: authRegistry,
     gateway,
     getSites: () => readSites(dirs.configDir),

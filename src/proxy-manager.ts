@@ -49,6 +49,8 @@ export interface ProxyBinding {
   providerParams?: Record<string, unknown>;
   /** 认证放行白名单（URL 路径前缀）：这些路径跳过认证直接转发应用。 */
   bypassPaths?: string[];
+  /** 该 vhost 真实服务的 base path(默认继承 ProxyManagerOptions.serviceBasePath)。 */
+  serviceBasePath?: string;
 }
 
 export interface ProxyManagerOptions {
@@ -69,6 +71,9 @@ export interface ProxyManagerOptions {
    *  (e.g. portal "/portal/login") are MERGED under it: "/dev/portal/login",
    *  plain "/portal/login" when unset. */
   basePath?: string;
+  /** 真实服务的默认 base path(转发映射,见 mapServicePath):URL 带 basePath
+   *  (/dev),服务端服务默认在根("/")。per-expose 可覆盖(ExposeOptions.serviceBasePath)。 */
+  serviceBasePath?: string;
   /** Optional Basic password gate for OPEN vhosts. */
   password?: string;
   /** Allow-list source (discovery). Default: allow all (caller must gate). */
@@ -289,6 +294,7 @@ export class ProxyManager {
       port: listenPort,
       suffixes: this.#allSuffixes,
       basePath: this.#opts.basePath,
+      serviceBasePath: this.#opts.serviceBasePath,
       password: this.#opts.password,
       isPortAllowed: this.#opts.isPortAllowed,
       resolveLabel: (label) => this.#resolveLabel(label),
@@ -332,6 +338,7 @@ export class ProxyManager {
       resolveSite: (p, site, label, vhost) => this.#resolveSite(p, site, label, vhost),
       password: this.#opts.password ?? "",
       basePath: this.#opts.basePath ?? "",
+      serviceBasePath: this.#opts.serviceBasePath,
     });
   }
 
@@ -399,7 +406,7 @@ export class ProxyManager {
           await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http", site: binding.site });
           this.#registered.add(key);
         }
-        return { basicGatewayPort: gw.port, htpasswdFile: htpasswd };
+        return { basicGatewayPort: gw.port, htpasswdFile: htpasswd, serviceBasePath: binding.serviceBasePath };
       }
       if (!this.#registered.has(key)) {
         await provider.registerHost(vhost, binding.policy);
@@ -420,7 +427,7 @@ export class ProxyManager {
         ...(o2Setup ? { setup: o2Setup } : {}),
         ...(binding.bypassPaths ? { bypassPaths: binding.bypassPaths } : {}),
       };
-      return { forwardAuth: fw };
+      return { forwardAuth: fw, serviceBasePath: binding.serviceBasePath };
     } catch (err) {
       log(`proxy: backend for ${vhost} failed: ${err instanceof Error ? err.message : String(err)}`);
       return null;

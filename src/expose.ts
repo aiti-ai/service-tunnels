@@ -82,6 +82,8 @@ export interface ExposeOptions {
   /** Skip starting the proxy transport (an embedder middleware serves vhosts
    *  in-process via resolve()); localUrl is then empty. Default: start. */
   startTransport?: boolean;
+  /** 该 vhost 真实服务的 base path(转发映射,默认继承构造 serviceBasePath)。 */
+  serviceBasePath?: string;
   /** 认证放行白名单（URL 路径前缀）：这些路径跳过认证直接转发应用
    *  （/health、/metrics 等公开端点）。proxy/nginx 双路径生效。 */
   bypassPaths?: string[];
@@ -351,11 +353,16 @@ async function proxyExpose(
     policy: opts.policy ? { policy: opts.policy } : undefined,
     providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
     ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
+    ...(opts.serviceBasePath ? { serviceBasePath: opts.serviceBasePath } : {}),
   });
+  // 部署前缀(deployBasePath,/dev)拼进对外 URL:路径路由部署下浏览器需带前缀到达
+  // 正确实例;转发时 mapServicePath 剥前缀并接服务自身 serviceBasePath。
+  const deploy = (proxy.basePath ?? "").replace(/\/+$/, "");
+  const withDeploy = (u: string | undefined) => (u && deploy ? `${u}${deploy}` : u);
   const localUrl = transportPort ? `http://${proxy.vhost(port, label)}:${transportPort}` : "";
   const baseVhost = proxy.baseVhost(port, label);
-  const baseUrl = baseVhost ? `http://${baseVhost}` : undefined;
-  const domainUrl = siteCfg?.domain ? `http://${port}.${siteCfg.domain.replace(/^\./, "")}` : undefined;
+  const baseUrl = withDeploy(baseVhost ? `http://${baseVhost}` : undefined);
+  const domainUrl = withDeploy(siteCfg?.domain ? `http://${port}.${siteCfg.domain.replace(/^\./, "")}` : undefined);
   log(`expose ${port} (proxy): ${localUrl}${baseUrl ? ` / ${baseUrl}` : ""}${domainUrl ? ` / ${domainUrl}` : ""}${authRequested ? ` (auth via ${providerType}, site ${site || "default"})` : " (open)"}`);
   return {
     url: null,
