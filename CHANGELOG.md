@@ -9,6 +9,26 @@
 
 ## [Unreleased]
 
+## [0.3.27] - 2026-08-07
+
+### Added
+- **多语支持(国际化 npm 包,零依赖)**:新增 `src/i18n.ts`(自实现 catalog
+  lookup,不引 i18n 库):
+  - **数据默认英文**:schema 字段(label/description/placeholder/linkTitle)
+    与 CLI/UI 文案默认英文;中文(及未来语言)由语言包覆盖。
+  - 语言探测:CLI `--lang <zh|en>` / `LANG`/`LC_ALL`(zh* → 中文);API
+    `?lang=` 或 Accept-Language;默认英文。
+  - `ParamSpec` 增加 `labelKey`/`descriptionKey`/`placeholderKey`/
+    `linkTitleKey`(withSchemaI18nKeys 自动注入,与文案解耦),调用方可按
+    id 用自己的 i18n 翻译。
+  - CLI usage/提示、daemon 管理面板(ui.ts)全部按语言渲染。
+  - 导出:`t` / `resolveLang` / `localizeSpecs` / `localizeSchemas` /
+    `withSchemaI18nKeys` / `CATALOG` / `Lang`。
+
+### Changed
+- `st.schemas.tunnels()/tunnel()/authProviders()` 与 daemon `schemas` RPC
+  接受 `lang` 参数(默认 en)。
+
 ## [0.3.26] - 2026-08-07
 
 ### Changed

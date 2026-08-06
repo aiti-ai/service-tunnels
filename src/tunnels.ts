@@ -3,6 +3,7 @@ import { promises as dns } from "node:dns";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
+import { withSchemaI18nKeys } from "./i18n.ts";
 import { validateTunnelConfig } from "./validation.ts";
 import {
   customTunnelTemplates,
@@ -665,7 +666,14 @@ export interface ParamSpec {
   default?: string | number | boolean;
   placeholder?: string;
   required?: boolean;
-  options?: Array<{ value: string; label?: string }>;
+  options?: Array<{ value: string; label?: string; labelKey?: string }>;
+  // 多语(0.3.27+):稳定翻译 id,由 withSchemaI18nKeys() 自动注入——
+  // 调用方按 id 翻译,未命中回退内置中文。形态
+  //   tunnel.<type>.<key>.label / auth.<type>.<key>.description / ...
+  labelKey?: string;
+  descriptionKey?: string;
+  placeholderKey?: string;
+  linkTitleKey?: string;
 }
 
 /** Tunnel-type parameter schemas (data-driven forms; the only place a tunnel
@@ -674,81 +682,81 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
   ngrok: [
     {
       key: "domain",
-      label: "固定域名",
-      description: "绑定固定域名(需 ngrok 账号支持);留空用随机域名",
+      label: "Fixed domain",
+      description: "Bind a fixed domain (requires an ngrok account); leave empty for a random domain",
       placeholder: "myapp.ngrok-free.app",
     },
     {
       key: "token",
       type: "password",
       label: "Authtoken",
-      description: "未认证的 ngrok 会直接退出(ERR_NGROK_4018);token 注入 NGROK_AUTHTOKEN",
+      description: "Unauthenticated ngrok exits immediately (ERR_NGROK_4018); the token is injected via NGROK_AUTHTOKEN",
       link: "https://dashboard.ngrok.com/get-started/your-authtoken",
-      linkTitle: "获取 token",
+      linkTitle: "Get token",
     },
   ],
   frpc: [
     {
       key: "server",
-      label: "frps 地址",
+      label: "frps address",
       default: "127.0.0.1:7000",
       description: "frps server host:port",
       placeholder: "frp.example.com:7000",
     },
-    { key: "token", type: "password", label: "Token", description: "frps 共享 token(可选)" },
-    { key: "domain", label: "自定义域名", description: "custom_domains;留空用 localhost", placeholder: "app.example.com" },
+    { key: "token", type: "password", label: "Token", description: "frps shared token (optional)" },
+    { key: "domain", label: "Custom domain", description: "custom_domains; leave empty for localhost", placeholder: "app.example.com" },
   ],
   ssh: [
-    { key: "host", label: "SSH 服务器", required: true, placeholder: "目标服务器", description: "ssh -R 目标服务器(必填,转发到该服务器公网端口;自建/云主机均可)" },
-    { key: "user", label: "用户名", placeholder: "wind", description: "user@host;留空用当前用户" },
-    { key: "port", type: "number", label: "SSH 端口", default: 22, description: "ssh -p" },
-    { key: "remotePort", type: "number", label: "远程端口", description: "-R <remotePort>:127.0.0.1:<target>;留空=target" },
+    { key: "host", label: "SSH server", required: true, placeholder: "target server", description: "ssh -R target server (required; forwards to the server's public port; self-hosted or cloud)" },
+    { key: "user", label: "Username", placeholder: "wind", description: "user@host; leave empty for the current user" },
+    { key: "port", type: "number", label: "SSH port", default: 22, description: "ssh -p" },
+    { key: "remotePort", type: "number", label: "Remote port", description: "-R <remotePort>:127.0.0.1:<target>; empty = target" },
   ],
   serveo: [
-    { key: "host", label: "serveo 镜像", default: "serveo.net" },
-    { key: "user", label: "用户名" },
-    { key: "port", type: "number", label: "SSH 端口", default: 22 },
+    { key: "host", label: "serveo mirror", default: "serveo.net" },
+    { key: "user", label: "Username" },
+    { key: "port", type: "number", label: "SSH port", default: 22 },
   ],
   cloudflared: [
-    { key: "domain", label: "Hostname", description: "命名隧道主机名;留空=随机 trycloudflare", placeholder: "app.example.com" },
+    { key: "domain", label: "Hostname", description: "Named-tunnel hostname; leave empty for a random trycloudflare", placeholder: "app.example.com" },
   ],
   natapp: [
     {
       key: "token",
       type: "password",
       label: "Authtoken",
-      description: "natapp 认证令牌(注册后从隧道列表复制);客户端需先经官网安装脚本下载",
+      description: "natapp auth token (copy from your tunnel list after registering); the client must be installed via the official script",
       link: "https://natapp.cn/download",
-      linkTitle: "下载客户端 + 获取 token",
+      linkTitle: "Download client + get token",
     },
     {
       key: "domain",
-      label: "自定义域名",
-      description: "绑定固定域名(需 VIP);留空用随机域名",
+      label: "Custom domain",
+      description: "Bind a fixed domain (requires VIP); leave empty for a random domain",
       placeholder: "xxx.natappfree.cc",
     },
     {
       key: "server",
-      label: "服务器",
-      description: "VIP 绑定自定义域名时填分配的服务器(可选)",
+      label: "Server",
+      description: "Assigned server for VIP custom domains (optional)",
       placeholder: "server.natapp.cc",
     },
   ],
   localtunnel: [
-    { key: "domain", label: "Subdomain", description: "固定子域名;留空=随机" },
+    { key: "domain", label: "Subdomain", description: "Fixed subdomain; leave empty for a random one" },
   ],
   bore: [
     {
       key: "server",
       label: "bore server",
       default: "bore.pub",
-      description: "bore server 地址(host 或 host:port);默认 bore.pub:7835(公共服务器,免注册);自建填你的服务器 IP:端口(如 1.2.3.4:7835)",
+      description: "bore server address (host or host:port); default bore.pub:7835 (public, no account); self-hosted: use your server IP:port",
     },
-    { key: "remotePort", type: "number", label: "远程端口", description: "-p 请求固定端口;留空=server 随机分配" },
-    { key: "token", type: "password", label: "Secret", description: "-s 共享密钥;server 未设 secret 则留空" },
+    { key: "remotePort", type: "number", label: "Remote port", description: "-p requests a fixed port; empty = server-assigned" },
+    { key: "token", type: "password", label: "Secret", description: "-s shared secret; leave empty if the server has none" },
   ],
   command: [
-    { key: "cmd", label: "命令", required: true, description: "任意 shell 命令;URL 从输出解析", placeholder: "ssh -R 80:127.0.0.1:<port> serveo.net" },
+    { key: "cmd", label: "Command", required: true, description: "Any shell command; the public URL is parsed from output", placeholder: "ssh -R 80:127.0.0.1:<port> serveo.net" },
   ],
 };
 
@@ -760,14 +768,19 @@ export function tunnelSupportsRandomDomain(type: TunnelType): boolean {
 /** Param schema for one tunnel type ([] when unknown). Custom command tunnel
  *  types (env-registered) generate their schema from the template. */
 export function tunnelParamSchema(type: string): ParamSpec[] {
-  if (type in TUNNEL_PARAM_SCHEMAS) return TUNNEL_PARAM_SCHEMAS[type as TunnelType];
-  return customTunnelParamSchema(customTunnelTemplates()[type] ?? "");
+  const specs = type in TUNNEL_PARAM_SCHEMAS
+    ? TUNNEL_PARAM_SCHEMAS[type as TunnelType]
+    : customTunnelParamSchema(customTunnelTemplates()[type] ?? "");
+  return withSchemaI18nKeys("tunnel", type, specs);
 }
 
 /** All tunnel-type param schemas (keyed by type): built-ins + user-registered
  *  custom command tunnels (SERVICE_TUNNELS_TUNNEL_COMMAND_*). */
 export function tunnelParamSchemas(): Record<string, ParamSpec[]> {
-  return { ...TUNNEL_PARAM_SCHEMAS, ...customTunnelParamSchemas() };
+  const all = { ...TUNNEL_PARAM_SCHEMAS, ...customTunnelParamSchemas() };
+  return Object.fromEntries(
+    Object.entries(all).map(([type, specs]) => [type, withSchemaI18nKeys("tunnel", type, specs)]),
+  );
 }
 
 /** Per-type UI metadata. `favorite` marks zero-account / few-params /

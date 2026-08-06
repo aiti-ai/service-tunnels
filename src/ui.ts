@@ -17,6 +17,7 @@ import { platform } from "os";
 import { exec } from "child_process";
 import type { ServiceTunnels } from "./index.ts";
 import type { AuthUser } from "./auth-provider.ts";
+import { t, resolveLang, CATALOG, type Lang } from "./i18n.ts";
 import { validateTunnelConfig } from "./validation.ts";
 
 export interface UiServerOptions {
@@ -36,8 +37,10 @@ interface UiContext {
 
 /** Simple HTML templates (no template engine dependency). */
 const TEMPLATES = {
-  layout: (title: string, content: string, csrf: string) => `<!DOCTYPE html>
-<html lang="zh-CN">
+  layout: (lang: Lang, title: string, content: string, csrf: string) => {
+    const L = (k: string, params?: Record<string, string>) => t(lang, k, params);
+    return `<!DOCTYPE html>
+<html lang="${lang === "zh" ? "zh-CN" : "en"}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -81,19 +84,22 @@ const TEMPLATES = {
 <body>
   <div class="container">
     <div class="header">
-      <h1>🚀 service-tunnels 管理面板</h1>
+      <h1>🚀 ${L("ui.title")}</h1>
       <div class="nav">
-        <a href="/" class="${content.includes("dashboard") ? "active" : ""}">概览</a>
-        <a href="/tunnels" class="${content.includes("tunnels") ? "active" : ""}">隧道管理</a>
-        <a href="/users" class="${content.includes("users") ? "active" : ""}">用户管理</a>
-        <a href="/sites" class="${content.includes("sites") ? "active" : ""}">站点管理</a>
-        <a href="/config" class="${content.includes("config") ? "active" : ""}">配置</a>
-        <a href="/expose" class="${content.includes("expose") ? "active" : ""}">快速暴露</a>
+        <a href="/" class="${content.includes("dashboard") ? "active" : ""}">${L("ui.nav.dashboard")}</a>
+        <a href="/tunnels" class="${content.includes("tunnels") ? "active" : ""}">${L("ui.nav.tunnels")}</a>
+        <a href="/users" class="${content.includes("users") ? "active" : ""}">${L("ui.nav.users")}</a>
+        <a href="/sites" class="${content.includes("sites") ? "active" : ""}">${L("ui.nav.sites")}</a>
+        <a href="/config" class="${content.includes("config") ? "active" : ""}">${L("ui.nav.config")}</a>
+        <a href="/expose" class="${content.includes("expose") ? "active" : ""}">${L("ui.nav.expose")}</a>
       </div>
     </div>
     ${content}
   </div>
   <script>
+    // 注入当前语言的 UI 文案字典(浏览器端 prompt/confirm/alert 用)
+    const UI_MSG = ${JSON.stringify(CATALOG[lang])};
+    function tr(k, p) { let m = UI_MSG[k] || k; if (p) { for (const [kk, vv] of Object.entries(p)) m = m.split('{' + kk + '}').join(vv); } return m; }
     function csrfToken() { return document.querySelector('meta[name="csrf-token"]')?.content || ''; }
     function httpPost(url, data) {
       return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() }, body: JSON.stringify(data) });
@@ -102,24 +108,24 @@ const TEMPLATES = {
       httpPost('/tunnels/' + encodeURIComponent(name) + '/toggle').then(() => location.reload());
     }
     function removeTunnel(name) {
-      if (confirm('确定删除隧道 ' + name + '?')) {
+      if (confirm(tr('ui.confirmDeleteTunnel', { name }))) {
         httpPost('/tunnels/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
       }
     }
     function addUser() {
-      const name = prompt('用户名:');
+      const name = prompt(tr('ui.promptUsername'));
       if (!name) return;
-      const password = prompt('密码:');
+      const password = prompt(tr('ui.promptPassword'));
       if (!password) return;
       httpPost('/users/add', { name, password }).then(() => location.reload());
     }
     function removeUser(name) {
-      if (confirm('确定删除用户 ' + name + '?')) {
+      if (confirm(tr('ui.confirmDeleteUser', { name }))) {
         httpPost('/users/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
       }
     }
     function setPassword(name) {
-      const password = prompt('新密码:');
+      const password = prompt(tr('ui.promptNewPassword'));
       if (!password) return;
       httpPost('/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
     }
@@ -127,161 +133,173 @@ const TEMPLATES = {
       httpPost('/users/' + encodeURIComponent(name) + '/totp-enroll').then(r => r.json()).then(data => {
         const otpauth = data.otpauthUrl || '';
         const secret = data.secret || '';
-        const show = '为 ' + name + ' 启用 2FA:\n\n' +
-          '在 Authenticator 应用中添加:\n' + otpauth + '\n\n' +
-          (secret ? '或手动输入密钥: ' + secret + '\n\n' : '') +
-          '输入 6 位验证码以激活:'; 
+        const show = tr('ui.totpEnrollTitle', { name, otpauth, secretHint: secret ? tr('ui.totpEnrollSecretHint', { secret }) : '' }) + '\n' + tr('ui.totpEnrollEnterCode');
         const code = prompt(show);
         if (code) {
           httpPost('/users/' + encodeURIComponent(name) + '/totp-activate', { code }).then(r => r.json()).then(d => {
-            alert(d.activated ? '✅ 2FA 已激活' : '❌ 验证码错误,请重试');
+            alert(d.activated ? tr('ui.totpActivated') : tr('ui.totpCodeWrong'));
             location.reload();
           });
         }
       });
     }
     function disableTotp(name) {
-      if (confirm('确定禁用 2FA?')) {
+      if (confirm(tr('ui.confirmDisableTotp'))) {
         httpPost('/users/' + encodeURIComponent(name) + '/totp-disable').then(() => location.reload());
       }
     }
     function addSite() {
-      const name = prompt('站点名（小写字母/数字/短横线，如 host）:');
+      const name = prompt(tr('ui.promptSiteName'));
       if (!name) return;
-      const provider = prompt('认证 provider（portal/authelia/basic/oauth2-proxy，回车=auto）:') || '';
-      const domain = prompt('站点域名（可选，如 web.example.com）:') || '';
+      const provider = prompt(tr('ui.promptSiteProvider')) || '';
+      const domain = prompt(tr('ui.promptSiteDomain')) || '';
       const body = { name, provider, domain };
       httpPost('/api/sites/add', body).then(r => r.json()).then(d => {
         if (d.error) { alert('❌ ' + d.error); } else { location.reload(); }
       });
     }
     function removeSite(name) {
-      if (confirm('确定删除站点 ' + name + '?')) {
+      if (confirm(tr('ui.confirmDeleteSite', { name }))) {
         httpPost('/sites/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
       }
     }
     function siteAddUser(site) {
-      const name = prompt('用户名:');
+      const name = prompt(tr('ui.promptUsername'));
       if (!name) return;
-      const password = prompt('密码:');
+      const password = prompt(tr('ui.promptPassword'));
       if (!password) return;
       httpPost('/sites/' + encodeURIComponent(site) + '/users/add', { name, password }).then(() => location.reload());
     }
     function siteRemoveUser(site, name) {
-      if (confirm('确定删除 ' + site + ' 的用户 ' + name + '?')) {
+      if (confirm(tr('ui.confirmDeleteSiteUser', { site, name }))) {
         httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
       }
     }
     function siteSetPassword(site, name) {
-      const password = prompt('新密码:');
+      const password = prompt(tr('ui.promptNewPassword'));
       if (!password) return;
       httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
     }
   </script>
 </body>
-</html>`,
+</html>`;
+  },
 
-  dashboard: (daemonRunning: boolean, tunnelCount: number, userCount: number) => `
+  dashboard: (lang: Lang, daemonRunning: boolean, tunnelCount: number, userCount: number) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>系统状态</h2>
-      <p>守护进程: <span class="status ${daemonRunning ? "running" : "stopped"}">${daemonRunning ? "运行中" : "已停止"}</span></p>
-      <p>活跃隧道: ${tunnelCount} 个</p>
-      <p>注册用户: ${userCount} 个</p>
+      <h2>${L("ui.dash.systemStatus")}</h2>
+      <p>${L("ui.dash.daemon")} <span class="status ${daemonRunning ? "running" : "stopped"}">${daemonRunning ? L("ui.status.running") : L("ui.status.stopped")}</span></p>
+      <p>${L("ui.dash.activeTunnels", { n: String(tunnelCount) })}</p>
+      <p>${L("ui.dash.registeredUsers", { n: String(userCount) })}</p>
     </div>
     <div class="card">
-      <h2>快速操作</h2>
-      <button class="btn btn-primary" onclick="location.href='/expose'">暴露端口</button>
-      <button class="btn btn-primary" onclick="location.href='/tunnels'">管理隧道</button>
-      <button class="btn btn-primary" onclick="location.href='/users'">管理用户</button>
+      <h2>${L("ui.dash.quickActions")}</h2>
+      <button class="btn btn-primary" onclick="location.href='/expose'">${L("ui.dash.exposePort")}</button>
+      <button class="btn btn-primary" onclick="location.href='/tunnels'">${L("ui.dash.manageTunnels")}</button>
+      <button class="btn btn-primary" onclick="location.href='/users'">${L("ui.dash.manageUsers")}</button>
     </div>
-  `,
+  `;
+  },
 
-  tunnels: (tunnels: any[]) => `
+  tunnels: (lang: Lang, tunnels: any[]) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>隧道列表</h2>
+      <h2>${L("ui.tunnels.list")}</h2>
       <table class="table">
         <thead>
           <tr>
-            <th>名称</th>
-            <th>类型</th>
-            <th>状态</th>
+            <th>${L("ui.th.name")}</th>
+            <th>${L("ui.th.type")}</th>
+            <th>${L("ui.th.status")}</th>
             <th>URL</th>
-            <th>操作</th>
+            <th>${L("ui.th.actions")}</th>
           </tr>
         </thead>
         <tbody>
-          ${tunnels.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:#999;">暂无隧道</td></tr>' : ""}
+          ${tunnels.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.tunnels")}</td></tr>` : ""}
           ${tunnels.map((t: any) => `
             <tr>
               <td>${t.name}</td>
-              <td>${t.type}${t.favorite ? ' <span class="badge favorite">推荐</span>' : ''}</td>
-              <td><span class="status ${t.running ? 'running' : 'stopped'}">${t.running ? '运行中' : '已停止'}</span></td>
+              <td>${t.type}${t.favorite ? ` <span class="badge favorite">${L("ui.badge.favorite")}</span>` : ''}</td>
+              <td><span class="status ${t.running ? 'running' : 'stopped'}">${t.running ? L("ui.status.running") : L("ui.status.stopped")}</span></td>
               <td>${t.url || '-'}</td>
               <td>
-                <button class="btn btn-sm btn-primary" onclick="toggleTunnel('${t.name}')">${t.running ? '停止' : '启动'}</button>
-                <button class="btn btn-sm btn-danger" onclick="removeTunnel('${t.name}')">删除</button>
+                <button class="btn btn-sm btn-primary" onclick="toggleTunnel('${t.name}')">${t.running ? L("ui.btn.stop") : L("ui.btn.start")}</button>
+                <button class="btn btn-sm btn-danger" onclick="removeTunnel('${t.name}')">${L("ui.btn.delete")}</button>
               </td>
             </tr>
           `).join('')}
         </tbody>
       </table>
       <div style="margin-top: 15px;">
-        <a href="/tunnels/add" class="btn btn-primary">添加隧道</a>
+        <a href="/tunnels/add" class="btn btn-primary">${L("ui.btn.addTunnel")}</a>
       </div>
     </div>
-  `,
+  `;
+  },
 
-  users: (users: AuthUser[], totpStatus: Record<string, boolean>) => `
+  users: (lang: Lang, users: AuthUser[], totpStatus: Record<string, boolean>) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>用户列表</h2>
+      <h2>${L("ui.users.list")}</h2>
       <table class="table">
         <thead>
           <tr>
-            <th>用户名</th>
-            <th>显示名</th>
+            <th>${L("ui.th.username")}</th>
+            <th>${L("ui.th.displayName")}</th>
             <th>2FA</th>
-            <th>操作</th>
+            <th>${L("ui.th.actions")}</th>
           </tr>
         </thead>
         <tbody>
-          ${users.length === 0 ? '<tr><td colspan="4" style="text-align:center;color:#999;">暂无用户</td></tr>' : ""}
+          ${users.length === 0 ? `<tr><td colspan="4" style="text-align:center;color:#999;">${L("ui.empty.users")}</td></tr>` : ""}
           ${users.map((u: AuthUser) => `
             <tr>
               <td>${u.name}</td>
               <td>${u.displayName || u.name}</td>
-              <td>${totpStatus[u.name] ? '<span class="status running">已启用</span>' : '<span class="status stopped">未启用</span>'}</td>
+              <td>${totpStatus[u.name] ? `<span class="status running">${L("ui.status.enabled")}</span>` : `<span class="status stopped">${L("ui.status.disabled")}</span>`}</td>
               <td>
-                <button class="btn btn-sm btn-primary" onclick="setPassword('${u.name}')">改密</button>
+                <button class="btn btn-sm btn-primary" onclick="setPassword('${u.name}')">${L("ui.btn.setPassword")}</button>
                 ${totpStatus[u.name]
-                  ? `<button class="btn btn-sm btn-danger" onclick="disableTotp('${u.name}')">禁用2FA</button>`
-                  : `<button class="btn btn-sm btn-primary" onclick="enrollTotp('${u.name}')">启用2FA</button>`
+                  ? `<button class="btn btn-sm btn-danger" onclick="disableTotp('${u.name}')">${L("ui.btn.disableTotp")}</button>`
+                  : `<button class="btn btn-sm btn-primary" onclick="enrollTotp('${u.name}')">${L("ui.btn.enableTotp")}</button>`
                 }
-                <button class="btn btn-sm btn-danger" onclick="removeUser('${u.name}')">删除</button>
+                <button class="btn btn-sm btn-danger" onclick="removeUser('${u.name}')">${L("ui.btn.delete")}</button>
               </td>
             </tr>
           `).join('')}
         </tbody>
       </table>
       <div style="margin-top: 15px;">
-        <button class="btn btn-primary" onclick="addUser()">添加用户</button>
+        <button class="btn btn-primary" onclick="addUser()">${L("ui.btn.addUser")}</button>
       </div>
     </div>
-  `,
+  `;
+  },
 
-  config: (config: any) => `
+  config: (lang: Lang, config: any) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>当前配置</h2>
+      <h2>${L("ui.config.title")}</h2>
       <pre>${JSON.stringify(config, null, 2)}</pre>
     </div>
-  `,
+  `;
+  },
 
-  sites: (sites: any[], exposes: any[]) => `
+  sites: (lang: Lang, sites: any[], exposes: any[]) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>站点列表（认证域）</h2>
-      <p style="color:#666;font-size:13px;margin-bottom:12px;">每个站点 = 独立的 provider 实例 + 用户库，互不共享。虚拟主机：<code>&lt;port&gt;-&lt;label&gt;.st.localhost</code></p>
+      <h2>${L("ui.sites.title")}</h2>
+      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.sites.hint")}</p>
       <table class="table">
         <thead>
-          <tr><th>站点</th><th>provider</th><th>认证</th><th>域名</th><th>状态</th><th>地址</th><th>操作</th></tr>
+          <tr><th>${L("ui.th.site")}</th><th>provider</th><th>${L("ui.th.auth")}</th><th>${L("ui.th.domain")}</th><th>${L("ui.th.status")}</th><th>${L("ui.th.addr")}</th><th>${L("ui.th.actions")}</th></tr>
         </thead>
         <tbody>
           ${sites.map((s: any) => {
@@ -291,93 +309,99 @@ const TEMPLATES = {
               s.domainUrl && `<code>${s.domainUrl}</code>`,
             ].filter(Boolean);
             return `<tr>
-              <td><strong>${s.name}</strong>${s.name === "default" ? ' <span class="badge">默认</span>' : ""}</td>
+              <td><strong>${s.name}</strong>${s.name === "default" ? ` <span class="badge">${L("ui.badge.default")}</span>` : ""}</td>
               <td>${s.provider || "auto"}</td>
-              <td>${s.auth === false ? "开放" : s.policy ? `认证(${s.policy})` : "认证"}</td>
+              <td>${s.auth === false ? L("ui.auth.open") : s.policy ? `${L("ui.auth.yes")}(${s.policy})` : L("ui.auth.yes")}</td>
               <td>${s.domain || "-"}</td>
-              <td><span class="status ${s.running ? "running" : "stopped"}">${s.running ? "运行中" : "未启动"}</span></td>
+              <td><span class="status ${s.running ? "running" : "stopped"}">${s.running ? L("ui.status.running") : L("ui.status.notStarted")}</span></td>
               <td>${urls.length ? urls.join("<br>") : "-"}</td>
               <td>
-                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/users">用户</a>
-                ${s.name !== "default" ? `<button class="btn btn-sm btn-danger" onclick="removeSite('${s.name}')">删除</button>` : ""}
+                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/users">${L("ui.btn.users")}</a>
+                ${s.name !== "default" ? `<button class="btn btn-sm btn-danger" onclick="removeSite('${s.name}')">${L("ui.btn.delete")}</button>` : ""}
               </td>
             </tr>`;
           }).join("")}
         </tbody>
       </table>
       <div style="margin-top:15px;">
-        <button class="btn btn-primary" onclick="addSite()">添加站点</button>
-        <span style="color:#999;font-size:12px;margin-left:8px;">如：<code>site add host --provider portal --domain web.example.com</code></span>
+        <button class="btn btn-primary" onclick="addSite()">${L("ui.btn.addSite")}</button>
+        <span style="color:#999;font-size:12px;margin-left:8px;">${L("ui.sites.example")} <code>site add host --provider portal --domain web.example.com</code></span>
       </div>
     </div>
     <div class="card">
-      <h2>本地暴露（proxy 模式）</h2>
+      <h2>${L("ui.sites.localExposes")}</h2>
       <table class="table">
-        <thead><tr><th>端口</th><th>站点</th><th>provider</th><th>本地地址</th><th>base 域名</th></tr></thead>
+        <thead><tr><th>${L("ui.th.port")}</th><th>${L("ui.th.site")}</th><th>provider</th><th>${L("ui.th.localAddr")}</th><th>${L("ui.th.baseDomain")}</th></tr></thead>
         <tbody>
-          ${exposes.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:#999;">暂无 proxy 暴露</td></tr>' : ""}
+          ${exposes.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.exposes")}</td></tr>` : ""}
           ${exposes.map((e: any) => `<tr>
             <td>${e.port}</td>
             <td>${e.site || "-"}</td>
-            <td>${e.provider || "开放"}</td>
+            <td>${e.provider || L("ui.auth.open")}</td>
             <td><code>${e.localUrl || "-"}</code></td>
             <td><code>${e.baseUrl || e.domainUrl || "-"}</code></td>
           </tr>`).join("")}
         </tbody>
       </table>
     </div>
-  `,
+  `;
+  },
 
-  siteUsers: (site: any, users: AuthUser[]) => `
+  siteUsers: (lang: Lang, site: any, users: AuthUser[]) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>站点 ${site.name} · 用户管理</h2>
-      <p style="color:#666;font-size:13px;margin-bottom:12px;">该站点（provider: ${site.provider || "auto"}）的独立用户库——与其它站点互不影响。</p>
+      <h2>${L("ui.siteUsers.title", { name: site.name })}</h2>
+      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.siteUsers.hint", { provider: site.provider || "auto" })}</p>
       <table class="table">
-        <thead><tr><th>用户名</th><th>显示名</th><th>操作</th></tr></thead>
+        <thead><tr><th>${L("ui.th.username")}</th><th>${L("ui.th.displayName")}</th><th>${L("ui.th.actions")}</th></tr></thead>
         <tbody>
-          ${users.length === 0 ? '<tr><td colspan="3" style="text-align:center;color:#999;">暂无用户</td></tr>' : ""}
+          ${users.length === 0 ? `<tr><td colspan="3" style="text-align:center;color:#999;">${L("ui.empty.users")}</td></tr>` : ""}
           ${users.map((u: AuthUser) => `<tr>
             <td>${u.name}</td>
             <td>${u.displayName || u.name}</td>
             <td>
-              <button class="btn btn-sm btn-primary" onclick="siteSetPassword('${site.name}','${u.name}')">改密</button>
-              <button class="btn btn-sm btn-danger" onclick="siteRemoveUser('${site.name}','${u.name}')">删除</button>
+              <button class="btn btn-sm btn-primary" onclick="siteSetPassword('${site.name}','${u.name}')">${L("ui.btn.setPassword")}</button>
+              <button class="btn btn-sm btn-danger" onclick="siteRemoveUser('${site.name}','${u.name}')">${L("ui.btn.delete")}</button>
             </td>
           </tr>`).join("")}
         </tbody>
       </table>
       <div style="margin-top:15px;">
-        <button class="btn btn-primary" onclick="siteAddUser('${site.name}')">添加用户</button>
-        <a href="/sites" class="btn" style="background:#eee;color:#333;">返回站点列表</a>
+        <button class="btn btn-primary" onclick="siteAddUser('${site.name}')">${L("ui.btn.addUser")}</button>
+        <a href="/sites" class="btn" style="background:#eee;color:#333;">${L("ui.btn.back")}</a>
       </div>
     </div>
-  `,
+  `;
+  },
 
-  expose: (sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[]) => `
+  expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[]) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>快速暴露端口</h2>
+      <h2>${L("ui.expose.title")}</h2>
       <form id="exposeForm" style="max-width: 400px;">
         <div class="form-group">
-          <label>本地端口</label>
-          <input type="number" name="port" class="form-control" required placeholder="例如: 3000">
+          <label>${L("ui.label.localPort")}</label>
+          <input type="number" name="port" class="form-control" required placeholder="${L("ui.placeholder.port")}">
         </div>
         <div class="form-group">
-          <label>模式</label>
+          <label>${L("ui.label.mode")}</label>
           <select name="mode" class="form-control">
-            <option value="tunnel">tunnel（公网隧道）</option>
-            <option value="proxy">proxy（本地虚拟主机，无隧道）</option>
-            <option value="both">both（两者）</option>
+            <option value="tunnel">${L("ui.option.tunnel")}</option>
+            <option value="proxy">${L("ui.option.proxy")}</option>
+            <option value="both">${L("ui.option.both")}</option>
           </select>
         </div>
         <div class="form-group">
-          <label>认证方式</label>
+          <label>${L("ui.label.auth")}</label>
           <select name="auth" id="authType" class="form-control">
-            <option value="auto">auto（自动选择）</option>
-            <option value="none">none（无认证）</option>
+            <option value="auto">${L("ui.option.auto")}</option>
+            <option value="none">${L("ui.option.none")}</option>
             ${authOrder.map((t) => {
               const meta = authMetas[t] || {};
               const badge = meta.kind === "oauth2-variant"
-                ? (meta.configured ? " ✓已配置" : (meta.needsInput?.length ? " (缺: " + meta.needsInput.join("/") + ")" : ""))
+                ? (meta.configured ? ` ${L("ui.meta.configured")}` : (meta.needsInput?.length ? ` (${L("ui.meta.needsInput")} ` + meta.needsInput.join("/") + ")" : ""))
                 : "";
               return `<option value="${t}">${meta.label || t}${badge}</option>`;
             }).join("")}
@@ -385,24 +409,24 @@ const TEMPLATES = {
         </div>
         <div id="authParamFields"></div>
         <div class="form-group">
-          <label>站点（认证域）</label>
+          <label>${L("ui.label.site")}</label>
           <select name="site" class="form-control">
-            <option value="">default（默认）</option>
+            <option value="">${L("ui.option.default")}</option>
             ${sites.map((s: string) => `<option value="${s}">${s}</option>`).join("")}
           </select>
         </div>
         <div class="form-group">
-          <label>隧道类型（tunnel/both 模式）</label>
+          <label>${L("ui.label.tunnelType")}</label>
           <select name="tunnel" class="form-control">
             <option value="ngrok">ngrok</option>
-            <option value="cloudflared">cloudflared（推荐）</option>
+            <option value="cloudflared">${L("ui.option.cloudflared")}</option>
             <option value="serveo">serveo</option>
             <option value="localtunnel">localtunnel</option>
             <option value="bore">bore</option>
             <option value="natapp">natapp</option>
           </select>
         </div>
-        <button type="submit" class="btn btn-primary">暴露</button>
+        <button type="submit" class="btn btn-primary">${L("ui.btn.expose")}</button>
       </form>
       <div id="result" style="margin-top: 15px;"></div>
     </div>
@@ -420,10 +444,10 @@ const TEMPLATES = {
         // 显示「已设置」提示；留空提交 = 回落配置档值，填写 = 覆盖
         const secretSet = s.type === 'password' && s.secretSet;
         const secretNote = secretSet
-          ? '<div style="color:#2da44e;font-size:12px;margin-top:4px;">已由配置档提供（页面不回显）；留空使用配置档值，填写则覆盖</div>'
+          ? '<div style="color:#2da44e;font-size:12px;margin-top:4px;">' + tr('ui.secretProvided') + '</div>'
           : '';
         const hint = secretNote + (s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
-          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '');
+          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || tr('ui.linkTitleDefault')) + '</a>' : '') + '</div>' : '');
         const ph = s.placeholder ? ' placeholder="' + escAttr(s.placeholder) + '"' : '';
         const def = (!secretSet && s.default !== undefined) ? ' value="' + escAttr(s.default) + '"' : '';
         let input;
@@ -445,8 +469,8 @@ const TEMPLATES = {
         const meta = AUTH_METAS[type] || {};
         const hint = meta.kind === 'oauth2-variant'
           ? (meta.configured
-              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">✓ 已从配置档提供（秘密字段不回显；均可修改覆盖，清空回落配置档值）</p>'
-              : '<p style="color:#999;font-size:12px;margin-bottom:4px;">以下字段可现场填写，或写入 config.json auth.oauth2 后自动预填</p>')
+              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">' + tr('ui.secretProvidedHint') + '</p>'
+              : '<p style="color:#999;font-size:12px;margin-bottom:4px;">' + tr('ui.fieldsHint') + '</p>')
           : '';
         wrap.innerHTML = hint + (specs.map(authInputHtml).join('') || '');
       }
@@ -469,7 +493,7 @@ const TEMPLATES = {
           providerParams[s.key] = raw;
         }
         const result = document.getElementById('result');
-        result.innerHTML = '<p>正在暴露...</p>';
+        result.innerHTML = '<p>' + tr('ui.expose.progress') + '</p>';
         try {
           const r = await fetch('/api/expose', {
             method: 'POST',
@@ -485,40 +509,43 @@ const TEMPLATES = {
           const data = await r.json();
           if (data.url || data.localUrl) {
             const urls = [data.url, data.localUrl, data.baseUrl, data.domainUrl].filter(Boolean);
-            result.innerHTML = '<div class="alert alert-success">✅ 暴露成功！<br>' + urls.map(u => '<strong>URL:</strong> <a href="' + u + '" target="_blank">' + u + '</a><br>').join('') + '</div>';
+            result.innerHTML = '<div class="alert alert-success">' + tr('ui.expose.success') + urls.map(u => '<strong>URL:</strong> <a href="' + u + '" target="_blank">' + u + '</a><br>').join('') + '</div>';
           } else {
-            result.innerHTML = '<div class="alert alert-error">❌ 暴露失败: ' + (data.error || '未知错误') + '</div>';
+            result.innerHTML = '<div class="alert alert-error">' + tr('ui.expose.failed') + (data.error || tr('ui.unknownError')) + '</div>';
           }
         } catch (err) {
-          result.innerHTML = '<div class="alert alert-error">❌ 请求失败: ' + err + '</div>';
+          result.innerHTML = '<div class="alert alert-error">' + tr('ui.requestFailed') + err + '</div>';
         }
       };
     </script>
-  `,
+  `;
+  },
 
-  tunnelsAdd: (schemas: Record<string, any[]>, metas: Record<string, any>) => `
+  tunnelsAdd: (lang: Lang, schemas: Record<string, any[]>, metas: Record<string, any>) => {
+    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    return `
     <div class="card">
-      <h2>添加隧道</h2>
+      <h2>${L("ui.tunnelsAdd.title")}</h2>
       <form id="tunnelForm">
         <div class="form-group">
-          <label>名称</label>
-          <input type="text" name="name" class="form-control" required placeholder="例如: web">
+          <label>${L("ui.label.name")}</label>
+          <input type="text" name="name" class="form-control" required placeholder="${L("ui.placeholder.name")}">
         </div>
         <div class="form-group">
-          <label>类型</label>
+          <label>${L("ui.th.type")}</label>
           <select name="type" id="tunnelType" class="form-control" required>
             ${Object.keys(schemas).map((t) => {
               const dangerous = metas[t]?.dangerous;
-              return `<option value="${t}">${t}${dangerous ? " ⚠️ 危险" : ""}</option>`;
+              return `<option value="${t}">${t}${dangerous ? ` ⚠️ ${L("ui.dangerous")}` : ""}</option>`;
             }).join("")}
           </select>
         </div>
         <div class="form-group">
-          <label>目标端口</label>
-          <input type="number" name="target" class="form-control" placeholder="例如: 4180">
+          <label>${L("ui.label.target")}</label>
+          <input type="number" name="target" class="form-control" placeholder="${L("ui.placeholder.target")}">
         </div>
         <div id="paramFields"></div>
-        <button type="submit" class="btn btn-primary">添加</button>
+        <button type="submit" class="btn btn-primary">${L("ui.btn.add")}</button>
       </form>
       <div id="result" style="margin-top: 15px;"></div>
     </div>
@@ -531,7 +558,7 @@ const TEMPLATES = {
         wrap.innerHTML = specs.map((s) => {
           const label = (s.label || s.key) + (s.required ? ' *' : '');
           const hint = s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
-            (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '';
+            (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || tr('ui.linkTitleDefault')) + '</a>' : '') + '</div>' : '';
           const ph = s.placeholder ? ' placeholder="' + s.placeholder + '"' : '';
           const def = s.default !== undefined ? ' value="' + s.default + '"' : '';
           let input;
@@ -563,11 +590,11 @@ const TEMPLATES = {
         }
         if (data.type === 'command') {
           // command 类型直接执行 shell 命令 —— 显式确认后才提交（daemon 侧同样要求 dangerous: true）
-          if (!confirm('type "command" 会直接执行你输入的命令（危险）。确定继续？')) return;
+          if (!confirm(tr('ui.confirmCommand'))) return;
           data.dangerous = true;
         }
         const result = document.getElementById('result');
-        result.innerHTML = '<p>正在添加...</p>';
+        result.innerHTML = '<p>' + tr('ui.expose.progress') + '</p>';
         try {
           const r = await fetch('/api/tunnels/add', {
             method: 'POST',
@@ -576,17 +603,18 @@ const TEMPLATES = {
           });
           const d = await r.json();
           if (d.added) {
-            result.innerHTML = '<div class="alert alert-success">✅ 添加成功！</div>';
+            result.innerHTML = '<div class="alert alert-success">' + tr('ui.add.success') + '</div>';
             setTimeout(() => location.href = '/tunnels', 1000);
           } else {
-            result.innerHTML = '<div class="alert alert-error">❌ 添加失败: ' + (d.error || '未知错误') + '</div>';
+            result.innerHTML = '<div class="alert alert-error">' + tr('ui.add.failed') + (d.error || tr('ui.unknownError')) + '</div>';
           }
         } catch (err) {
-          result.innerHTML = '<div class="alert alert-error">❌ 请求失败: ' + err + '</div>';
+          result.innerHTML = '<div class="alert alert-error">' + tr('ui.requestFailed') + err + '</div>';
         }
       };
     </script>
-  `,
+  `;
+  },
 };
 
 /** Open the default browser. */
@@ -621,6 +649,9 @@ function parseBody(req: IncomingMessage): Promise<Record<string, string>> {
 function createHandler(ctx: UiContext): RequestListener {
   return async (req, res) => {
     const url = new URL(req.url ?? "", `http://${req.headers.host}`);
+    // 多语:?lang= 显式 > Accept-Language header(默认英文,中文环境出中文)
+    const acceptLang = String(req.headers["accept-language"] ?? "");
+    const lang: Lang = resolveLang(url.searchParams.get("lang") ?? undefined, { LANG: acceptLang.split(",")[0] ?? "" });
     const path = url.pathname;
 
     // ── CSRF / same-origin enforcement ─────────────────────────────────────
@@ -652,7 +683,7 @@ function createHandler(ctx: UiContext): RequestListener {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
         const users: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
         const userCount = users.reduce((n, x) => n + x.users.length, 0);
-        const html = TEMPLATES.layout("概览", TEMPLATES.dashboard(dstat.running, tunnels.length, userCount), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -661,7 +692,7 @@ function createHandler(ctx: UiContext): RequestListener {
       // Tunnels
       if (path === "/tunnels") {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
-        const html = TEMPLATES.layout("隧道管理", TEMPLATES.tunnels(tunnels), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.tunnels"), TEMPLATES.tunnels(lang, tunnels), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -670,7 +701,7 @@ function createHandler(ctx: UiContext): RequestListener {
       if (path === "/tunnels/add") {
         const schemas = ctx.st.schemas.tunnels();
         const metas = ctx.st.schemas.metas();
-        const html = TEMPLATES.layout("添加隧道", TEMPLATES.tunnelsAdd(schemas, metas), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.tunnelsAdd.title"), TEMPLATES.tunnelsAdd(lang, schemas, metas), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -689,7 +720,7 @@ function createHandler(ctx: UiContext): RequestListener {
             totpStatus[u.name] = false; // 未注册/不可查 → 视为未启用
           }
         }
-        const html = TEMPLATES.layout("用户管理", TEMPLATES.users(users, totpStatus), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.users"), TEMPLATES.users(lang, users, totpStatus), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -709,7 +740,7 @@ function createHandler(ctx: UiContext): RequestListener {
             domainUrl: ex.map((e) => e.domainUrl).find(Boolean),
           };
         });
-        const html = TEMPLATES.layout("站点管理", TEMPLATES.sites(withUrls, exposes), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.sites"), TEMPLATES.sites(lang, withUrls, exposes), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -762,7 +793,7 @@ function createHandler(ctx: UiContext): RequestListener {
         }
         const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users(undefined, name);
         const users: AuthUser[] = groups.flatMap((g) => g.users);
-        const html = TEMPLATES.layout("站点用户", TEMPLATES.siteUsers(site, users), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.siteUsers.title", { name: site.name }), TEMPLATES.siteUsers(lang, site, users), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -802,7 +833,7 @@ function createHandler(ctx: UiContext): RequestListener {
 
       // Config
       if (path === "/config") {
-        const html = TEMPLATES.layout("配置", TEMPLATES.config(ctx.st.dirs), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.config"), TEMPLATES.config(lang, ctx.st.dirs), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -814,7 +845,7 @@ function createHandler(ctx: UiContext): RequestListener {
         const authSchemas = await ctx.st.schemas.authProviders();
         const authMetas = ctx.st.schemas.authMetas();
         const authOrder = ctx.st.auth.providerOrder();
-        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;

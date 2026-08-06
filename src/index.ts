@@ -44,6 +44,7 @@ import { GatewayController } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
+import { localizeSchemas, localizeSpecs, resolveLang } from "./i18n.ts";
 import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
 import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
@@ -57,6 +58,9 @@ export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from
 export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
 export { CUSTOM_TUNNEL_ENV_PREFIX, customTunnelTemplates, customTunnelTemplate, isCustomTunnelType } from "./tunnels-custom.ts";
 export { authProviderSchemas, authProviderMetas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
+// 多语:翻译/探测/本地化 helper(零依赖,默认英文,zh 语言包覆盖)
+export { t, resolveLang, localizeSpecs, localizeSchemas, withSchemaI18nKeys, CATALOG } from "./i18n.ts";
+export type { Lang } from "./i18n.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
@@ -704,12 +708,14 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       };
     })(),
     /** Provider/tunnel parameter schemas — data-driven forms for clients
-     *  (host renders inputs from these; no client changes per provider). */
+     *  (host renders inputs from these; no client changes per provider).
+     *  lang: "zh" returns localized (Chinese) strings; default/en returns
+     *  the English data defaults. */
     schemas: {
-      tunnels: () => tunnelParamSchemas(),
-      tunnel: (type: string) => tunnelParamSchema(type),
+      tunnels: (lang?: string) => localizeSchemas(tunnelParamSchemas(), resolveLang(lang)),
+      tunnel: (type: string, lang?: string) => localizeSpecs(tunnelParamSchema(type), resolveLang(lang)),
       metas: () => tunnelMetas(),
-      authProviders: () => authProviderSchemas(dirs.configDir),
+      authProviders: async (lang?: string) => localizeSchemas(await authProviderSchemas(dirs.configDir), resolveLang(lang)),
       authMetas: () => authProviderMetas(dirs.configDir),
     },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),

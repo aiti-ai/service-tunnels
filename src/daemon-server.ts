@@ -30,6 +30,7 @@ import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
+import { localizeSchemas, resolveLang } from "./i18n.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import type { AutheliaProvider } from "./authelia.ts";
@@ -186,12 +187,15 @@ const methods = new Map<string, Handler>([
     writeSites(configDir, sites);
     return { ok: true };
   }],
-  ["schemas", async () => ({
-    tunnels: tunnelParamSchemas(),
-    metas: tunnelMetas(),
-    authProviders: await authProviderSchemas(configDir),
-    authMetas: authProviderMetas(configDir),
-  })],
+  ["schemas", async (params) => {
+    const lang = resolveLang(params?.lang);
+    return {
+      tunnels: localizeSchemas(tunnelParamSchemas(), lang),
+      metas: tunnelMetas(),
+      authProviders: localizeSchemas(await authProviderSchemas(configDir), lang),
+      authMetas: authProviderMetas(configDir),
+    };
+  }],
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
 

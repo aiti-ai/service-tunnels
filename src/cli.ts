@@ -9,10 +9,11 @@ import { readState } from "./state.ts";
 import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 import { validateTunnelConfig } from "./validation.ts";
+import { t, resolveLang, type Lang } from "./i18n.ts";
 import { readFileSync } from "fs";
 import { join } from "path";
 
-function usage(): void {
+function usage(lang: Lang = "en"): void {
   console.log(`service-tunnels <command>
 
   daemon start [--foreground] | stop | status | logs
@@ -20,12 +21,12 @@ function usage(): void {
   internal list [--json]
   tools list | resolve <name> | download <name> | path <name>
   proxy start [--port <p>] [--suffix <s>] [--base-path <bp>] [--password] [--foreground]
-  proxy stop | status              # 传输层管理（enrollment 一律经 expose --mode proxy）
+  proxy stop | status              # transport-layer management (enrollment always goes through expose --mode proxy)
   tunnel list | add <name> --type <t> [--target <p>] [--domain <d>] [--cmd <c>] |
                  [--host <h>] [--user <u>] [--port <p>] [--remote-port <rp>] |
                  [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
-  schemas [--type <tunnel-type|auth>]   # 数据驱动参数 schema(客户端据此渲染表单)
+  schemas [--type <tunnel-type|auth>]   ${t(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
   expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--force]
@@ -39,7 +40,8 @@ function usage(): void {
                                         #      | base-domain <domain> | proxy-port <port>
                                         #      | tool-mirrors <tool:url>
 
-全局：--config-dir <dir> / --cache-dir <dir>（或 SERVICE_TUNNELS_CONFIG/CACHE）`);
+${t(lang, "cli.usage.global")}
+${t(lang, "cli.usage.lang")}`);
 }
 
 interface CliArgs {
@@ -48,6 +50,7 @@ interface CliArgs {
   json: boolean;
   refresh: boolean;
   foreground: boolean;
+  lang?: string;
   pid?: number;
   port?: number;
   suffix?: string;
@@ -236,9 +239,12 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--no-browser":
         args.noBrowser = true;
         break;
+      case "--lang":
+        args.lang = argv[++i];
+        break;
       default:
         if (a!.startsWith("-")) {
-          console.error(`未知参数: ${a}`);
+          console.error(t(resolveLang(undefined, process.env), "cli.unknownArg", { arg: a ?? "" }));
           process.exit(2);
         }
         cmd.push(a!);
@@ -408,6 +414,7 @@ function parseCliConfigValue(key: keyof ServiceTunnelsConfigFile, value: string)
 
 async function main(): Promise<void> {
   const { cmd, args } = parseArgs(process.argv.slice(2));
+  const lang = resolveLang(args.lang);
   const st = createServiceTunnels({ configDir: args.configDir, cacheDir: args.cacheDir, guardian: false });
   const sub = cmd[0] ?? "";
 
@@ -452,11 +459,11 @@ async function main(): Promise<void> {
       // these — adding a type/provider needs no client changes)
       const t = args.type;
       if (t === "auth") {
-        jsonOut(await st.schemas.authProviders());
+        jsonOut(await st.schemas.authProviders(lang));
       } else if (t) {
-        jsonOut(st.schemas.tunnel(t));
+        jsonOut(st.schemas.tunnel(t, lang));
       } else {
-        jsonOut({ tunnels: st.schemas.tunnels(), metas: st.schemas.metas(), authProviders: await st.schemas.authProviders() });
+        jsonOut({ tunnels: st.schemas.tunnels(lang), metas: st.schemas.metas(), authProviders: await st.schemas.authProviders(lang) });
       }
       break;
     }
@@ -515,7 +522,7 @@ async function main(): Promise<void> {
           break;
         }
         default:
-          usage();
+          usage(lang);
           process.exit(2);
       }
       break;
@@ -541,7 +548,7 @@ async function main(): Promise<void> {
         const path = await st.tools.ensure(name);
         jsonOut({ name, path });
       } else {
-        usage();
+        usage(lang);
         process.exit(2);
       }
       break;
@@ -594,7 +601,7 @@ async function main(): Promise<void> {
         }
         jsonOut((await st.daemon.request("proxy.status")) ?? { running: false, port: 0, bindings: [] });
       } else {
-        usage();
+        usage(lang);
         process.exit(2);
       }
       break;
@@ -689,7 +696,7 @@ async function main(): Promise<void> {
           jsonOut({ removed: name });
         }
       } else {
-        usage();
+        usage(lang);
         process.exit(2);
       }
       break;
@@ -906,7 +913,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      usage();
+      usage(lang);
       process.exit(cmd.length ? 2 : 0);
   }
 }

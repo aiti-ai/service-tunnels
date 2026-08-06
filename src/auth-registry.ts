@@ -12,6 +12,7 @@ import {
   oauth2VariantParamSchemas,
 } from "./providers/oauth2-variants.ts";
 import type { ParamSpec } from "./tunnels.ts";
+import { withSchemaI18nKeys } from "./i18n.ts";
 
 /**
  * Auth provider registry + plugin loading (design.md §5.3).
@@ -222,18 +223,18 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
   authelia: [
     {
       key: "basePath",
-      label: "Base 路径",
-      description: "authelia 路径(仅字母数字,不能有连字符);默认随机",
+      label: "Base path",
+      description: "Authelia path (alphanumeric only, no hyphens); random by default",
       placeholder: "/authelia...",
     },
     {
       key: "policy",
-      label: "策略",
+      label: "Policy",
       default: "one_factor",
       options: [
-        { value: "one_factor", label: "单因素(仅密码)" },
-        { value: "two_factor", label: "双因素(密码 + TOTP)" },
-        { value: "deny", label: "拒绝全部" },
+        { value: "one_factor", label: "One factor (password only)" },
+        { value: "two_factor", label: "Two factors (password + TOTP)" },
+        { value: "deny", label: "Deny all" },
       ],
     },
   ],
@@ -241,8 +242,8 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
   portal: [
     {
       key: "basePath",
-      label: "Base 路径",
-      description: "登录页路径;默认随机(如 /portal-sneaky-capybara)",
+      label: "Base path",
+      description: "Login page path; random by default (e.g. /portal-sneaky-capybara)",
       placeholder: "/portal-...",
     },
   ],
@@ -253,11 +254,11 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
       required: true,
       placeholder: "https://accounts.example.com",
       link: "https://oauth2-proxy.github.io/oauth2-proxy/configuration/overview/",
-      linkTitle: "oauth2-proxy 配置文档",
+      linkTitle: "oauth2-proxy config docs",
     },
     { key: "oidc.clientId", label: "Client ID", required: true },
     { key: "oidc.clientSecret", label: "Client Secret", type: "password", required: true },
-    { key: "oidc.cookieSecret", label: "Cookie Secret", type: "password", description: "留空自动生成" },
+    { key: "oidc.cookieSecret", label: "Cookie Secret", type: "password", description: "Leave empty to auto-generate" },
   ],
 };
 
@@ -277,21 +278,25 @@ export async function authProviderSchemas(configDir: string): Promise<Record<str
     out[type] = specs;
   }
   const dir = join(configDir, "providers");
-  if (!existsSync(dir)) return out;
-  for (const entry of readdirSync(dir)) {
-    if (!entry.endsWith(".js") && !entry.endsWith(".mjs")) continue;
-    try {
-      const mod = (await import(pathToFileURL(join(dir, entry)).href)) as {
-        paramSchemas?: AuthProviderParamSchemaExport;
-      };
-      if (mod.paramSchemas && mod.paramSchemas.type && Array.isArray(mod.paramSchemas.specs)) {
-        out[mod.paramSchemas.type] = mod.paramSchemas.specs;
+  if (existsSync(dir)) {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".js") && !entry.endsWith(".mjs")) continue;
+      try {
+        const mod = (await import(pathToFileURL(join(dir, entry)).href)) as {
+          paramSchemas?: AuthProviderParamSchemaExport;
+        };
+        if (mod.paramSchemas && mod.paramSchemas.type && Array.isArray(mod.paramSchemas.specs)) {
+          out[mod.paramSchemas.type] = mod.paramSchemas.specs;
+        }
+      } catch {
+        // a broken plugin must not break schema enumeration
       }
-    } catch {
-      // a broken plugin must not break schema enumeration
     }
   }
-  return out;
+  // 注入稳定翻译 id（多语:调用方按 id 翻译,未命中回退内置中文）
+  return Object.fromEntries(
+    Object.entries(out).map(([type, specs]) => [type, withSchemaI18nKeys("auth", type, specs)]),
+  );
 }
 
 /** Provider 页面元数据（label / 已配置状态 / 待填项）——客户端 picker 与
