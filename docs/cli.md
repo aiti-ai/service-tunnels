@@ -19,7 +19,7 @@ service-tunnels daemon logs [--tail 100]
 - daemon PID 与 IPC 地址写入 `~/.cache/service-tunnels/state.json`；
 - 除 `discover`/`status`/`config` 外，操作类命令自动经 daemon IPC 转发；
   daemon 未运行：提示 `daemon start` 或加 `--auto-daemon` 自动拉起；
-- 库模式（pi-web 等）不需要 daemon——manager 在调用方进程内常驻。
+- 库模式（宿主应用等）不需要 daemon——manager 在调用方进程内常驻。
 
 ## discover — 查询端口（接受端口或进程 id）
 
@@ -77,7 +77,7 @@ service-tunnels tunnel add api --type frpc --target 8080 [--auth authelia]
 service-tunnels tunnel add ssh1 --type ssh --target 3000            # serveo：ssh -R 80:127.0.0.1:3000 serveo.net
 service-tunnels tunnel add lt1  --type localtunnel --target 5173    # lt --port 5173；随机域名走动态登记即可，--subdomain 可选
 service-tunnels tunnel add b1   --type bore --target 5173 [--server localhost] [--remote-port 8080] [--token s3cret]  # 自建 bore server，URL 自动 http://host:port
-service-tunnels tunnel add nat1 --type natapp --target 5173 --token <authtoken>   # 国内内网穿透（natapp.cn），免费版随机 natappfree.cc；客户端需先安装：
+service-tunnels tunnel add nat1 --type natapp --target 5173 --token <authtoken>   # 中国国内内网穿透（natapp.cn），免费版随机 natappfree.cc；客户端需先安装：
 #   注册 https://natapp.cn → 下载页执行 curl -fsSL 'https://natapp.cn/get.sh?authtoken=<token>' | bash（Linux/macOS）/ get.ps1（Windows）
 service-tunnels tunnel add nat2 --type natapp --target 5173 --token <token> --server server.natapp.cc  # VIP 绑定自定义域名
 service-tunnels tunnel add ssh2 --type ssh --target 5173 --host localhost --user wind --remote-port 8080   # ssh -R 8080:127.0.0.1:5173 wind@localhost（本机快速测）
@@ -110,7 +110,7 @@ service-tunnels tools path authelia
 ```
 
 - 框架自己拉起的 nginx/authelia/redis 监听端口，**不进入 `discover` 结果**；
-- 供调用方展示"框架服务"或健康检查（如 pi-web 的 ServicesDialog）。
+- 供调用方展示"框架服务"或健康检查（如宿主应用的 UI）。
 
 ## gateway — 认证基础设施（nginx + Authelia + Redis）
 

@@ -110,7 +110,7 @@ test("parseServiceHost matches <port>.<suffix> (open) and <port>-<label>.<suffix
   assert.deepEqual(parseServiceHost("80.pi.lan", [".st.localhost", ".pi.lan"]), { port: 80, suffix: "pi.lan", label: undefined });
   // dash form: label = provider / site name (may itself contain dashes)
   assert.deepEqual(parseServiceHost("5173-portal.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "portal" });
-  assert.deepEqual(parseServiceHost("5173-pi-web.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "pi-web" });
+  assert.deepEqual(parseServiceHost("5173-host.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "host" });
   assert.deepEqual(parseServiceHost("5173-auth.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: "auth" });
   assert.equal(parseServiceHost("st.localhost", [".st.localhost"]), null);
   assert.equal(parseServiceHost("5173.evil.com", [".st.localhost"]), null);
@@ -369,6 +369,80 @@ test("WebSocket upgrade forwarding", { timeout: 20_000 }, async () => {
       await proxy.close();
     }
   } finally {
+    child.kill("SIGKILL");
+  }
+});
+
+test("ws upgrade: forward-auth gate — no cookie 401, valid cookie 101", { timeout: 20_000 }, async () => {
+  if (process.platform !== "linux") return;
+  // ws echo service (app behind the vhost)
+  const child = spawn(
+    process.execPath,
+    ["-e", `
+      const s = require("http").createServer();
+      s.on("upgrade", (req, socket) => {
+        socket.write("HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n");
+        socket.write(Buffer.from([0x81, 0x04, 0x70, 0x6f, 0x6e, 0x67])); // "pong"
+        setTimeout(() => socket.destroy(), 100);
+      });
+      s.listen(0, "127.0.0.1", () => process.stdout.write("PORT=" + s.address().port + ";"));
+    `],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  // authz probe mock: cookie "good=1" → 200, otherwise 401 (portal authz endpoint)
+  const authz = httpServer((req, res) => {
+    res.writeHead((req.headers.cookie ?? "").includes("good=1") ? 200 : 401);
+    res.end();
+  });
+  let authzPort = 0;
+  try {
+    await new Promise((r) => authz.listen(0, "127.0.0.1", r));
+    authzPort = authz.address().port;
+    const m = await readUntil(child.stdout, /PORT=(\d+)/);
+    const servicePort = Number(m[1]);
+    // labeled vhost <port>-portal.st.localhost → forwardAuth backend
+    const proxy = await startProxy({
+      resolveLabel: (label) => (label === "portal" ? "default" : null),
+      resolveSite: async (port, site, label) => {
+        if (label !== "portal" || site !== "default") return null;
+        return {
+          forwardAuth: {
+            port: authzPort,
+            basePath: "/portal",
+            loginRedirect: "http://$host/portal/login?next=$request_uri",
+          },
+        };
+      },
+    });
+    try {
+      const handshake = (cookie) => new Promise((resolve, reject) => {
+        const s = connect(proxy.port, "127.0.0.1");
+        let buf = Buffer.alloc(0);
+        const timer = setTimeout(() => { s.destroy(); reject(new Error("timeout: " + buf.toString().slice(0, 120))); }, 5000);
+        s.on("connect", () => {
+          s.write(
+            `GET /ws HTTP/1.1\r\nHost: ${servicePort}-portal.st.localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+            `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n` +
+            (cookie ? `Cookie: ${cookie}\r\n` : "") + `\r\n`,
+          );
+        });
+        s.on("data", (d) => {
+          buf = Buffer.concat([buf, d]);
+          const head = buf.toString().split("\r\n")[0] ?? "";
+          if (head.includes("401") || head.includes("403")) { clearTimeout(timer); s.destroy(); resolve(head); }
+          else if (head.includes("101")) { clearTimeout(timer); s.destroy(); resolve(head); }
+        });
+        s.on("error", (e) => { clearTimeout(timer); reject(e); });
+      });
+      const noCookie = await handshake(undefined);
+      assert.match(noCookie, /401/, "gate rejects cookie-less upgrade");
+      const withCookie = await handshake("good=1");
+      assert.match(withCookie, /101/, "gate passes valid-cookie upgrade");
+    } finally {
+      await proxy.close();
+    }
+  } finally {
+    authz.close();
     child.kill("SIGKILL");
   }
 });

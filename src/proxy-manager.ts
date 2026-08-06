@@ -1,6 +1,14 @@
 import type { Server } from "http";
 import { createServer as netServer } from "net";
-import { createProxyServer, DEFAULT_SUFFIXES, type ProxyAuth, type ProxySiteBackend } from "./proxy.ts";
+import {
+  createProxyServer,
+  parseServiceHost,
+  resolveServiceHost,
+  DEFAULT_SUFFIXES,
+  type ProxyAuth,
+  type ProxySiteBackend,
+  type ServiceHostMatch,
+} from "./proxy.ts";
 import type { AuthRegistry } from "./auth-registry.ts";
 import type { GatewayController } from "./gateway.ts";
 import type { AuthPolicy, AuthProvider } from "./auth-provider.ts";
@@ -30,7 +38,7 @@ import type { AuthPolicy, AuthProvider } from "./auth-provider.ts";
 export interface ProxyBinding {
   /** App port behind the vhost. */
   port: number;
-  /** "" = open form; else the dash label (e.g. "portal", "pi-web", "auth"). */
+  /** "" = open form; else the dash label (e.g. "portal", "host", "auth"). */
   label: string;
   /** Site name the binding belongs to ("default" for the reserved auth label). */
   site: string;
@@ -45,7 +53,7 @@ export interface ProxyManagerOptions {
   /** Accepted virtual-host suffixes (default DEFAULT_SUFFIXES). */
   suffixes?: string[];
   /**
-   * User's wildcard-DNS base domain (e.g. "pi.example.com"): an ADDITIONAL
+   * User's wildcard-DNS base domain (e.g. "example.com"): an ADDITIONAL
    * portless address `<port>[-<label>].<baseDomain>` is served (and returned
    * as baseUrl). The user reverse-proxies *.<baseDomain> to the proxy port.
    * Multi-domain form: first entry is the primary (returned as baseUrl); the
@@ -55,7 +63,7 @@ export interface ProxyManagerOptions {
   /** Extra base domains (env SERVICE_TUNNELS_BASE_DOMAIN, comma-separated). */
   baseDomains?: string[];
   /** Strip this base path before forwarding — the embedder's deployment
-   *  prefix (pi-web PI_WEB_BASE_PATH, e.g. "/dev"). Provider login paths
+   *  prefix (embedder's deployment base path, e.g. "/dev"). Provider login paths
    *  (e.g. portal "/portal/login") are MERGED under it: "/dev/portal/login",
    *  plain "/portal/login" when unset. */
   basePath?: string;
@@ -107,7 +115,7 @@ export class ProxyManager {
   #port = 0;
   #baseDomain = "";
   /** Optional port on the primary base domain (host:port form, e.g.
-   *  "pi.example.com:57442"): virtual hosts match the HOST only, but generated
+   *  "example.com:8080"): virtual hosts match the HOST only, but generated
    *  URLs (baseVhost/baseUrl) keep the port so they stay clickable. */
   #basePort = "";
   /** All base domains (primary first): config/CLI + env. Host only. */
@@ -296,6 +304,29 @@ export class ProxyManager {
       s.closeAllConnections?.();
       s.close(() => resolve());
     });
+  }
+
+  /**
+   * In-process decision for a service virtual-host request (embedded callers,
+   * e.g. host's middleware): same suffixes / enrollment / auth resolution as
+   * the listening transport, without requiring a request to reach its port.
+   */
+  resolve(input: import("./proxy.ts").ServiceHostResolveInput): Promise<import("./proxy.ts").ServiceHostDecision> {
+    return resolveServiceHost(input, {
+      suffixes: this.#allSuffixes,
+      isAllowed: this.#opts.isPortAllowed ?? (() => true),
+      resolveLabel: (label) => this.#resolveLabel(label),
+      resolveSuffixSite: (suffix) => this.#resolveSuffixSite(suffix),
+      resolveSite: (p, site, label, vhost) => this.#resolveSite(p, site, label, vhost),
+      password: this.#opts.password ?? "",
+      basePath: this.#opts.basePath ?? "",
+    });
+  }
+
+  /** In-process vhost parse — same suffix set as the transport (#allSuffixes,
+   *  incl. site domains), so parseHost agrees with what start() serves. */
+  parseHost(host: string | undefined): ServiceHostMatch | null {
+    return parseServiceHost(host, this.#allSuffixes);
   }
 
   // ── label → site ──────────────────────────────────────────────────────────

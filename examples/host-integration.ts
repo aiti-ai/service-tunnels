@@ -1,8 +1,9 @@
 /**
- * pi-web integration example — how a long-lived app (like pi-web) embeds
- * service-tunnels in library mode with SITE isolation (sites-design.md).
+ * Host-app integration example — how a long-lived app (a "host" that spawns
+ * subprocess dev servers) embeds service-tunnels in library mode with SITE
+ * isolation (sites-design.md).
  *
- * Scenario (R5): pi-web itself and its subprocess dev servers live in two
+ * Scenario: the host itself and its subprocess dev servers live in two
  * SEPARATE auth realms — different domains, different user dbs, different
  * providers. Library mode: the manager runs INSIDE the caller's process;
  * helpers become the caller's descendants; discovery scopes to the caller's
@@ -11,11 +12,11 @@
 import { createServiceTunnels } from "../src/index.ts";
 import type { ServicePortInfo, TunnelInfo, SiteConfig } from "../src/index.ts";
 
-interface PiWebServices {
+interface HostServices {
   listServices(): ServicePortInfo[];
   /** Preset the two auth realms (idempotent). */
   ensureSites(): void;
-  /** pi-web's own UI under site "pi-web" (its own users). */
+  /** The host's own UI under site "host" (its own users). */
   exposeSelf(port: number, opts?: { tunnel?: boolean }): Promise<{ localUrl?: string; url?: string | null }>;
   /** A subprocess dev server under site "services" (separate users). */
   exposeService(port: number, opts?: { tunnel?: boolean }): Promise<{ localUrl?: string; url?: string | null }>;
@@ -23,13 +24,13 @@ interface PiWebServices {
   stopAll(): Promise<void>;
 }
 
-export function connectPiWebServices(opts?: {
+export function connectHostServices(opts?: {
   /** Override dirs (defaults to ~/.config + ~/.cache/service-tunnels). */
   configDir?: string;
   cacheDir?: string;
   /** e.g. { ngrok: "/opt/ngrok" } — beats PATH and auto-download. */
   toolPaths?: Record<string, string>;
-}): PiWebServices {
+}): HostServices {
   const st = createServiceTunnels({
     configDir: opts?.configDir,
     cacheDir: opts?.cacheDir,
@@ -39,10 +40,10 @@ export function connectPiWebServices(opts?: {
   /** Preset the two auth realms (idempotent; user-managed sites win). */
   function ensureSites(): void {
     const presets: Record<string, Omit<SiteConfig, "name">> = {
-      // pi-web's own admin UI — full-featured portal, its own users
-      "pi-web": { provider: "portal", domain: "web.pi.example.com", policy: "two_factor" },
-      // pi-web subprocess dev servers — light basic auth, separate users
-      services: { provider: "basic", domain: "dev.pi.example.com" },
+      // host's own admin UI — full-featured portal, its own users
+      host: { provider: "portal", domain: "web.example.com", policy: "two_factor" },
+      // subprocess dev servers — light basic auth, separate users
+      services: { provider: "basic", domain: "dev.example.com" },
     };
     const existing = st.sites.list().map((s) => s.name);
     for (const [name, cfg] of Object.entries(presets)) {
@@ -64,13 +65,13 @@ export function connectPiWebServices(opts?: {
     exposeSelf: async (port, o = {}) => {
       const res = await st.auth.expose(port, {
         mode: o.tunnel ? "both" : "proxy",
-        site: "pi-web",
+        site: "host",
         auth: true,
         tunnelType: "cloudflared",
       });
-      // → http://<port>-pi-web.st.localhost:4180  (local)
-      // → http://<port>.web.pi.example.com       (site domain, portless)
-      // → https://<random>.trycloudflare.com     (tunnel, when o.tunnel)
+      // → http://<port>-host.st.localhost:4180  (local)
+      // → http://<port>.web.example.com        (site domain, portless)
+      // → https://<random>.trycloudflare.com   (tunnel, when o.tunnel)
       return { localUrl: res.localUrl, url: res.url };
     },
 
@@ -82,7 +83,7 @@ export function connectPiWebServices(opts?: {
         tunnelType: "cloudflared",
       });
       // → http://<port>-services.st.localhost:4180  (local)
-      // → http://<port>.dev.pi.example.com         (site domain, portless)
+      // → http://<port>.dev.example.com            (site domain, portless)
       return { localUrl: res.localUrl, url: res.url };
     },
 
@@ -94,17 +95,17 @@ export function connectPiWebServices(opts?: {
   };
 }
 
-// ── usage (inside pi-web's server) ──────────────────────────────────────────
-// const services = connectPiWebServices({
-//   cacheDir: join(os.homedir(), ".pi", "service-tunnels"),
+// ── usage (inside the host's server) ────────────────────────────────────────
+// const services = connectHostServices({
+//   cacheDir: join(os.homedir(), ".host", "service-tunnels"),
 // });
-// services.ensureSites();                                  // pi-web + services realms
-// services.exposeSelf(3000);                               // pi-web admin (own users)
+// services.ensureSites();                                  // host + services realms
+// services.exposeSelf(3000);                               // host admin (own users)
 // services.exposeService(5173, { tunnel: true });          // dev server (separate users)
 // const users = await st.auth.users(undefined, "services"); // per-realm user mgmt
 //
-// ACTUAL pi-web integration (landed 2026-08-04):
-//   pi-web/lib/service-tunnels-integration.ts  — process-level singleton
-//   pi-web/app/api/service-tunnels/route.ts     — GET status / POST expose
-// pi-web imports the sibling checkout's source directly (next dev SWC
+// A production host integration (landed 2026-08-04) does:
+//   <host>/lib/service-tunnels-integration.ts  — process-level singleton
+//   <host>/app/api/service-tunnels/route.ts     — GET status / POST expose
+// The host imports the sibling checkout's source directly (its build chain
 // compiles the TS); a released integration should use the npm package.

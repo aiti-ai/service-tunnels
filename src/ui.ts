@@ -139,10 +139,10 @@ const TEMPLATES = {
       }
     }
     function addSite() {
-      const name = prompt('站点名（小写字母/数字/短横线，如 pi-web）:');
+      const name = prompt('站点名（小写字母/数字/短横线，如 host）:');
       if (!name) return;
       const provider = prompt('认证 provider（portal/authelia/basic/oauth2-proxy，回车=auto）:') || '';
-      const domain = prompt('站点域名（可选，如 web.pi.example.com）:') || '';
+      const domain = prompt('站点域名（可选，如 web.example.com）:') || '';
       const body = { name, provider, domain };
       httpPost('/api/sites/add', body).then(r => r.json()).then(d => {
         if (d.error) { alert('❌ ' + d.error); } else { location.reload(); }
@@ -300,7 +300,7 @@ const TEMPLATES = {
       </table>
       <div style="margin-top:15px;">
         <button class="btn btn-primary" onclick="addSite()">添加站点</button>
-        <span style="color:#999;font-size:12px;margin-left:8px;">如：<code>site add pi-web --provider portal --domain web.pi.example.com</code></span>
+        <span style="color:#999;font-size:12px;margin-left:8px;">如：<code>site add host --provider portal --domain web.example.com</code></span>
       </div>
     </div>
     <div class="card">

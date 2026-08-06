@@ -96,10 +96,10 @@ export interface ServiceTunnelsOptions extends DirOptions {
    *  without cleanup, a detached guardian kills our framework helpers. */
   guardian?: boolean;
   /**
-   * User's wildcard-DNS base domain (e.g. "pi.example.com"): expose --mode
+   * User's wildcard-DNS base domain (e.g. "example.com"): expose --mode
    * proxy also returns a PORTLESS base URL (`<port>[-<label>].<baseDomain>`)
    * and the proxy serves `<port>[-<label>].<baseDomain>`. Callers embedding
-   * service-tunnels (pi-web) pass their deployment domain here — beats env
+   * service-tunnels (host) pass their deployment domain here — beats env
    * SERVICE_TUNNELS_BASE_DOMAIN and the config file base-domain.
    */
   baseDomain?: string;
@@ -107,7 +107,7 @@ export interface ServiceTunnelsOptions extends DirOptions {
    *  env SERVICE_TUNNELS_BASE_DOMAIN). */
   baseDomains?: string[];
   /**
-   * Embedder's deployment base path (pi-web: PI_WEB_BASE_PATH, e.g. "/dev").
+   * Embedder's deployment base path (e.g. "/dev").
    * App paths are stripped before forwarding, and auth-provider login paths
    * (portal "/portal/login", authelia ...) are merged under it:
    * "/dev/portal/login" — plain "/portal/login" when unset.
@@ -155,6 +155,9 @@ export interface ServiceTunnels {
      *  Low-level transport; the shared D4-wired transport is st.proxy.start(). */
     create(opts?: ProxyOptions): import("http").Server;
     parseHost(host: string | undefined): import("./proxy.ts").ServiceHostMatch | null;
+    /** In-process vhost decision for embedded callers (same suffixes/enrollment/
+     *  auth as the listening transport; no port needed). */
+    resolve(input: import("./proxy.ts").ServiceHostResolveInput): Promise<import("./proxy.ts").ServiceHostDecision>;
     /** Shared proxy transport + enrollment registry (D4, mode proxy/both).
      *  Idempotent start on the default port 4180 (busy → random); 0 = random. */
     start(opts?: { port?: number; refresh?: boolean; rootPid?: number }): Promise<number>;
@@ -187,7 +190,7 @@ export interface ServiceTunnels {
     tcpSupport(): string[];
   };
   /** Provider/tunnel parameter schemas — data-driven forms for clients
-   *  (pi-web renders inputs from these; adding a type/provider needs no
+   *  (host renders inputs from these; adding a type/provider needs no
    *  client changes). */
   schemas: {
     tunnels(): Record<TunnelType, ParamSpec[]>;
@@ -276,7 +279,7 @@ export interface ServiceTunnels {
 
 /**
  * Create a service-tunnels instance. Library mode: the manager runs inside
- * the caller's process (pi-web does this — helpers become its descendants,
+ * the caller's process (host does this — helpers become its descendants,
  * discovery scopes to its process tree). CLI mode: use `st.daemon.start()`
  * and the daemon owns long-lived processes.
  */
@@ -391,7 +394,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     log: () => {},
   });
   // In-memory record of exposes made in THIS process lifecycle (port + tunnel
-  // type + auth provider + url), so callers (pi-web) can display active exposes
+  // type + auth provider + url), so callers (host) can display active exposes
   // with their metadata. Not persisted across restarts.
   const exposes = new Map<string, { port: number; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string }>();
 
@@ -474,7 +477,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
                 (p) => p.port === port,
               )),
         }),
-      parseHost: (host: string | undefined) => parseServiceHost(host, DEFAULT_SUFFIXES),
+      parseHost: (host: string | undefined) => proxy.parseHost(host),
+      resolve: (input) => proxy.resolve(input),
       // P2: shared transport + enrollment registry (D4) — mode proxy/both
       start: (o: { port?: number; refresh?: boolean; rootPid?: number } = {}) =>
         proxy.start(o.port),
@@ -685,7 +689,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       };
     })(),
     /** Provider/tunnel parameter schemas — data-driven forms for clients
-     *  (pi-web renders inputs from these; no client changes per provider). */
+     *  (host renders inputs from these; no client changes per provider). */
     schemas: {
       tunnels: () => tunnelParamSchemas(),
       tunnel: (type: string) => tunnelParamSchema(type as TunnelType),

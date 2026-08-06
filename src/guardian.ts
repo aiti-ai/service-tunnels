@@ -13,7 +13,7 @@ import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
  *     daemon is SIGKILLed (no chance to run its own cleanup), the guardian
  *     still reaps nginx/authelia/redis/tunnels.
  *   - Library: createServiceTunnels can spawn a guardian watching the caller
- *     (e.g. pi-web) so a crashed host never leaves helpers behind.
+ *     (e.g. host) so a crashed host never leaves helpers behind.
  *
  * Detection is a cross-platform poll (no native deps):
  *   - Linux: process.kill(pid, 0) + /proc/<pid>/stat starttime comparison to

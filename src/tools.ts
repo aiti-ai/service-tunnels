@@ -667,7 +667,7 @@ export const TOOLS: Record<string, ToolDef> = {
     verifyArgs: ["-V"],
   },
   natapp: {
-    // natapp: 国内内网穿透（natapp.cn）。免费版随机域名 (natappfree.cc),
+    // natapp: 中国国内内网穿透（natapp.cn）。免费版随机域名 (natappfree.cc),
     // VIP 绑定自定义域名。**无公开直链**——客户端经官网安装脚本分发
     // (https://natapp.cn/get.sh?authtoken=<token>, 需注册后取 token),所以
     // 不配自动下载;解析走 PATH / toolPaths.natapp / 缓存,缺失时 tunnels.ts

@@ -199,7 +199,7 @@ test("expose --mode proxy with baseDomain: portless base URL + base-domain suffi
   const configDir = join(base, "config");
   const cacheDir = join(base, "cache");
   const { writeConfigFile } = await import("../src/config.ts");
-  writeConfigFile(configDir, { baseDomain: "pi.example.com", proxyPort: 0 });
+  writeConfigFile(configDir, { baseDomain: "example.com", proxyPort: 0 });
   const { createServiceTunnels } = await import("../src/index.ts");
   const st = createServiceTunnels({ configDir, cacheDir, guardian: false });
   const app = createServer((_q, r) => {
@@ -212,11 +212,11 @@ test("expose --mode proxy with baseDomain: portless base URL + base-domain suffi
     const r = await st.auth.expose(port, { mode: "proxy", auth: true, provider: "portal", user: { name: "admin", password: "pw" } });
     // TWO addresses: default portful local URL + portless base URL
     assert.ok(r.localUrl, "localUrl present");
-    assert.equal(r.baseUrl, `http://${port}-portal.pi.example.com`, `portless base URL, got ${r.baseUrl}`);
+    assert.equal(r.baseUrl, `http://${port}-portal.example.com`, `portless base URL, got ${r.baseUrl}`);
     const tp = Number(new URL(r.localUrl).port);
 
     // the base-domain host is accepted by the transport (suffix list)…
-    const baseHost = `${port}-portal.pi.example.com`;
+    const baseHost = `${port}-portal.example.com`;
     const viaBase = await get(tp, baseHost, "/");
     assert.equal(viaBase.status, 302, "base-domain vhost requires login");
     assert.ok(viaBase.location.startsWith("http://"), "local scheme http");

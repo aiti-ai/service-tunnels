@@ -246,7 +246,7 @@ function addSet(args: CliArgs, key: "sets" | "tunnelSets" | "providerSets", raw:
 }
 
 /** Interactive schema-driven prompts (readline) — the same ParamSpec that
- *  pi-web renders as a form. On a real TTY every param is prompted (label /
+ *  host renders as a form. On a real TTY every param is prompted (label /
  *  default / description); on piped input (scripts) readline never resolves
  *  at EOF, so we skip prompting and apply --set + defaults deterministically. */
 async function promptParams(specs: ParamSpec[], initial: Record<string, string>): Promise<Record<string, unknown>> {

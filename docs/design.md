@@ -2,10 +2,11 @@
 
 > 独立的 npm 包 + CLI：本地服务端口的**发现**、**泛域名代理**、以及配合
 > nginx / Authelia / Redis 的**公网隧道（ngrok / frpc / ssh / cloudflared）启停**。
-> 从 pi-web 的 `lib/service-ports.ts`、`proxy.ts`、`lib/tunnels.ts` 抽取泛化而来，
-> 不依赖 Next.js，可被任何 Node 应用（包括 pi-web）作为库调用，也提供独立 CLI。
+> 这些能力最初在作者的宿主应用中实现并实践验证，后经发现其通用性，
+> 独立抽取泛化为本 npm 包——不依赖宿主框架，可被任何 Node 应用作为库调用，
+> 也提供独立 CLI。
 >
-> 认证部分的设计依据见 pi-web `docs/tunnel-auth-automation.md`（本会话调研产出）。
+> 认证部分的设计依据见 §5（统一本地网关认证）与配套调研（见 §10）。
 
 ---
 
@@ -24,7 +25,7 @@
 ```
 ~/.config/service-tunnels/      # 固定配置（用户可编辑，0600）
   config.json                   # 主配置：后缀、默认隧道、认证开关、目录覆盖
-  tunnels.json                  # 隧道清单（名称→命令/类型/参数），等价 pi-web 的 PI_WEB_TUNNELS
+  tunnels.json                  # 隧道清单（名称→命令/类型/参数），等价嵌入方（宿主应用）的隧道配置
   users.yml                     # Authelia 用户库（authentication_backend file），可手编
 ~/.cache/service-tunnels/       # 下载与临时产物（可删除重建）
   bin/                          # 下载的单二进制（authelia、nginx；redis 走系统/包管理器）
@@ -35,7 +36,7 @@
 ```
 
 - **库调用时** `createServiceTunnels({ configDir, cacheDir })` 可完全覆盖这两个位置
-  （如 pi-web 用 `~/.pi/agent/` 或项目内目录）。
+  （如宿主应用用项目内目录）。
 - 环境变量 `SERVICE_TUNNELS_CONFIG` / `SERVICE_TUNNELS_CACHE` 可覆盖 CLI 默认值。
 
 ## 3. 架构总览
@@ -78,8 +79,8 @@
 
 - 根进程 = 当前进程（CLI 模式）；库/CLI 可用 `--pid` 指定任意根（扫描该进程的
   后代）；`--self` 回退当前进程。
-- 复用 pi-web 实现并泛化：
-  - **Linux**：`/proc/<pid>/task/*/children` BFS + `PI_WEB_CHILD_MARKER` 类环境标记
+- 复用宿主应用中实践验证过的实现并泛化：
+  - **Linux**：`/proc/<pid>/task/*/children` BFS + 嵌入方自定义环境标记
     （`SERVICE_TUNNELS_CHILD_MARKER`）跨 re-parent 兜底；`/proc/<pid>/fd` socket
     inode → `/proc/net/tcp{,6}` LISTEN 表；通配绑定展开为本机地址。
   - **macOS**：`ps -axo pid=,ppid=,command=` + `lsof -nP -iTCP -sTCP:LISTEN`。
@@ -105,7 +106,7 @@
   （可选 `stripBasePath`，配置 `basePath`）；流式透传（SSE ✅），WebSocket
   upgrade 转发（Node `http` + `'upgrade'` 事件，可选开关）。
 - 安全门：端口必须命中发现缓存（403）；可选 Basic 密码（配置 `password`，
-  复用 pi-web 的 web-auth 逻辑）；只代理 `127.0.0.1`（代码写死）。
+  沿用宿主应用中验证过的 web-auth 逻辑）；只代理 `127.0.0.1`（代码写死）。
 - 无认证/无隧道时这是唯一的暴露路径，适合局域网开发。
 
 ### 4.3 gateway.ts —— nginx 网关（认证模式的本地反代）
@@ -156,9 +157,9 @@
   | `ssh` | `ssh -R 80:127.0.0.1:<端口> <host>`——**serveo.net** 等 SSH 反向隧道服务即此类型 | serveo.net 随机/固定前缀 | **统一走网关** |
   | `cloudflared` | quick tunnel（随机 trycloudflare，**无 SSE**）或 named tunnel 多 ingress | trycloudflare.com / 自有域名 | **统一走网关** |
   | `localtunnel` | `lt --port <端口>`（或 `npx localtunnel`），URL 从输出解析 | loca.lt 随机 | **统一走网关** |
-  | `natapp` | 国内内网穿透（natapp.cn）：`-authtoken=<token> -weburl=<端口>`，VIP 加 `-server` 绑定自定义域名 | natappfree.cc（免费随机）/ 自有 | **统一走网关** |
+  | `natapp` | 中国国内内网穿透（natapp.cn）：`-authtoken=<token> -weburl=<端口>`，VIP 加 `-server` 绑定自定义域名 | natappfree.cc（免费随机）/ 自有 | **统一走网关** |
   | `bore` | `bore local <端口> --to <server>`，连自建 `bore server`（单二进制，本机/局域网零账号测试专用），URL 合成 `http://host:port` | host:port | **统一走网关** |
-  | `command` | 任意命令兜底（同 pi-web 的 PI_WEB_TUNNELS cmd 形态） | 解析输出 | **统一走网关** |
+  | `command` | 任意命令兜底（同宿主应用的 cmd 形态） | 解析输出 | **统一走网关** |
 
   **认证与隧道类型解耦**：所有隧道进程都只是"公网 URL → 本地 nginx 端口"的透传
   通道，认证统一在**本地端口侧**（nginx auth_request → 认证 provider）完成——
@@ -225,7 +226,7 @@
 
 - 框架 spawn 的每个辅助进程（nginx/authelia/redis）成功后，把 `{ role, pid,
   port, addresses }` 写入 `internalPorts`（内存 + state.json）；
-- `st.internal.list()` → 调用方可用（如 pi-web 的 ServicesDialog 展示"框架服务"
+- `st.internal.list()` → 调用方可用（如宿主应用的 UI 展示"框架服务"
   或做健康检查）；**不影响** `discoverPorts()` 的结果；
 - 辅助进程退出 → 从注册表移除。
 
@@ -233,7 +234,7 @@
 
 CLI 每次执行是独立短命进程，而 nginx/authelia/redis/隧道需要**常驻**。两种模式：
 
-**库模式（进程内）**：调用方（如 pi-web）直接 `createServiceTunnels()`，manager
+**库模式（进程内）**：调用方（如宿主应用）直接 `createServiceTunnels()`，manager
 在调用方进程内常驻；辅助进程与隧道进程都是调用方的后代（带角色标记），无需 IPC。
 
 **CLI 模式（daemon）**：
@@ -257,7 +258,7 @@ service-tunnels daemon stop | status | logs
   3. 纯查询命令（`discover` 基于进程树，`status` 读 state.json）无需 daemon 也可
      直接执行；
 - **发现与 daemon 的关系**：用户测试服务是**调用方/用户 shell** 的后代，不是
-  daemon 的后代——`discover` 始终以 CLI/调用方进程树为根向上回溯再 BFS（pi-web
+  daemon 的后代——`discover` 始终以 CLI/调用方进程树为根向上回溯再 BFS（宿主应用
   同款逻辑），daemon 只负责持有辅助进程与隧道进程；
 - 端口发现时辅助进程（daemon 的子女）因角色标记被排除，隧道进程不监听本地端口，
   所以 daemon 的存在**不污染**用户服务发现。
@@ -404,7 +405,7 @@ service-tunnels
 import { createServiceTunnels } from "service-tunnels";
 
 const st = createServiceTunnels({
-  configDir: "~/.config/service-tunnels",   // 可指定（pi-web 传自己的目录）
+  configDir: "~/.config/service-tunnels",   // 可指定（宿主应用传自己的目录）
   cacheDir: "~/.cache/service-tunnels",
 });
 
@@ -471,27 +472,7 @@ await st.shutdown();                          // 清理全部子进程
 | redis-server | ✅ apt/dnf | ✅ brew | WSL2 / Memurai / tporadowski 移植 |
 | daemon 标记兜底 | ✅ /proc/environ | ❌（依赖进程树） | ❌（依赖进程树） |
 
-## 10. 里程碑
+## 10. 参考
 
-1. ✅ **M1 骨架**：包结构、目录解析、CLI 框架、daemon（后台常驻 + socket IPC +
-   state.json 定位）、`discover`（Linux 优先，含辅助进程角色标记排除）+ 测试。
-2. ✅ **M2 proxy**：泛域名反代 + 白名单 + SSE/WS + stripBasePath + Basic 密码。
-3. ✅ **M3 tunnels**：隧道管理器 + ngrok/frpc/ssh/cloudflared/localtunnel/command
-   + URL 解析 + state.json 镜像（daemon 持有，跨 CLI 调用可见）。
-4. ✅ **M4 auth**：AuthProvider 接口 + nginx 网关（随机端口）+ **authelia provider**
-   （绿色启动 + 动态登记 + Redis）+ `expose` 一键流程——**端到端验证**：未认证
-   401、门户 200、host 动态登记、全组件随机端口内部互知。
-5. ✅ **M5 打磨**：daemon shutdown 角色标记清理（防孤儿进程）、config/socket 0600、
-   `stop-all`、README、pi-web 集成示例。
-6. ✅ **M6 插件**：插件加载机制（configDir/providers/*.js ESM + authPlugins 注入 +
-   `st.auth.registerProvider`）+ **basic provider**（nginx auth_basic + APR1 htpasswd，
-   免进程免 Redis，端到端 401/200 验证）+ **oauth2-proxy provider**（OIDC 侧车，
-   二进制自动下载）+ 边缘型扩展点（renderTunnelAuth，ngrok edge-oidc 预留）。
-   `auth provider list` / `expose --auth basic`。
-
-## 11. 参考
-
-- pi-web `docs/service-port-proxy.md`（发现/泛域名/basePath 原实现方案）
-- pi-web `docs/tunnel-auth-automation.md`（隧道 × Authelia 认证调研：
-  路径 A/B/B3、域名机制、动态登记、绿色启动、资源实测）
-- pi-web 源码：`lib/service-ports.ts`、`proxy.ts`、`lib/tunnels.ts`
+- 作者在宿主应用中的原始实现与设计调研（发现 / 泛域名 / 隧道 / 认证），
+  未随本包发布——本包以 `docs/` 内文档为最新设计依据

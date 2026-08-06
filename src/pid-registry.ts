@@ -8,7 +8,7 @@ import { join } from "path";
  * sessions). The guardian reads this file on its low-frequency scan.
  *
  * File: <cacheDir>/registered-pids-<parentPid>.json — scoped PER PARENT so
- * multiple service-tunnels owners (e.g. several pi-web instances) never share
+ * multiple service-tunnels owners (e.g. several host instances) never share
  * a registration file and a guardian can't reap another owner's children.
  */
 

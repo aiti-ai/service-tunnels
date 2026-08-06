@@ -155,7 +155,7 @@ Gitee:  https://gitee.com/<你>/frp/releases/download/v0.61.1/frp_0.61.1_linux_a
 ## 目录覆盖示例（库调用）
 
 ```ts
-// pi-web 想放到自己的目录下（与 pi-web 实例隔离）
+// 宿主应用想放到自己的目录下（与宿主实例隔离）
 const st = createServiceTunnels({
   configDir: path.join(process.env.HOME, ".pi", "service-tunnels"),
   cacheDir: path.join(process.env.HOME, ".pi", "service-tunnels-cache"),

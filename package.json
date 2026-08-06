@@ -4,7 +4,8 @@
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
-    "service-tunnels": "./dist/cli.js"
+    "service-tunnels": "./dist/cli.js",
+    "sts": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -24,7 +25,7 @@
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
@@ -35,11 +36,32 @@
   "keywords": [
     "tunnel",
     "ngrok",
+    "ngrok-alternative",
+    "cloudflared",
+    "localtunnel",
     "frp",
-    "authelia",
-    "nginx",
+    "frpc",
+    "serveo",
+    "bore",
+    "natapp",
+    "ssh",
+    "reverse-proxy",
+    "port-forwarding",
     "port-discovery",
-    "reverse-proxy"
+    "localhost",
+    "vhost",
+    "expose",
+    "share",
+    "dev-server",
+    "cli",
+    "developer-tools",
+    "authelia",
+    "oauth2",
+    "authentication",
+    "forward-auth",
+    "2fa",
+    "totp",
+    "nginx"
   ],
   "license": "MIT",
   "devDependencies": {

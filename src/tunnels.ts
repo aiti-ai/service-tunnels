@@ -516,7 +516,7 @@ export class TunnelManager {
         return { bin, args };
       }
       case "natapp": {
-        // natapp 国内内网穿透: -authtoken 认证, -weburl 本地端口。
+        // natapp 中国国内内网穿透: -authtoken 认证, -weburl 本地端口。
         // 免费版输出随机 natappfree.cc 域名;VIP 可加 -server 绑定自定义域名。
         // 客户端无公开直链(官网 get.sh 安装脚本分发),缺失时给出安装命令。
         let bin: string;
@@ -585,7 +585,7 @@ export class TunnelManager {
 }
 
 /**
- * Declarative parameter schema — drives client (pi-web) form rendering so a
+ * Declarative parameter schema — drives client (host) form rendering so a
  * new tunnel type or auth provider needs NO client code changes: the client
  * renders inputs from these specs (label / description / link / default /
  * type) and spreads the collected values back as TunnelConfig fields (or
@@ -748,7 +748,7 @@ export function coerceParam(raw: string, spec: ParamSpec): string | number | boo
 
 /** Validate + coerce --set/form values against a ParamSpec list. Throws on
  *  unknown keys (listing the valid ones) so typos surface immediately — the
- *  same schema drives pi-web forms and the CLI. */
+ *  same schema drives host forms and the CLI. */
 export function applyParamSets(
   specs: ParamSpec[],
   sets: Record<string, string>,

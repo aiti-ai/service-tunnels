@@ -32,7 +32,7 @@ import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, Aut
 export interface PortalAuthProviderOptions {
   port?: number;
   basePath?: string;
-  /** Embedder's deployment base path (pi-web /dev): the DEFAULT post-login
+  /** Embedder's deployment base path (host /dev): the DEFAULT post-login
    *  redirect target (next) when the login form carries none — /dev/portal/...
    *  deployments redirect to /dev instead of /. */
   deployBasePath?: string;

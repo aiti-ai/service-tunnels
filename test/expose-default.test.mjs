@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { request as httpRequest } from "node:http";
 
 /**
- * DEFAULT scenario e2e — NO stubs. This is exactly how pi-web calls it:
+ * DEFAULT scenario e2e — NO stubs. This is exactly how host calls it:
  *   st.auth.expose(port, { auth: true, provider: "authelia", tunnel: "cloudflared" })
  * with REAL cloudflared + REAL authelia + REAL redis + REAL nginx.
  *

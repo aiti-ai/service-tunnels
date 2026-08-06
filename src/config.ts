@@ -25,7 +25,7 @@ export interface ServiceTunnelsConfigFile {
   /** Per-provider base path override, e.g. { portal: "/login" }. */
   basePathByProvider?: Record<string, string>;
   /**
-   * User's wildcard-DNS base domain (e.g. "pi.example.com"): expose --mode
+   * User's wildcard-DNS base domain (e.g. "example.com"): expose --mode
    * proxy also returns a PORTLESS base URL (`<port>[-<label>].<baseDomain>`)
    * in addition to the default portful local URL. The user points
    * `*.<baseDomain>` at this machine and reverse-proxies to the proxy port

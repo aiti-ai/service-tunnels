@@ -5,8 +5,8 @@ import { ensureMarker, ROLE_ENV } from "./marker.ts";
 import type { InternalRegistry } from "./internal.ts";
 
 /**
- * Service-port discovery + auto allow-list (ported from pi-web's
- * lib/service-ports.ts, re-scoped for service-tunnels).
+ * Service-port discovery + auto allow-list (originated in the author's host
+ * application, extracted & generalized for service-tunnels).
  *
  * "Allow-list" is not configured by hand: it is the cache of listening TCP
  * ports on processes spawned by the caller (library owner) — or, in CLI
@@ -25,7 +25,7 @@ import type { InternalRegistry } from "./internal.ts";
  *   - framework helper processes carrying SERVICE_TUNNELS_ROLE (nginx /
  *     authelia / redis / tunnels) — those live in the internal registry,
  *   - ports registered in the internal registry (double safety),
- *   - caller-provided cmdline exclusions (e.g. pi-web matching its own).
+ *   - caller-provided cmdline exclusions (e.g. host matching its own).
  */
 
 export interface ServicePortInfo {
@@ -611,7 +611,7 @@ export function discoverServicePorts(
 /**
  * Cached discovery — the cache doubles as the proxy allow-list.
  * Cache lives on globalThis so it survives hot reloads; keyed by marker so
- * distinct library instances (pi-web + standalone) never share allow-lists.
+ * distinct library instances (host + standalone) never share allow-lists.
  */
 declare global {
   var __serviceTunnelsCache: Record<

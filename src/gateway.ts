@@ -326,7 +326,7 @@ export class GatewayController {
     this.#port = opts.port ?? 0;
     this.#htpasswdFile = opts.htpasswdFile ?? "";
     // per-parent (process.pid) nginx folder — multiple service-tunnels owners
-    // (pi-web instances) never share config/logs/pidfile; the folder is wiped
+    // (host instances) never share config/logs/pidfile; the folder is wiped
     // on construction so a fresh run starts clean.
     this.#nginxRoot = join(opts.cacheDir, "tmp", `nginx-${process.pid}`);
     rmSync(this.#nginxRoot, { recursive: true, force: true });

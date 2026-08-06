@@ -74,8 +74,11 @@ export interface ExposeOptions {
   site?: string;
   /** Proxy transport port for mode proxy/both (default 4180, busy → random). */
   proxyPort?: number;
+  /** Skip starting the proxy transport (an embedder middleware serves vhosts
+   *  in-process via resolve()); localUrl is then empty. Default: start. */
+  startTransport?: boolean;
   /**
-   * User's wildcard-DNS base domain (e.g. "pi.example.com") — overrides
+   * User's wildcard-DNS base domain (e.g. "example.com") — overrides
    * config service-tunnels.json `baseDomain`. expose also returns a PORTLESS
    * base URL `<port>[-<label>].<baseDomain>` (user reverse-proxies it).
    */
@@ -139,10 +142,10 @@ export interface ExposeResult {
    *  http://5173-portal.st.localhost:4180. */
   localUrl?: string;
   /** Portless URL under the user's base domain (mode proxy/both, when
-   *  baseDomain is configured), e.g. http://5173-portal.pi.example.com. */
+   *  baseDomain is configured), e.g. http://5173-portal.example.com. */
   baseUrl?: string;
   /** Portless URL under the site's OWN domain (`<port>.<site-domain>`, when
-   *  the site has a domain), e.g. http://5173.web.pi.example.com. */
+   *  the site has a domain), e.g. http://5173.web.example.com. */
   domainUrl?: string;
 }
 
@@ -279,7 +282,7 @@ async function proxyExpose(
       ?? siteCfg?.basePath
       ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
       ?? defaultBasePath(providerType);
-    // Merge the embedder's deployment base path (pi-web /dev) under the
+    // Merge the embedder's deployment base path (host /dev) under the
     // provider's own base path: /dev + /portal → /dev/portal — login pages,
     // authz probes and redirects all live under the combined path.
     const mergedBasePath = providerType === "basic"
@@ -313,7 +316,7 @@ async function proxyExpose(
     log(`expose ${port} (proxy): provider ${providerType} up (site ${site})`);
   }
 
-  const transportPort = await proxy.start(opts.proxyPort);
+  const transportPort = opts.startTransport !== false ? await proxy.start(opts.proxyPort) : 0;
   proxy.addBinding({
     port,
     label,
@@ -322,7 +325,7 @@ async function proxyExpose(
     policy: opts.policy ? { policy: opts.policy } : undefined,
     providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
   });
-  const localUrl = `http://${proxy.vhost(port, label)}:${transportPort}`;
+  const localUrl = transportPort ? `http://${proxy.vhost(port, label)}:${transportPort}` : "";
   const baseVhost = proxy.baseVhost(port, label);
   const baseUrl = baseVhost ? `http://${baseVhost}` : undefined;
   const domainUrl = siteCfg?.domain ? `http://${port}.${siteCfg.domain.replace(/^\./, "")}` : undefined;

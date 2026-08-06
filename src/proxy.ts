@@ -5,7 +5,7 @@ import { stripBasePath } from "./discovery.ts";
 
 /**
  * Default virtual-host suffixes: `.st.localhost` (primary) plus the
- * `.service-tunnel.localhost` alias. `pi.localhost` (the pi-web brand default)
+ * `.service-tunnel.localhost` alias. `pi.localhost` (a host-app brand default)
  * is deliberately NOT part of the generic tool's defaults.
  */
 export const DEFAULT_SUFFIXES = [".st.localhost", ".service-tunnel.localhost", ".localhost"];
@@ -52,7 +52,7 @@ export interface ServiceHostMatch {
   /** The configured suffix that matched (without dot), e.g. "st.localhost". */
   suffix: string;
   /**
-   * Dash-form label (e.g. "portal", "pi-web", "auth"); undefined = open form
+   * Dash-form label (e.g. "portal", "host", "auth"); undefined = open form
    * `<port>.<suffix>`.
    */
   label?: string;
@@ -150,7 +150,7 @@ export interface ProxyOptions {
   port?: number;
   /** Accepted virtual-host suffixes (default DEFAULT_SUFFIXES). */
   suffixes?: string[];
-  /** Extra full hostnames accepted as suffixes (deployment at pi.example.com). */
+  /** Extra full hostnames accepted as suffixes (deployment hostnames). */
   allowedHosts?: string[];
   /** Strip this base path before forwarding (e.g. "/dev" → service sees "/"). */
   basePath?: string;
@@ -164,8 +164,8 @@ export interface ProxyOptions {
    */
   auth?: ProxyAuth;
   /**
-   * Dash-form label → site name (e.g. "portal" → "portal", "pi-web" →
-   * "pi-web"). The reserved label "auth" maps to the default site internally.
+   * Dash-form label → site name (e.g. "portal" → "portal", "host" →
+   * "host"). The reserved label "auth" maps to the default site internally.
    * Return null → 403 (unknown label).
    */
   resolveLabel?: (label: string) => string | null;
@@ -216,13 +216,128 @@ function authHeader(password: string): string {
  * "deny" (provider error — fail closed). The scheme follows the connection
  * (http for the local proxy, https behind a TLS-terminating tunnel edge).
  */
-function checkForwardAuth(
-  req: IncomingMessage,
+/** True when `pathname` is under the provider's base path (login page etc.). */
+function isBasePathPath(pathname: string, basePath: string): boolean {
+  if (!basePath) return false;
+  return pathname === basePath || pathname.startsWith(basePath.replace(/\/+$/, "") + "/");
+}
+
+// ── In-process decision API ───────────────────────────────────────────────────
+// One implementation of vhost routing / enrollment / auth decisions, shared by
+// the HTTP transport (createProxyServer) and embedded callers (e.g. host's
+// middleware) via st.proxy.resolve(). No IncomingMessage/ServerResponse deps.
+
+export type ServiceHostDecision =
+  | { kind: "deny"; status: 403; body: string }
+  | { kind: "deny-auth"; status: 401; wwwAuthenticate: string }
+  | { kind: "pipe"; port: number; url: string }
+  | { kind: "redirect"; location: string }
+  | { kind: "forward"; target: string };
+
+export interface ServiceHostResolveInput {
+  host: string | undefined;
+  url: string;
+  method?: string;
+  authorization?: string;
+  cookie?: string;
+  remoteAddress?: string;
+  forwardedProto?: "http" | "https";
+}
+
+export interface ServiceHostResolveContext {
+  suffixes: string[];
+  isAllowed: (port: number) => boolean;
+  resolveSite?: SiteResolver;
+  resolveSuffixSite?: (suffix: string) => string | null;
+  resolveLabel?: (label: string) => string | null;
+  auth?: ProxyAuth;
+  password?: string;
+  basePath: string;
+}
+
+export async function resolveServiceHost(
+  input: ServiceHostResolveInput,
+  ctx: ServiceHostResolveContext,
+): Promise<ServiceHostDecision> {
+  const match = parseServiceHost(input.host, ctx.suffixes);
+  if (!match) return { kind: "deny", status: 403, body: "unknown virtual host" };
+  if (!ctx.isAllowed(match.port)) {
+    return { kind: "deny", status: 403, body: `service port ${match.port} not allowed` };
+  }
+
+  const hostname = (input.host ?? "").split(":")[0]!.toLowerCase();
+  const suffixSite = !match.label ? (ctx.resolveSuffixSite?.(match.suffix) ?? null) : null;
+
+  if (match.label || suffixSite) {
+    // labeled / site-domain vhost → site auth backend
+    const site = match.label ? (ctx.resolveLabel?.(match.label) ?? null) : suffixSite;
+    if (!site) {
+      return { kind: "deny", status: 403, body: `unknown site label "${match.label ?? match.suffix}"` };
+    }
+    const backend = ctx.resolveSite ? await ctx.resolveSite(match.port, site, match.label, hostname) : null;
+    if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled for site "${site}"` };
+    const via = await gateBackend(backend, input);
+    if (via) return via;
+  } else {
+    // open vhost → enrollment + optional global gates
+    if (ctx.resolveSite) {
+      const backend = await ctx.resolveSite(match.port, undefined, undefined, hostname);
+      if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled` };
+      const via = await gateBackend(backend, input);
+      if (via) return via;
+    }
+    if (ctx.auth) {
+      const via = await gateForwardAuthDecision(ctx.auth, input);
+      if (via) return via;
+    } else if (ctx.password) {
+      if (!validBasicAuth(input.authorization, ctx.password)) {
+        return {
+          kind: "deny-auth",
+          status: 401,
+          wwwAuthenticate: 'Basic realm="service-tunnels", charset="UTF-8"',
+        };
+      }
+    }
+  }
+
+  const path = stripBasePath(input.url.split("?")[0] ?? "/", ctx.basePath)
+    + (input.url.includes("?") ? `?${input.url.split("?")[1]}` : "");
+  return { kind: "forward", target: proxyTarget(match.port, path) };
+}
+
+async function gateBackend(
+  backend: ProxySiteBackend,
+  input: ServiceHostResolveInput,
+): Promise<ServiceHostDecision | null> {
+  if (backend.basicGatewayPort) {
+    return { kind: "pipe", port: backend.basicGatewayPort, url: input.url ?? "/" };
+  }
+  if (backend.forwardAuth) {
+    const pathname = input.url.split("?")[0] ?? "/";
+    if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
+      return { kind: "pipe", port: backend.forwardAuth.port, url: input.url ?? "/" };
+    }
+    return gateForwardAuthDecision(backend.forwardAuth, input);
+  }
+  return null;
+}
+
+async function gateForwardAuthDecision(
+  fw: ProxyAuth,
+  input: ServiceHostResolveInput,
+): Promise<ServiceHostDecision | null> {
+  const verdict = await checkForwardAuthReq(fw, input);
+  if (verdict === "ok") return null;
+  return { kind: "redirect", location: renderLoginRedirectReq(fw.loginRedirect, input) };
+}
+
+async function checkForwardAuthReq(
   auth: ProxyAuth,
+  input: ServiceHostResolveInput,
 ): Promise<"ok" | "redirect" | "deny"> {
   const authzPath = `${auth.basePath.replace(/\/+$/, "")}/api/authz/auth-request`;
-  const host = req.headers.host ?? "";
-  const proto = (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http";
+  const host = input.host ?? "";
+  const proto = input.forwardedProto ?? "http";
   return new Promise((resolve) => {
     const probe = httpRequest(
       {
@@ -232,12 +347,12 @@ function checkForwardAuth(
         method: "GET",
         headers: {
           host,
-          ...(req.headers.cookie ? { cookie: req.headers.cookie } : {}),
-          "x-original-url": `${proto}://${host}${req.url ?? "/"}`,
-          "x-original-method": req.method ?? "GET",
+          ...(input.cookie ? { cookie: input.cookie } : {}),
+          "x-original-url": `${proto}://${host}${input.url ?? "/"}`,
+          "x-original-method": input.method ?? "GET",
           "x-forwarded-proto": proto,
           "x-forwarded-host": host,
-          "x-forwarded-for": req.socket.remoteAddress ?? "",
+          "x-forwarded-for": input.remoteAddress ?? "",
         },
         timeout: 3_000,
       },
@@ -257,17 +372,10 @@ function checkForwardAuth(
   });
 }
 
-/** nginx-style $host / $request_uri template substitution in a redirect URL. */
-function renderLoginRedirect(template: string, req: IncomingMessage): string {
+function renderLoginRedirectReq(template: string, input: ServiceHostResolveInput): string {
   return template
-    .replaceAll("$host", req.headers.host ?? "")
-    .replaceAll("$request_uri", req.url ?? "/");
-}
-
-/** True when `pathname` is under the provider's base path (login page etc.). */
-function isBasePathPath(pathname: string, basePath: string): boolean {
-  if (!basePath) return false;
-  return pathname === basePath || pathname.startsWith(basePath.replace(/\/+$/, "") + "/");
+    .replaceAll("$host", input.host ?? "")
+    .replaceAll("$request_uri", input.url ?? "/");
 }
 
 /** Pipe an HTTP request to 127.0.0.1:port (provider portal or nginx gateway).
@@ -306,17 +414,6 @@ function pipeTo(
 }
 
 /** Forward a validated WebSocket upgrade to the service. */
-function forwardUpgrade(
-  req: IncomingMessage,
-  socket: Duplex,
-  head: Buffer,
-  match: ServiceHostMatch,
-  strip: (pathname: string) => string,
-): void {
-  const path = strip(req.url?.split("?")[0] ?? "/") + (req.url?.includes("?") ? `?${req.url.split("?")[1]}` : "");
-  pipeUpgrade(match.port, path, req, socket, head);
-}
-
 /** Raw upgrade pipe to 127.0.0.1:port (app, provider portal, or nginx gateway). */
 function pipeUpgrade(
   port: number,
@@ -381,118 +478,59 @@ export function createProxyServer(opts: ProxyOptions): Server {
     res.end(`service-tunnels: ${message}`);
   }
 
-  /** Probe forward-auth; on failure 302 to the login page. */
-  async function gateForwardAuth(
-    req: IncomingMessage,
-    res: ServerResponse,
-    fw: ProxyAuth,
-  ): Promise<boolean> {
-    const verdict = await checkForwardAuth(req, fw);
-    if (verdict === "ok") return true;
-    log(`auth 302 ${req.headers.host} (${verdict})`);
-    res.writeHead(302, {
-      "cache-control": "no-store",
-      location: renderLoginRedirect(fw.loginRedirect, req),
-    });
-    res.end();
-    return false;
-  }
-
-  /** Basic password gate (open vhosts). */
-  function gatePassword(req: IncomingMessage, res: ServerResponse): boolean {
-    if (!password) return true;
-    if (validBasicAuth(req.headers.authorization, password)) return true;
-    log(`auth 401 ${req.headers.host}`);
-    res.writeHead(401, {
-      "cache-control": "no-store",
-      "www-authenticate": 'Basic realm="service-tunnels", charset="UTF-8"',
-    });
-    res.end("Authentication required");
-    return false;
-  }
-
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const match = parseServiceHost(req.headers.host, suffixes);
+    const decision = await resolveServiceHost(
+      {
+        host: req.headers.host,
+        url: req.url ?? "/",
+        method: req.method,
+        authorization: req.headers.authorization,
+        cookie: req.headers.cookie,
+        remoteAddress: req.socket.remoteAddress,
+        forwardedProto: (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http",
+      },
+      {
+        suffixes,
+        isAllowed,
+        resolveSite,
+        resolveSuffixSite: opts.resolveSuffixSite,
+        resolveLabel,
+        auth,
+        password,
+        basePath,
+      },
+    );
 
-    if (!match) {
-      deny(res, "unknown virtual host");
-      return;
-    }
-    if (!isAllowed(match.port)) {
-      log(`deny ${req.headers.host} → ${match.port} (not in allow-list)`);
-      deny(res, "service port not allowed");
-      return;
-    }
-
-    // ── site vhost: label (`<port>-<label>.`) OR a site-domain suffix
-    //    (`<port>.<site-domain>`) → resolve site → auth backend ──────────────
-    const hostname = (req.headers.host ?? "").split(":")[0]!.toLowerCase();
-    const suffixSite = !match.label ? (opts.resolveSuffixSite?.(match.suffix) ?? null) : null;
-    if (match.label || suffixSite) {
-      const site = match.label ? resolveLabel(match.label) : suffixSite;
-      if (!site) {
-        log(`deny ${req.headers.host} → unknown site label "${match.label ?? match.suffix}"`);
-        deny(res, `unknown site label "${match.label ?? match.suffix}"`);
+    switch (decision.kind) {
+      case "deny":
+        log(`deny ${req.headers.host} (${decision.body})`);
+        deny(res, decision.body);
         return;
-      }
-      const backend = resolveSite ? await resolveSite(match.port, site, match.label, hostname) : null;
-      if (!backend) {
-        log(`deny ${req.headers.host} → port ${match.port} not enrolled for site "${site}"`);
-        deny(res, `port ${match.port} not enrolled for site "${site}"`);
+      case "deny-auth":
+        log(`auth 401 ${req.headers.host}`);
+        res.writeHead(401, {
+          "cache-control": "no-store",
+          "www-authenticate": decision.wwwAuthenticate,
+        });
+        res.end("Authentication required");
         return;
-      }
-      if (backend.basicGatewayPort) {
-        // basic (D2): nginx auth_basic owns challenge + backend routing
-        log(`pipe ${req.headers.host} → nginx gateway :${backend.basicGatewayPort}`);
-        pipeTo(backend.basicGatewayPort, req, res);
+      case "pipe":
+        log(`pipe ${req.headers.host}${req.url ?? ""} → :${decision.port}`);
+        pipeTo(decision.port, req, res);
         return;
-      }
-      if (backend.forwardAuth) {
-        const pathname = req.url?.split("?")[0] ?? "/";
-        if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
-          // login page / callbacks served through the virtual host
-          log(`pipe ${req.headers.host}${req.url} → provider :${backend.forwardAuth.port}`);
-          pipeTo(backend.forwardAuth.port, req, res);
-          return;
-        }
-        if (!(await gateForwardAuth(req, res, backend.forwardAuth))) return;
-      }
-      // fall through: authenticated request → app port
-    } else {
-      // ── open vhost: `<port>.<suffix>` → enrollment + optional global gates ──
-      if (resolveSite) {
-        const backend = await resolveSite(match.port, undefined, undefined, hostname);
-        if (!backend) {
-          log(`deny ${req.headers.host} → port ${match.port} not enrolled`);
-          deny(res, `port ${match.port} not enrolled`);
-          return;
-        }
-        if (backend.basicGatewayPort) {
-          pipeTo(backend.basicGatewayPort, req, res);
-          return;
-        }
-        if (backend.forwardAuth) {
-          const pathname = req.url?.split("?")[0] ?? "/";
-          if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
-            pipeTo(backend.forwardAuth.port, req, res);
-            return;
-          }
-          if (!(await gateForwardAuth(req, res, backend.forwardAuth))) return;
-        }
-      }
-      if (auth) {
-        if (!(await gateForwardAuth(req, res, auth))) return;
-      } else if (!gatePassword(req, res)) {
+      case "redirect":
+        log(`auth 302 ${req.headers.host} → ${decision.location}`);
+        res.writeHead(302, { "cache-control": "no-store", location: decision.location });
+        res.end();
         return;
-      }
-    }
-
-    const path = strip(req.url?.split("?")[0] ?? "/") + (req.url?.includes("?") ? `?${req.url.split("?")[1]}` : "");
-    log(`proxy ${req.headers.host} → 127.0.0.1:${match.port} ${req.method} ${path}`);
+      case "forward": {
+        const t = new URL(decision.target);
+        log(`proxy ${req.headers.host} → 127.0.0.1:${t.port} ${req.method} ${t.pathname + t.search}`);
+        const path = t.pathname + t.search;
 
     const proxyReq = httpRequest({
-      host: "127.0.0.1",
-      port: match.port,
+      host: t.hostname,
+      port: Number(t.port) || 80,
       method: req.method,
       path,
       headers: {
@@ -515,86 +553,60 @@ export function createProxyServer(opts: ProxyOptions): Server {
       proxyRes.pipe(res);
     });
     req.pipe(proxyReq);
+    return;
+      }
+    }
   }
 
-  // WebSocket / upgrade forwarding.
+  // WebSocket / upgrade forwarding — same decision API as the HTTP path
+  // (resolveServiceHost); the only transport difference is that a failed
+  // forward-auth gate cannot 302 a WebSocket client, so it is answered with
+  // 401 (client reconnects after re-authenticating).
   server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     void (async () => {
-      const match = parseServiceHost(req.headers.host, suffixes);
-      if (!match || !isAllowed(match.port)) {
-        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-      const hostname = (req.headers.host ?? "").split(":")[0]!.toLowerCase();
-
-      // site vhost: label OR site-domain suffix → per-site backend
-      const suffixSite = !match.label ? (opts.resolveSuffixSite?.(match.suffix) ?? null) : null;
-      if (match.label || suffixSite) {
-        const site = match.label ? resolveLabel(match.label) : suffixSite;
-        const backend = site && resolveSite ? await resolveSite(match.port, site, match.label, hostname) : null;
-        if (!site || !backend) {
+      const decision = await resolveServiceHost(
+        {
+          host: req.headers.host,
+          url: req.url ?? "/",
+          method: req.method,
+          authorization: req.headers.authorization,
+          cookie: req.headers.cookie,
+          remoteAddress: req.socket.remoteAddress,
+          forwardedProto: (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http",
+        },
+        {
+          suffixes,
+          isAllowed,
+          resolveSite,
+          resolveSuffixSite: opts.resolveSuffixSite,
+          resolveLabel,
+          auth,
+          password,
+          basePath,
+        },
+      );
+      switch (decision.kind) {
+        case "deny":
           socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
           socket.destroy();
           return;
-        }
-        if (backend.basicGatewayPort) {
-          pipeUpgrade(backend.basicGatewayPort, req.url ?? "/", req, socket, head);
-          return;
-        }
-        if (backend.forwardAuth) {
-          const pathname = req.url?.split("?")[0] ?? "/";
-          if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
-            pipeUpgrade(backend.forwardAuth.port, req.url ?? "/", req, socket, head);
-            return;
-          }
-          const verdict = await checkForwardAuth(req, backend.forwardAuth);
-          if (verdict !== "ok") {
-            socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n\r\n");
-            socket.destroy();
-            return;
-          }
-        }
-        forwardUpgrade(req, socket, head, match, strip);
-        return;
-      }
-
-      // open vhost: enrollment + optional global gates
-      let globalAuth: ProxyAuth | null = auth ?? null;
-      if (resolveSite) {
-        const backend = await resolveSite(match.port, undefined, undefined, hostname);
-        if (!backend) {
-          socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+        case "deny-auth":
+          socket.write(`HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: ${decision.wwwAuthenticate}\r\n\r\n`);
           socket.destroy();
           return;
-        }
-        if (backend.basicGatewayPort) {
-          pipeUpgrade(backend.basicGatewayPort, req.url ?? "/", req, socket, head);
+        case "pipe":
+          pipeUpgrade(decision.port, decision.url, req, socket, head);
           return;
-        }
-        if (backend.forwardAuth) {
-          const pathname = req.url?.split("?")[0] ?? "/";
-          if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
-            pipeUpgrade(backend.forwardAuth.port, req.url ?? "/", req, socket, head);
-            return;
-          }
-          globalAuth = backend.forwardAuth ?? null;
-        }
-      }
-      if (!globalAuth && password && !validBasicAuth(req.headers.authorization, password)) {
-        socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"service-tunnels\"\r\n\r\n");
-        socket.destroy();
-        return;
-      }
-      if (globalAuth) {
-        const verdict = await checkForwardAuth(req, globalAuth);
-        if (verdict !== "ok") {
+        case "redirect":
           socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n\r\n");
           socket.destroy();
           return;
+        case "forward": {
+          const t = new URL(decision.target);
+          pipeUpgrade(Number(t.port) || 80, t.pathname + t.search, req, socket, head);
+          return;
         }
       }
-      forwardUpgrade(req, socket, head, match, strip);
     })();
   });
 

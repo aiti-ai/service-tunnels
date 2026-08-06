@@ -52,7 +52,7 @@
 
 | 项目 | 仓库 |
 |---|---|
-| service-tunnels | https://gitee.com/justdb/service-tunnels-internal (私有) |
+| service-tunnels | 内部仓库（公开后迁至公开镜像） |
 
 ## 默认配置示例
 

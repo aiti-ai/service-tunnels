@@ -10,7 +10,7 @@ cache 目录**，默认回退 XDG 位置。包同时导出纯函数（`discoverP
 import { createServiceTunnels, type Options } from "service-tunnels";
 
 const st = createServiceTunnels({
-  configDir: "~/.config/service-tunnels",  // 固定配置（可指定，如 pi-web 传自己的目录）
+  configDir: "~/.config/service-tunnels",  // 固定配置（可指定，如宿主应用传自己的目录）
   cacheDir: "~/.cache/service-tunnels",    // 下载 + 临时产物
   marker: "service-tunnels",               // 子进程环境标记前缀（默认）
   logLevel: "info",                        // debug 可见隧道原始输出
@@ -229,7 +229,7 @@ import { discoverPorts, isPortAllowed, stripBasePath,
 - `discoverPorts(rootPid?)` — 无需实例，直接扫描（不写缓存）。
 - `stripBasePath(pathname, basePath)` — `/dev/foo → /foo`。
 - `extractTunnelUrl(output)` — 已知隧道域名优先，否则首个非 localhost URL。
-- 解码函数供测试/调试（pi-web 已有对应单测可移植）。
+- 解码函数供测试/调试（宿主应用中已有对应单测可移植）。
 
 ## 错误与语义
 
