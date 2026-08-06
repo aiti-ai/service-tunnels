@@ -477,9 +477,9 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
     throw new ToolError(`${def.name}: no download source URLs`);
   }
 
-  // justget 多源竞速：官方 + 镜像并行，官方 4xx/超时立即失败并交给镜像接管，
+  // justget 多源竞速：官方 + 镜像并行，官方 4xx/5xx/超时立即失败并交给镜像接管，
   // 内部自带重试与容错——不需要顺序回退。
-  // justget racing download: official + mirrors in parallel, immediate-failure
+  // justget racing download: official + mirrors in parallel, immediate-failure (4xx/5xx/timeout)
   // handover to mirrors, retries built in — no sequential fallback needed.
   try {
     await justgetDownload({
