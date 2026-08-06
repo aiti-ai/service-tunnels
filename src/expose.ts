@@ -73,6 +73,10 @@ export interface ExposeOptions {
    *  "auth"); an explicit provider without --site stays on the DEFAULT realm
    *  with a provider-name vhost label (D3: `5173-basic` = basic on default). */
   site?: string;
+  /** Explicit vhost dash label — overrides the site/provider-derived label
+   *  (embedder wants a stable "<port>-pi-web.<domain>" entry even for
+   *  auth=none opens; keeps basePath apps on the labeled pipe path). */
+  label?: string;
   /** Proxy transport port for mode proxy/both (default 4180, busy → random). */
   proxyPort?: number;
   /** Skip starting the proxy transport (an embedder middleware serves vhosts
@@ -278,11 +282,12 @@ async function proxyExpose(
   // `--site default` also keeps "auth".
   const explicitProvider = Boolean(opts.provider) ||
     (typeof opts.auth === "string" && opts.auth !== "none" && opts.auth !== "auto");
-  const label = site === ""
-    ? ""
-    : opts.siteExplicit
-      ? (site === "default" ? "auth" : site)
-      : (explicitProvider ? providerType : "auth");
+  const label = opts.label
+    ?? (site === ""
+      ? ""
+      : opts.siteExplicit
+        ? (site === "default" ? "auth" : site)
+        : (explicitProvider ? providerType : "auth"));
 
   if (authRequested) {
     const pctx = providerCtx(ctx);
