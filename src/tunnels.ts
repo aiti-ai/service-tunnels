@@ -279,11 +279,16 @@ function sshSpec(opts: {
    *  serveo.net must OMIT it: the public URL is printed by serveo's forced
    *  session command, which `-N` suppresses (no session → no URL). */
   forwardOnly?: boolean;
+  /** BatchMode=yes (default). serveo.net anonymous auth uses
+   *  keyboard-interactive — BatchMode disables it → Permission denied; pass
+   *  batch:false for serveo (its sshd accepts anonymous, URL via forced
+   *  session; non-tty stdin is fine, serveo answers immediately). */
+  batch?: boolean;
 }): SpawnSpec {
   const args = [];
   if (opts.forwardOnly !== false) args.push("-N");
-  args.push(
-    "-R", opts.forward,
+  args.push("-R", opts.forward);
+  if (opts.batch !== false) args.push(
     // 无交互隧道: 密钥认证失败立即退出(而非挂起等密码), 防止无 tty 挂死
     "-o", "BatchMode=yes",
     // 主机密钥: 首次自动接受(隧道目标多为自建/测试服务器)
@@ -542,7 +547,7 @@ export class TunnelManager {
         // command, which `-N` would suppress.
         const host = cfg.host ?? "serveo.net";
         const dest = cfg.user ? `${cfg.user}@${host}` : host;
-        return sshSpec({ forward: `80:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false });
+        return sshSpec({ forward: `80:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false, batch: false });
       }
       case "cloudflared": {
         const bin = await tool("cloudflared");

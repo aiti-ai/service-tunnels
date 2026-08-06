@@ -221,6 +221,7 @@ test("serveo: builds ssh argv for the serveo.net hosted service", { timeout: 15_
     assert.equal(argv[argv.length - 1], "serveo.net", "serveo dest is serveo.net");
     assert.ok(!argv.includes("-p"), "serveo: no -p when port unset");
     assert.ok(!argv.includes("-N"), "serveo: NO -N (URL is printed by serveo's forced session; -N suppresses it)");
+    assert.ok(!argv.includes("BatchMode"), "serveo: NO BatchMode=yes (anonymous keyboard-interactive auth would be disabled)");
     await tm.stop("s");
   } finally {
     process.env.PATH = origPath;
