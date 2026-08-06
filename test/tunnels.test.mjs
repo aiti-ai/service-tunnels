@@ -27,6 +27,45 @@ function freePort() {
   });
 }
 
+/**
+ * 前置校验找空闲端口:随机游走 preferred 起的区间(并行测试不易碰撞),逐个
+ * 探测绑定,占用则顺延。与 freePort()(内核分配随即释放)不同,ssh 测试的
+ * -R remotePort 需要稳定端口且探测后立即使用;exclude 排除已用端口。
+ */
+async function pickFreePort(preferred, { exclude = [] } = {}) {
+  const start = preferred + Math.floor(Math.random() * 150);
+  for (let i = 0; i < 150; i++) {
+    const port = start + i;
+    if (exclude.includes(port)) continue;
+    try {
+      await new Promise((resolve, reject) => {
+        const s = createNetServer();
+        s.once("error", reject);
+        s.listen(port, "127.0.0.1", () => s.close(() => resolve()));
+      });
+      return port;
+    } catch {
+      // 被占用 → 下一个
+    }
+  }
+  throw new Error(`no free port near ${preferred}`);
+}
+
+/** 绑定测试 HTTP 服务到空闲端口(前置校验 + 冲突重试)。 */
+async function bindHttpServer(handler, preferred) {
+  for (let i = 0; i < 20; i++) {
+    const port = preferred + Math.floor(Math.random() * 100);
+    const srv = createHttpServer(handler);
+    try {
+      await new Promise((res, rej) => { srv.once("error", rej); srv.listen(port, "127.0.0.1", res); });
+      return { port, srv };
+    } catch {
+      srv.close();
+    }
+  }
+  throw new Error("no free port for test server");
+}
+
 /** Poll GET until the body matches (real forwarding check). */
 async function httpGetUntil(url, expect, ms) {
   const dl = Date.now() + ms;
@@ -152,9 +191,7 @@ test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", {
   const { cacheDir, base } = tempDirs();
   const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
   const user = userInfo().username;
-  const target = 42981;
-  const server = createHttpServer((req, res) => res.end("SSH_FWD_OK"));
-  await new Promise((r) => server.listen(target, "127.0.0.1", r));
+  const { port: target, srv: server } = await bindHttpServer((req, res) => res.end("SSH_FWD_OK"), 42981);
   try {
     const tm = new TunnelManager({
       cacheDir,
@@ -163,7 +200,7 @@ test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", {
     });
 
     // full config: user@localhost + custom remotePort
-    const remotePort = 42982;
+    const remotePort = await pickFreePort(42982, { exclude: [target] });
     tm.add({ name: "my", type: "ssh", target, host: "localhost", user, remotePort });
     await tm.start("my");
     // URL 合成窗口 ~11s(ConnectTimeout 10s 之后才报 URL);sshd 偶发失败自动重启重试
@@ -178,9 +215,7 @@ test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", {
     assert.equal(tm.get("my")?.url, `http://localhost:${remotePort}`, "正常 stop 保留 URL(设计)");
 
     // remotePort 默认 = target(未设置时 -R target:127.0.0.1:target)
-    const dTarget = 42983;
-    const dServer = createHttpServer((req, res) => res.end("DEF_OK"));
-    await new Promise((r) => dServer.listen(dTarget, "127.0.0.1", r));
+    const { port: dTarget, srv: dServer } = await bindHttpServer((req, res) => res.end("DEF_OK"), 42983);
     tm.add({ name: "def", type: "ssh", target: dTarget, host: "localhost", user });
     await tm.start("def");
     assert.equal(await waitSshUrl(tm, "def"), `http://localhost:${dTarget}`, "ssh: remotePort 默认 = target");
@@ -483,12 +518,10 @@ test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { time
   const { cacheDir, base } = tempDirs();
   const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
   const user = userInfo().username;
-  const target = 42984;
-  const server = createHttpServer((req, res) => res.end("SYNTH_OK"));
-  await new Promise((r) => server.listen(target, "127.0.0.1", r));
+  const { port: target, srv: server } = await bindHttpServer((req, res) => res.end("SYNTH_OK"), 42984);
   try {
     const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null), sshUrlSynthDelayMs: 500 });
-    const remotePort = 42985;
+    const remotePort = await pickFreePort(42985, { exclude: [target] });
     tm.add({ name: "my", type: "ssh", target, host: "localhost", user, remotePort });
     const info = await tm.start("my");
     // 端点确定,但只在 ssh 存活过连接窗口后报 URL(11s);sshd 偶发失败自动重启重试
@@ -511,9 +544,7 @@ test("ssh: real connection refused does NOT report a URL; stop revokes it", { ti
   const { cacheDir, base } = tempDirs();
   const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
   const user = userInfo().username;
-  const target = 42986;
-  const server = createHttpServer((req, res) => res.end("UP"));
-  await new Promise((r) => server.listen(target, "127.0.0.1", r));
+  const { port: target, srv: server } = await bindHttpServer((req, res) => res.end("UP"), 42986);
   try {
     const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => (n === "ssh" ? sshBin : null), sshUrlSynthDelayMs: 500 });
 
@@ -527,14 +558,14 @@ test("ssh: real connection refused does NOT report a URL; stop revokes it", { ti
     await tm.stop("bad");
 
     // 2. reachable: 真实 localhost 转发 → 合成 URL + 转发生效(sshd 偶发失败自动重试)
-    const remotePort = 42987;
+    const remotePort = await pickFreePort(42987, { exclude: [target] });
     tm.add({ name: "ok", type: "ssh", target, host: "localhost", user, remotePort });
     await tm.start("ok");
     assert.equal(await waitSshUrl(tm, "ok"), `http://localhost:${remotePort}`, "可达 → 合成 URL");
     assert.equal(await httpGetUntil(`http://127.0.0.1:${remotePort}/`, "UP", 10_000), "UP", "真实转发");
 
     // 3. 进程被强杀(SIGKILL → 非零退出)→ 撤销 URL(不报假成功)
-    const killPort = 42988;
+    const killPort = await pickFreePort(42988, { exclude: [target, remotePort] });
     tm.add({ name: "kill", type: "ssh", target, host: "localhost", user, remotePort: killPort });
     await tm.start("kill");
     assert.equal(await waitSshUrl(tm, "kill"), `http://localhost:${killPort}`, "隧道建立后 URL 合成");
