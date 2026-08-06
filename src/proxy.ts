@@ -303,7 +303,9 @@ export function mapServicePath(url: string, deployBasePath: string, serviceBaseP
     if (p === deploy) p = "/";
     else if (p.startsWith(`${deploy}/`)) p = p.slice(deploy.length);
   }
-  const out = svc ? `${svc}${p.startsWith("/") ? p : `/${p}`}` : (p || "/");
+  // p 为 "/" 时直接返回 svc(不带尾斜杠)——否则 /dev + / → "/dev/" 触发
+  // Next 的 308 尾斜杠规范化 → 与剥前缀后再次映射形成死循环。
+  const out = svc ? (p === "/" ? svc : `${svc}${p.startsWith("/") ? p : `/${p}`}`) : (p || "/");
   return out + query;
 }
 

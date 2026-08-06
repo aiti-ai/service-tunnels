@@ -16,6 +16,13 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
+## [0.3.16] - 2026-08-06
+
+### Fixed
+- **mapServicePath 尾斜杠死循环**(`src/proxy.ts`)：请求路径恰为 deployBasePath 时
+  剥前缀得 `/`、拼 serviceBasePath 产生尾斜杠(`/dev/`)→ Next 308 尾斜杠规范化
+  与再次映射互相重定向。`p === "/"` 时直接返回 svc,不再加尾斜杠。
+
 ## [0.3.15] - 2026-08-06
 
 ### Fixed
