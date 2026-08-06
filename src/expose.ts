@@ -593,6 +593,7 @@ async function exposeTunnel(
         htpasswdFile,
         loginRedirect,
         scheme,
+        site: site,
         // oauth2-proxy 联动：nginx 直接渲染域名验证文件 + 设置页（模板含 $host）
         ...(o2Setup
           ? { setup: { verification: o2Setup.verification, infoPath: o2Setup.infoPath, infoHtmlTemplate: o2Setup.infoHtmlTemplate } }
