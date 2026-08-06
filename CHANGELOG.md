@@ -9,6 +9,13 @@
 
 ## [Unreleased]
 
+## [0.3.24] - 2026-08-07
+
+### Changed
+- **ssh 的 host 不再有误导性 localhost 占位符**：`ssh -R` 转发到本机没有意义，
+  host 为必填且无默认值(移除 `placeholder: "localhost"`)，描述改为
+  「必填,转发到该服务器公网端口」。
+
 ## [0.3.23] - 2026-08-07
 
 ### Changed
