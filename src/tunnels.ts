@@ -699,7 +699,7 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
     { key: "domain", label: "自定义域名", description: "custom_domains;留空用 localhost", placeholder: "app.example.com" },
   ],
   ssh: [
-    { key: "host", label: "SSH 服务器", required: true, description: "ssh -R 目标服务器(必填,转发到该服务器公网端口;自建/云主机均可)" },
+    { key: "host", label: "SSH 服务器", required: true, placeholder: "目标服务器", description: "ssh -R 目标服务器(必填,转发到该服务器公网端口;自建/云主机均可)" },
     { key: "user", label: "用户名", placeholder: "wind", description: "user@host;留空用当前用户" },
     { key: "port", type: "number", label: "SSH 端口", default: 22, description: "ssh -p" },
     { key: "remotePort", type: "number", label: "远程端口", description: "-R <remotePort>:127.0.0.1:<target>;留空=target" },
