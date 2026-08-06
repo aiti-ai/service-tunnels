@@ -2,3 +2,7 @@ node_modules/
 *.tsbuildinfo
 dist/
 *.tgz
+
+# Authelia 用户数据导出（含 TOTP/WebAuthn 密钥等敏感凭据）禁止入库
+# 曾因 authelia.export.totp.yml 泄露真实 TOTP 密钥被提交（已 filter-repo 清除历史）
+authelia.export.*.yml
