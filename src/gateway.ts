@@ -125,7 +125,10 @@ export function generateHostNginx(
   const htpasswdFile = h.htpasswdFile ?? defaults.htpasswdFile ?? "";
   const nginxPort = defaults.nginxPort;
   const nginxRoot = defaults.nginxRoot;
-  const escaped = h.host.replace(/\./g, "\\.");
+  // host 已由 #sanitizeHost 校验(仅 DNS 字符)——server_name 用原样字面点:
+  // nginx 对转义点(\.)的 server_name 匹配有怪癖(1.26.3 实测多 host 共存时
+  // 请求落到默认 server 而非精确匹配),字面点匹配正常
+  const escaped = h.host;
   const portal = `${basePath}/`;
   const portalPath = portal.replace(/^\//, "");
   // oauth2-proxy serves its own fixed /oauth2/auth probe (authelia/portal use
