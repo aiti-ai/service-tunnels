@@ -269,12 +269,16 @@ async function proxyExpose(
   }
   const authRequested =
     opts.auth === true || opts.auth === "auto" || (typeof opts.auth === "string" && opts.auth !== "none");
+  // 显式 label(embedder 固定 "<port>-pi-web.<domain>")时即使 auth=none 也保留
+  // opts.site——labeled 解析需要 binding.site 匹配,否则 "not enrolled"
+  const site = authRequested
+    ? (opts.site ?? "default")
+    : (opts.label ? (opts.site ?? "") : "");
   const providerType = opts.provider
     ?? siteCfg?.provider
     ?? (opts.auth === "auto"
       ? getDefaultAuthProvider()
       : typeof opts.auth === "string" && opts.auth !== "none" ? opts.auth : "portal");
-  const site = authRequested ? (opts.site ?? "default") : "";
   // D3: default-site vhosts carry the explicit provider name as the label
   // (`5173-basic` = basic auth on the DEFAULT site — same user db as
   // `auth user add --provider basic`); bare `--auth`/`--auth auto` keeps the
