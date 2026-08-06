@@ -416,10 +416,16 @@ const TEMPLATES = {
       }
       function authInputHtml(s) {
         const label = (s.label || s.key) + (s.required ? ' *' : '');
-        const hint = s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
-          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '';
+        // 秘密字段（password）已由配置档携带：不回显明文（不写 value），
+        // 显示「已设置」提示；留空提交 = 回落配置档值，填写 = 覆盖
+        const secretSet = s.type === 'password' && s.secretSet;
+        const secretNote = secretSet
+          ? '<div style="color:#2da44e;font-size:12px;margin-top:4px;">已由配置档提供（页面不回显）；留空使用配置档值，填写则覆盖</div>'
+          : '';
+        const hint = secretNote + (s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
+          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '');
         const ph = s.placeholder ? ' placeholder="' + escAttr(s.placeholder) + '"' : '';
-        const def = s.default !== undefined ? ' value="' + escAttr(s.default) + '"' : '';
+        const def = (!secretSet && s.default !== undefined) ? ' value="' + escAttr(s.default) + '"' : '';
         let input;
         if (s.options && s.options.length) {
           input = '<select name="' + escAttr(s.key) + '" class="form-control">' +
@@ -427,7 +433,7 @@ const TEMPLATES = {
         } else if (s.type === 'number') {
           input = '<input type="number" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
         } else if (s.type === 'password') {
-          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + ' autocomplete="new-password">';
         } else {
           input = '<input type="text" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
         }
@@ -439,7 +445,7 @@ const TEMPLATES = {
         const meta = AUTH_METAS[type] || {};
         const hint = meta.kind === 'oauth2-variant'
           ? (meta.configured
-              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">✓ 已从配置档预填（可修改覆盖；清空则回落配置档值）</p>'
+              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">✓ 已从配置档提供（秘密字段不回显；均可修改覆盖，清空回落配置档值）</p>'
               : '<p style="color:#999;font-size:12px;margin-bottom:4px;">以下字段可现场填写，或写入 config.json auth.oauth2 后自动预填</p>')
           : '';
         wrap.innerHTML = hint + (specs.map(authInputHtml).join('') || '');

@@ -310,6 +310,8 @@ export function parseOAuth2VariantDeclaration(id: string, declaration: string): 
     key: token,
     label: token,
     ...(def !== undefined ? { default: def, required: false } : { required: true }),
+    // token 名含 secret/password → 秘密字段（页面不回显明文，见 secretSet）
+    ...(/secret|password/i.test(token) ? { type: "password" as const } : {}),
     description: def !== undefined
       ? `固定参数(默认 ${def})，替换声明中的 {{${token}}}`
       : `必填，替换声明中的 {{${token}}}`,
@@ -484,22 +486,39 @@ export function missingVariantParams(
   return def.form.filter((s) => s.required && (values[s.key] ?? "") === "").map((s) => s.key);
 }
 
+/** 变体表单 schema（生成给页面）：在 ParamSpec 上加 `secretSet`——秘密字段
+ *  （password）已由配置档携带时页面不回显明文，仅提示「已设置」。 */
+export interface OAuth2VariantSchema extends ParamSpec {
+  /** 秘密字段已由配置档携带：页面不预填明文，留空 = 回落配置档值。 */
+  secretSet?: boolean;
+}
+
 /**
- * 每个变体的页面表单：配置档携带的字段**默认填入**（default = 携带值，可编辑
- * 覆盖），不是消失——用户想现场改凭据直接改框里内容即可；清空 = 回落配置档。
- * issuerUrl 由变体固定时删除（SaaS 端点不可改）。
+ * 每个变体的页面表单：非秘密字段携带 → **默认填入**（default = 携带值，可编辑
+ * 覆盖）；**秘密字段（clientSecret 等 password 型）不回显明文**——只标记
+ * secretSet（页面显示「已设置」，留空提交 = 回落配置档值），避免 secret 明文
+ * 出现在页面 HTML/JS 里。issuerUrl 由变体固定时删除（SaaS 端点不可改）。
  */
-export function oauth2VariantParamSchemas(configDir: string): Record<string, ParamSpec[]> {
+export function oauth2VariantParamSchemas(configDir: string): Record<string, OAuth2VariantSchema[]> {
   const config = readOAuth2VariantCreds(configDir);
-  const out: Record<string, ParamSpec[]> = {};
+  const out: Record<string, OAuth2VariantSchema[]> = {};
   for (const def of allOAuth2Variants()) {
     out[def.id] = def.form
       .filter((spec) => !(spec.key === "issuerUrl" && def.issuerUrl)) // 固定端点不可改
-      .map((spec) => {
+      .map((spec): OAuth2VariantSchema => {
         const cfgKey = def.creds[spec.key];
         const carried = cfgKey ? config.values[cfgKey] : undefined;
-        // 携带值 → default 预填；且必填字段有默认后不再视为「待填」
-        return carried ? { ...spec, default: carried } : spec;
+        if (!carried) return spec;
+        // 秘密字段：明文不进页面；placeholder 提示替换方式
+        if (spec.type === "password") {
+          return {
+            ...spec,
+            secretSet: true,
+            placeholder: "已由配置档提供；留空使用配置档值，填写则覆盖",
+          };
+        }
+        // 非秘密字段：携带值 → default 预填（可编辑覆盖）
+        return { ...spec, default: carried };
       });
   }
   return out;

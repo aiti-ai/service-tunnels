@@ -66,8 +66,14 @@ SaaS IdP（GitHub/Google/GitLab/Microsoft…）端点与 scope 都是**固定的
 ```
 
 携带值作为表单字段的 **default**（复用 ParamSpec 机制）：页面上看到的是
-预填好的字段（clientSecret 为密码框点点），不输入不改直接暴露；改了就
+预填好的字段，不输入不改直接暴露；改了就
 以表单值为准（优先级 1）；把某字段清空提交 = 该字段不提交 → 回落配置档值。
+
+**秘密字段（clientSecret 等 `type: "password"` 字段）不回显明文**：页面只显示
+「已由配置档提供」提示（`secretSet`），value 不写、schema JSON 不含明文——
+浏览器与页面源码都看不到；留空提交 = 回落配置档值，填写 = 覆盖。自定义
+变体中 token 名含 `secret`/`password` 的（如 `{{clientSecret}}`）自动按秘密
+字段处理。
 
 ### 配置档形态（`configDir/service-tunnels.json`）
 

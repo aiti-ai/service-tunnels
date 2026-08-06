@@ -91,8 +91,12 @@ test("schema/元数据：配置档携带凭据 → 字段默认填入（可编�
     schemas = await authProviderSchemas(configDir);
     metas = await authProviderMetas(configDir);
     const gh = schemas["oauth2-github"];
-    assert.equal(gh.find((p) => p.key === "clientId")?.default, "shared-id", "clientId prefilled");
-    assert.equal(gh.find((p) => p.key === "clientSecret")?.default, "shared-secret", "clientSecret prefilled");
+    assert.equal(gh.find((p) => p.key === "clientId")?.default, "shared-id", "clientId prefilled (non-secret)");
+    // 秘密字段：不回显明文（无 default），只标记 secretSet（页面显示「已设置」）
+    const ghSecret = gh.find((p) => p.key === "clientSecret");
+    assert.equal(ghSecret?.type, "password");
+    assert.equal(ghSecret?.default, undefined, "clientSecret plaintext NOT in schema");
+    assert.equal(ghSecret?.secretSet, true, "clientSecret marked as set");
     assert.equal(gh.find((p) => p.key === "clientId")?.required, true, "required stays (default just prefills)");
     assert.equal(metas["oauth2-github"].configured, true, "required fields satisfied by prefill");
     assert.equal(metas["oauth2-github"].needsInput.length, 0);
@@ -324,13 +328,17 @@ test("环境变量注册自定义变体（类似 command 隧道）：注册/表�
     assert.equal(metas["oauth2-myidp"].configured, false);
     assert.deepEqual(metas["oauth2-myidp"].needsInput, ["clientId", "clientSecret", "org"]);
 
-    // 4) 配置档携带 token → 表单默认填入（复用 prefill 机制）
+    // 4) 配置档携带 token → 非秘密字段预填；秘密字段（{{clientSecret}}）不回显明文
     writeConfigFile(configDir, {
       auth: { oauth2: { variants: { "oauth2-myidp": { clientId: "cfg-id", clientSecret: "cfg-secret", org: "my-org" } } } },
     });
     schemas = await authProviderSchemas(configDir);
     metas = await authProviderMetas(configDir);
     assert.equal(schemas["oauth2-myidp"].find((s) => s.key === "clientId")?.default, "cfg-id");
+    const mySecret = schemas["oauth2-myidp"].find((s) => s.key === "clientSecret");
+    assert.equal(mySecret?.type, "password", "secret token → password type");
+    assert.equal(mySecret?.default, undefined, "secret plaintext NOT in schema");
+    assert.equal(mySecret?.secretSet, true, "secret marked set");
     assert.equal(metas["oauth2-myidp"].configured, true, "carried tokens → zero-input expose");
 
     // 5) provider prepare：逐行替换占位符 + 键归一化 + 列表键数组 + 自动 cookie_secret

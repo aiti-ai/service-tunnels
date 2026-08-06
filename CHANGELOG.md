@@ -7,6 +7,15 @@
 > （如 0.2.38–0.2.41）若未出现在 registry 发布列表中，其功能统一计入下一个
 > 实际发布版本。
 
+## [Unreleased]
+
+### Security
+- **oauth2 变体秘密字段真掩码**：`clientSecret` 等 password 型字段由配置档携带时
+  **不回显明文**（value 不写、schema JSON 不含明文，页面只显示「已由配置档提供」+
+  secretSet 标记）——浏览器圆点 + 源码/JS 均不可见；留空提交 = 回落配置档值，
+  填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
+  自动按秘密字段处理。
+
 ## [0.3.13] - 2026-08-06
 
 ### Fixed
