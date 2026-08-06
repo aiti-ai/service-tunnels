@@ -244,7 +244,7 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       default:
         if (a!.startsWith("-")) {
-          console.error(t(resolveLang(undefined, process.env), "cli.unknownArg", { arg: a ?? "" }));
+          console.error(translate(resolveLang(undefined, process.env), "cli.unknownArg", { arg: a ?? "" }));
           process.exit(2);
         }
         cmd.push(a!);
