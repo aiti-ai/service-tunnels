@@ -301,6 +301,10 @@ export async function resolveServiceHost(
     if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled for site "${site}"` };
     const via = await gateBackend(backend, input);
     if (via) return via;
+    // labeled / site-domain vhost 是应用的完整入口(如 pi-web 部署在 /dev):即使
+    // open(无 auth)也原样转发,不 strip basePath——strip 仅用于裸 <port>.<suffix>
+    // open vhost(部署前缀下的无 label 服务)
+    return { kind: "pipe", port: match.port, url: input.url ?? "/" };
   } else {
     // open vhost → enrollment + optional global gates
     if (ctx.resolveSite) {
