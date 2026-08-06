@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { t, resolveLang, localizeSpecs, withSchemaI18nKeys } from "../src/i18n.ts";
+import { translate, resolveLang, localizeSpecs, withSchemaI18nKeys, createI18n, setLang, getLang, t } from "../src/i18n.ts";
 import { tunnelParamSchema } from "../src/tunnels.ts";
 
 test("默认英文:spec 数据是英文(国际化 npm 包)", async () => {
@@ -43,8 +43,35 @@ test("语言探测:默认 en,LANG/LC_ALL 中文 → zh,显式参数优先", () =
   assert.equal(resolveLang("en", { LANG: "zh_CN.UTF-8" }), "en"); // 显式优先
 });
 
-test("t() 插值 + 缺失回退", () => {
-  assert.equal(t("en", "cli.unknownArg", { arg: "x" }), "Unknown argument: x");
-  assert.equal(t("zh", "cli.unknownArg", { arg: "x" }), "未知参数: x");
-  assert.equal(t("en", "no.such.key"), "no.such.key"); // 缺失回退 key
+test("t() 插值 + 缺失回退 + i18next 风格实例", () => {
+  // 显式语言版本
+  assert.equal(translate("en", "cli.unknownArg", { arg: "x" }), "Unknown argument: x");
+  assert.equal(translate("zh", "cli.unknownArg", { arg: "x" }), "未知参数: x");
+  assert.equal(translate("en", "no.such.key"), "no.such.key"); // 缺失回退 key
+
+  // i18next 风格:createI18n + changeLanguage + addResources + getFixedT
+  const i = createI18n("zh");
+  assert.equal(i.t("tunnel.ssh.host.label"), "SSH 服务器");
+  i.changeLanguage("en");
+  assert.equal(i.t("tunnel.ssh.host.label"), "SSH server");
+  assert.equal(i.language, "en");
+  // 调用方扩展翻译(注册后 changeLanguage 到该语言生效)
+  i.addResources("ja", { "tunnel.ssh.host.label": "SSHサーバー" });
+  i.changeLanguage("ja");
+  assert.equal(i.t("tunnel.ssh.host.label"), "SSHサーバー");
+  assert.equal(i.exists("tunnel.ssh.host.label"), true);
+  assert.equal(i.exists("no.such.key"), false);
+  // getFixedT 固定语言
+  assert.equal(i.getFixedT("zh")("tunnel.ssh.host.label"), "SSH 服务器");
+  // 插值
+  assert.equal(i.getFixedT("en")("cli.unknownArg", { arg: "y" }), "Unknown argument: y");
+});
+
+test("默认实例 + setLang 影响顶层 t()", () => {
+  const before = t("cli.schemasHint");
+  setLang("zh");
+  assert.equal(t("cli.schemasHint"), "数据驱动参数 schema(客户端据此渲染表单)");
+  assert.equal(getLang(), "zh");
+  setLang("en");
+  assert.equal(t("cli.schemasHint"), before);
 });

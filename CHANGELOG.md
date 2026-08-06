@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+## [0.3.28] - 2026-08-07
+
+### Changed
+- **i18n 接口改为 i18next 风格**(仍零依赖自实现):
+  - `t(key, params?)` — 顶层默认实例(语言由 `setLang(lang)` 管理)
+  - `createI18n(initial?)` / `i18n` 默认实例 — `t` / `changeLanguage` /
+    `language` / `exists` / `addResources(lang, dict)` / `getFixedT(lang)`
+  - `translate(lang, key, params?)` — 显式语言版本(内部/固定语言场景)
+  - 原 `t(lang, key, params)` 签名废弃为 `translate`;CLI/daemon UI 内部
+    迁移完毕。
+
 ## [0.3.27] - 2026-08-07
 
 ### Added

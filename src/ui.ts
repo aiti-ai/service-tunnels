@@ -17,7 +17,7 @@ import { platform } from "os";
 import { exec } from "child_process";
 import type { ServiceTunnels } from "./index.ts";
 import type { AuthUser } from "./auth-provider.ts";
-import { t, resolveLang, CATALOG, type Lang } from "./i18n.ts";
+import { translate, resolveLang, CATALOG, type Lang } from "./i18n.ts";
 import { validateTunnelConfig } from "./validation.ts";
 
 export interface UiServerOptions {
@@ -38,7 +38,7 @@ interface UiContext {
 /** Simple HTML templates (no template engine dependency). */
 const TEMPLATES = {
   layout: (lang: Lang, title: string, content: string, csrf: string) => {
-    const L = (k: string, params?: Record<string, string>) => t(lang, k, params);
+    const L = (k: string, params?: Record<string, string>) => translate(lang, k, params);
     return `<!DOCTYPE html>
 <html lang="${lang === "zh" ? "zh-CN" : "en"}">
 <head>
@@ -186,7 +186,7 @@ const TEMPLATES = {
   },
 
   dashboard: (lang: Lang, daemonRunning: boolean, tunnelCount: number, userCount: number) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.dash.systemStatus")}</h2>
@@ -204,7 +204,7 @@ const TEMPLATES = {
   },
 
   tunnels: (lang: Lang, tunnels: any[]) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.tunnels.list")}</h2>
@@ -242,7 +242,7 @@ const TEMPLATES = {
   },
 
   users: (lang: Lang, users: AuthUser[], totpStatus: Record<string, boolean>) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.users.list")}</h2>
@@ -282,7 +282,7 @@ const TEMPLATES = {
   },
 
   config: (lang: Lang, config: any) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.config.title")}</h2>
@@ -292,7 +292,7 @@ const TEMPLATES = {
   },
 
   sites: (lang: Lang, sites: any[], exposes: any[]) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.sites.title")}</h2>
@@ -348,7 +348,7 @@ const TEMPLATES = {
   },
 
   siteUsers: (lang: Lang, site: any, users: AuthUser[]) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.siteUsers.title", { name: site.name })}</h2>
@@ -376,7 +376,7 @@ const TEMPLATES = {
   },
 
   expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[]) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.expose.title")}</h2>
@@ -522,7 +522,7 @@ const TEMPLATES = {
   },
 
   tunnelsAdd: (lang: Lang, schemas: Record<string, any[]>, metas: Record<string, any>) => {
-    const L = (k: string, p?: Record<string, string>) => t(lang, k, p);
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
       <h2>${L("ui.tunnelsAdd.title")}</h2>
@@ -683,7 +683,7 @@ function createHandler(ctx: UiContext): RequestListener {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
         const users: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
         const userCount = users.reduce((n, x) => n + x.users.length, 0);
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -692,7 +692,7 @@ function createHandler(ctx: UiContext): RequestListener {
       // Tunnels
       if (path === "/tunnels") {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.tunnels"), TEMPLATES.tunnels(lang, tunnels), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.tunnels"), TEMPLATES.tunnels(lang, tunnels), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -701,7 +701,7 @@ function createHandler(ctx: UiContext): RequestListener {
       if (path === "/tunnels/add") {
         const schemas = ctx.st.schemas.tunnels();
         const metas = ctx.st.schemas.metas();
-        const html = TEMPLATES.layout(lang, t(lang, "ui.tunnelsAdd.title"), TEMPLATES.tunnelsAdd(lang, schemas, metas), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.tunnelsAdd.title"), TEMPLATES.tunnelsAdd(lang, schemas, metas), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -720,7 +720,7 @@ function createHandler(ctx: UiContext): RequestListener {
             totpStatus[u.name] = false; // 未注册/不可查 → 视为未启用
           }
         }
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.users"), TEMPLATES.users(lang, users, totpStatus), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.users"), TEMPLATES.users(lang, users, totpStatus), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -740,7 +740,7 @@ function createHandler(ctx: UiContext): RequestListener {
             domainUrl: ex.map((e) => e.domainUrl).find(Boolean),
           };
         });
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.sites"), TEMPLATES.sites(lang, withUrls, exposes), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.sites"), TEMPLATES.sites(lang, withUrls, exposes), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -793,7 +793,7 @@ function createHandler(ctx: UiContext): RequestListener {
         }
         const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users(undefined, name);
         const users: AuthUser[] = groups.flatMap((g) => g.users);
-        const html = TEMPLATES.layout(lang, t(lang, "ui.siteUsers.title", { name: site.name }), TEMPLATES.siteUsers(lang, site, users), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.siteUsers.title", { name: site.name }), TEMPLATES.siteUsers(lang, site, users), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -833,7 +833,7 @@ function createHandler(ctx: UiContext): RequestListener {
 
       // Config
       if (path === "/config") {
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.config"), TEMPLATES.config(lang, ctx.st.dirs), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.config"), TEMPLATES.config(lang, ctx.st.dirs), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -845,7 +845,7 @@ function createHandler(ctx: UiContext): RequestListener {
         const authSchemas = await ctx.st.schemas.authProviders();
         const authMetas = ctx.st.schemas.authMetas();
         const authOrder = ctx.st.auth.providerOrder();
-        const html = TEMPLATES.layout(lang, t(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;

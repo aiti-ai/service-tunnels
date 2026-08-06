@@ -14,6 +14,74 @@ export type Lang = "zh" | "en";
 
 export const CATALOG: Record<Lang, Record<string, string>> = {
   en: {
+    // ── tunnel schemas(spec 数据默认英文;en = 权威拷贝,zh 覆盖)────
+    "tunnel.ngrok.domain.label": "Fixed domain",
+    "tunnel.ngrok.domain.description": "Bind a fixed domain (requires an ngrok account); leave empty for a random domain",
+    "tunnel.ngrok.domain.placeholder": "myapp.ngrok-free.app",
+    "tunnel.ngrok.token.label": "Authtoken",
+    "tunnel.ngrok.token.description": "Unauthenticated ngrok exits immediately (ERR_NGROK_4018); the token is injected via NGROK_AUTHTOKEN",
+    "tunnel.ngrok.token.linkTitle": "Get token",
+    "tunnel.frpc.server.label": "frps address",
+    "tunnel.frpc.server.description": "frps server host:port",
+    "tunnel.frpc.server.placeholder": "frp.example.com:7000",
+    "tunnel.frpc.token.label": "Token",
+    "tunnel.frpc.token.description": "frps shared token (optional)",
+    "tunnel.frpc.domain.label": "Custom domain",
+    "tunnel.frpc.domain.description": "custom_domains; leave empty for localhost",
+    "tunnel.frpc.domain.placeholder": "app.example.com",
+    "tunnel.ssh.host.label": "SSH server",
+    "tunnel.ssh.host.description": "ssh -R target server (required; forwards to the server's public port; self-hosted or cloud)",
+    "tunnel.ssh.host.placeholder": "target server",
+    "tunnel.ssh.user.label": "Username",
+    "tunnel.ssh.user.description": "user@host; leave empty for the current user",
+    "tunnel.ssh.user.placeholder": "wind",
+    "tunnel.ssh.port.label": "SSH port",
+    "tunnel.ssh.port.description": "ssh -p",
+    "tunnel.ssh.remotePort.label": "Remote port",
+    "tunnel.ssh.remotePort.description": "-R <remotePort>:127.0.0.1:<target>; empty = target",
+    "tunnel.serveo.host.label": "serveo mirror",
+    "tunnel.serveo.user.label": "Username",
+    "tunnel.serveo.port.label": "SSH port",
+    "tunnel.cloudflared.domain.label": "Hostname",
+    "tunnel.cloudflared.domain.description": "Named-tunnel hostname; leave empty for a random trycloudflare",
+    "tunnel.cloudflared.domain.placeholder": "app.example.com",
+    "tunnel.natapp.token.label": "Authtoken",
+    "tunnel.natapp.token.description": "natapp auth token (copy from your tunnel list after registering); the client must be installed via the official script",
+    "tunnel.natapp.token.linkTitle": "Download client + get token",
+    "tunnel.natapp.domain.label": "Custom domain",
+    "tunnel.natapp.domain.description": "Bind a fixed domain (requires VIP); leave empty for a random domain",
+    "tunnel.natapp.domain.placeholder": "xxx.natappfree.cc",
+    "tunnel.natapp.server.label": "Server",
+    "tunnel.natapp.server.description": "Assigned server for VIP custom domains (optional)",
+    "tunnel.natapp.server.placeholder": "server.natapp.cc",
+    "tunnel.localtunnel.domain.label": "Subdomain",
+    "tunnel.localtunnel.domain.description": "Fixed subdomain; leave empty for a random one",
+    "tunnel.bore.server.label": "bore server",
+    "tunnel.bore.server.description": "bore server address (host or host:port); default bore.pub:7835 (public, no account); self-hosted: use your server IP:port",
+    "tunnel.bore.remotePort.label": "Remote port",
+    "tunnel.bore.remotePort.description": "-p requests a fixed port; empty = server-assigned",
+    "tunnel.bore.token.label": "Secret",
+    "tunnel.bore.token.description": "-s shared secret; leave empty if the server has none",
+    "tunnel.command.cmd.label": "Command",
+    "tunnel.command.cmd.description": "Any shell command; the public URL is parsed from output",
+    "tunnel.command.cmd.placeholder": "ssh -R 80:127.0.0.1:<port> serveo.net",
+
+    // ── auth provider schemas ───────────────────────────────────────
+    "auth.authelia.basePath.label": "Base path",
+    "auth.authelia.basePath.description": "Authelia path (alphanumeric only, no hyphens); random by default",
+    "auth.authelia.basePath.placeholder": "/authelia...",
+    "auth.authelia.policy.label": "Policy",
+    "auth.authelia.policy.option.one_factor": "One factor (password only)",
+    "auth.authelia.policy.option.two_factor": "Two factors (password + TOTP)",
+    "auth.authelia.policy.option.deny": "Deny all",
+    "auth.portal.basePath.label": "Base path",
+    "auth.portal.basePath.description": "Login page path; random by default (e.g. /portal-sneaky-capybara)",
+    "auth.portal.basePath.placeholder": "/portal-...",
+    "auth.oauth2-proxy.oidc.issuerUrl.label": "OIDC Issuer URL",
+    "auth.oauth2-proxy.oidc.issuerUrl.placeholder": "https://accounts.example.com",
+    "auth.oauth2-proxy.oidc.issuerUrl.linkTitle": "oauth2-proxy config docs",
+    "auth.oauth2-proxy.oidc.cookieSecret.description": "Leave empty to auto-generate",
+
     // ── CLI ─────────────────────────────────────────────────────────
     "cli.unknownArg": "Unknown argument: {arg}",
     "cli.usage.global": "Global: --config-dir <dir> / --cache-dir <dir> (or SERVICE_TUNNELS_CONFIG/CACHE)",
@@ -326,8 +394,10 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
   },
 };
 
-/** 翻译查找:当前语言 → en 回退 → 原 key(便于发现漏翻)。{name} 插值。 */
-export function t(lang: Lang, key: string, params: Record<string, string> = {}): string {
+/** 显式语言翻译:当前语言 → en 回退 → 原 key(便于发现漏翻)。{name} 插值。
+ *  内部/固定语言场景用;面向调用方推荐 i18next 风格的 `t(key, params)`
+ *  (默认实例,语言由 setLang/changeLanguage 管理)。 */
+export function translate(lang: Lang, key: string, params: Record<string, string> = {}): string {
   const msg = CATALOG[lang]?.[key] ?? CATALOG.en[key] ?? key;
   return msg.replace(/\{(\w+)\}/g, (m, k) => (k in params ? String(params[k]) : m));
 }
@@ -339,6 +409,84 @@ export function resolveLang(explicit?: string, env: NodeJS.ProcessEnv = process.
     return "zh";
   }
   return "en";
+}
+
+/** 附加语言包(调用方扩展翻译;与内置 CATALOG 合并,调用方优先)。 */
+export type Resources = Record<Lang | string, Record<string, string>>;
+
+/**
+ * i18next 风格实例(零依赖自实现):
+ *   const i18n = createI18n("zh");
+ *   i18n.t("tunnel.ngrok.domain.label");            // "固定域名"
+ *   i18n.changeLanguage("en");
+ *   i18n.t("tunnel.ngrok.domain.label");            // "Fixed domain"
+ *   i18n.addResources("ja", { "...": "..." });      // 调用方扩展
+ *   i18n.getFixedT("zh")("cli.unknownArg", { arg: "x" });
+ */
+export class I18n {
+  #lang: Lang;
+  #resources: Resources = {};
+
+  constructor(initial?: Lang) {
+    this.#lang = initial ?? resolveLang();
+  }
+
+  get language(): Lang {
+    return this.#lang;
+  }
+
+  changeLanguage(lang: Lang): void {
+    this.#lang = lang;
+  }
+
+  /** 是否可翻译(内置或附加资源命中,含 en 回退)。 */
+  exists(key: string, lang?: Lang): boolean {
+    const l = lang ?? this.#lang;
+    return Boolean(this.#resources[l]?.[key] ?? this.#resources.en?.[key] ?? CATALOG[l]?.[key] ?? CATALOG.en[key]);
+  }
+
+  /** 附加语言包(调用方优先于内置)。 */
+  addResources(lang: string, keys: Record<string, string>): void {
+    this.#resources[lang] = { ...(this.#resources[lang] ?? {}), ...keys };
+  }
+
+  /** i18next 风格 t(key, params) — 使用当前语言。 */
+  t(key: string, params?: Record<string, string>): string {
+    return this.#lookup(this.#lang, key, params);
+  }
+
+  /** 固定语言的 t。 */
+  getFixedT(lang: Lang): (key: string, params?: Record<string, string>) => string {
+    return (key: string, params?: Record<string, string>) => this.#lookup(lang, key, params);
+  }
+
+  #lookup(lang: Lang, key: string, params?: Record<string, string>): string {
+    const msg = this.#resources[lang]?.[key] ?? this.#resources.en?.[key] ?? translate(lang, key, params ?? {});
+    return msg.replace(/\{(\w+)\}/g, (m, k) => (k in (params ?? {}) ? String(params![k]) : m));
+  }
+}
+
+/** 创建独立 i18n 实例(语言互不干扰;CLI/服务端每进程一个即可)。 */
+export function createI18n(initial?: Lang): I18n {
+  return new I18n(initial);
+}
+
+/** 默认实例:语言初始探测自 LANG/LC_ALL(默认英文,中文环境出中文)。 */
+export const i18n: I18n = createI18n();
+
+/** 切换默认实例语言(CLI --lang / 服务端初始化时调用)。 */
+export function setLang(lang: Lang): void {
+  i18n.changeLanguage(lang);
+}
+
+/** 当前默认实例语言。 */
+export function getLang(): Lang {
+  return i18n.language;
+}
+
+/** i18next 风格顶层 t(key, params):默认实例的 t(语言由 setLang 管理)。 */
+export function t(key: string, params?: Record<string, string>): string {
+  return i18n.t(key, params);
 }
 
 import type { ParamSpec } from "./tunnels.ts";
@@ -377,7 +525,7 @@ export function localizeSpecs(specs: ParamSpec[], lang: Lang): ParamSpec[] {
   return specs.map((s) => {
     const out: ParamSpec = { ...s };
     const tr = (key: string | undefined, fb: string | undefined) =>
-      key ? t(lang, key) : (fb ?? "");
+      key ? translate(lang, key) : (fb ?? "");
     if (s.labelKey) out.label = tr(s.labelKey, s.label);
     if (s.descriptionKey) out.description = tr(s.descriptionKey, s.description);
     if (s.placeholderKey) out.placeholder = tr(s.placeholderKey, s.placeholder);

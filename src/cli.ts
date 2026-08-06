@@ -9,7 +9,7 @@ import { readState } from "./state.ts";
 import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 import { validateTunnelConfig } from "./validation.ts";
-import { t, resolveLang, type Lang } from "./i18n.ts";
+import { translate, resolveLang, type Lang } from "./i18n.ts";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -26,7 +26,7 @@ function usage(lang: Lang = "en"): void {
                  [--host <h>] [--user <u>] [--port <p>] [--remote-port <rp>] |
                  [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
-  schemas [--type <tunnel-type|auth>]   ${t(lang, "cli.schemasHint")}
+  schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
   expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--force]
@@ -40,8 +40,8 @@ function usage(lang: Lang = "en"): void {
                                         #      | base-domain <domain> | proxy-port <port>
                                         #      | tool-mirrors <tool:url>
 
-${t(lang, "cli.usage.global")}
-${t(lang, "cli.usage.lang")}`);
+${translate(lang, "cli.usage.global")}
+${translate(lang, "cli.usage.lang")}`);
 }
 
 interface CliArgs {

@@ -58,9 +58,26 @@ export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from
 export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
 export { CUSTOM_TUNNEL_ENV_PREFIX, customTunnelTemplates, customTunnelTemplate, isCustomTunnelType } from "./tunnels-custom.ts";
 export { authProviderSchemas, authProviderMetas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
-// 多语:翻译/探测/本地化 helper(零依赖,默认英文,zh 语言包覆盖)
-export { t, resolveLang, localizeSpecs, localizeSchemas, withSchemaI18nKeys, CATALOG } from "./i18n.ts";
-export type { Lang } from "./i18n.ts";
+// 多语:零依赖自实现,i18next 风格接口(t/changeLanguage/getFixedT/…)
+//   t(key, params) — 默认实例,语言由 setLang/changeLanguage 管理
+//   translate(lang, key, params) — 显式语言版本
+//   createI18n(initial?) — 独立实例
+//   resolveLang / localizeSpecs / localizeSchemas / withSchemaI18nKeys / CATALOG
+export {
+  t,
+  translate,
+  resolveLang,
+  createI18n,
+  i18n,
+  setLang,
+  getLang,
+  I18n,
+  localizeSpecs,
+  localizeSchemas,
+  withSchemaI18nKeys,
+  CATALOG,
+} from "./i18n.ts";
+export type { Lang, Resources } from "./i18n.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
