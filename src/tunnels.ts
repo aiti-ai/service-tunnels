@@ -790,7 +790,8 @@ export const TUNNEL_META: Record<TunnelType, TunnelMeta> = {
   cloudflared: { favorite: true },
   localtunnel: { favorite: true },
   bore: { favorite: true },
-  natapp: { favorite: true },
+  // natapp 需 natapp.cn 付费 authtoken(非零账号/即开即用)——不标星
+  natapp: {},
   // `command` runs a raw shell command as the tunnel — dangerous by design;
   // consumers that expose a one-click tunnel picker must hide it (meta flag).
   command: { dangerous: true },

@@ -9,6 +9,13 @@
 
 ## [Unreleased]
 
+## [0.3.22] - 2026-08-07
+
+### Fixed
+- **natapp 不再标星**：`TUNNEL_META` 移除 `natapp: { favorite: true }`——favorite
+  语义是「零账号/少参数/即开即用」(serveo/cloudflared/localtunnel/bore)，natapp
+  需 natapp.cn 付费 authtoken，不应出现在推荐首位/带徽标。
+
 ## [0.3.21] - 2026-08-07
 
 ### Fixed
