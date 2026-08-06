@@ -9,6 +9,34 @@
 
 ## [Unreleased]
 
+### Added
+- **OAuth2 变体 provider**（`src/providers/oauth2-variants.ts`，docs/oauth2-variants.md）：
+  基于 oauth2-proxy 的声明式 auth provider 变体（`--auth oauth2-github` /
+  `oauth2-google` / `oauth2-gitlab` / `oauth2-microsoft` / `oauth2-keycloak` /
+  `oauth2-okta` / `oauth2-generic`）——端点/scope/flags 由变体定义携带，凭据由
+  配置档 `auth.oauth2`（或旧 `auth.oidc`）携带 → 页面表单字段**默认填入**
+  （复用 ParamSpec `default`；不删除、可编辑覆盖，清空某项回落配置档值），
+  零输入直点暴露。**环境变量注册自定义变体**（类似 command 隧道）：
+  `SERVICE_TUNNELS_OAUTH2_VARIANT_<NAME>="provider=oidc;clientId={{clientId}};..."`
+  → 新类型 `oauth2-<name>`；键自动归一化 snake_case TOML（issuerUrl →
+  oidc_issuer_url），`{{token}}`/`{{token:default}}` 成为表单参数，列表型键
+  （github_org 等）写 TOML 数组。优先级：表单/CLI `--provider-set`
+  > 配置档按变体 > 共享 > 旧 oidc > 内置固定/模板默认。变体实例复用 oauth2-proxy 侧车
+  （独立 type#site 实例/端口/配置），所有写进 TOML 的值继续过控制字符校验 +
+  TOML 转义（防注入）。UI 暴露页 auth 下拉数据驱动（label/已配置徽标/按需参数
+  输入）；daemon `/schemas` 新增 `authMetas`；`providerOrder()` 变体按已配置优先。
+
+## [0.3.12] - 2026-08-06
+
+### Fixed
+- **basic 认证绕过**( /  / )：
+  嵌入方(pi-web Next middleware)的 rewrite 无法保留 vhost Host(fetch 规范
+  forbidden header),nginx gateway 的 server_name 匹配不到 → 落到默认 server
+  → auth_basic 被绕过。basic 改由决策 API 进程内校验(新增 APR1/md5-crypt
+  校验),凭证有效直接 pipe 到服务,无效 401。
+
+## [0.3.11] - 2026-08-06
+
 ### Changed
 - **portal 登录体验优化**（`src/providers/portal.ts`）：loading 过渡完全放在客户端——
   点击 Sign in / Verify 的瞬间立即弹出全屏过渡页（spinner + “Signing in… / Please

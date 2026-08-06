@@ -160,7 +160,18 @@ export class ProxyManager {
   }
 
   addBinding(b: ProxyBinding): void {
-    this.#bindings.set(`${b.port}:${b.label}`, b);
+    const key = `${b.port}:${b.label}`;
+    const prev = this.#bindings.get(key);
+    this.#bindings.set(key, b);
+    // 同 port:label 的绑定被替换且 provider 变化(如 portal → basic)→ 该 host
+    // 在网关上的注册缓存作废:否则 #resolveSite 的 basic/forward-auth 分支看到
+    // #registered.has(key) 恒真会跳过 registerHost,新 provider 的鉴权配置
+    // (auth_basic / auth_request)永远不会写入 nginx → 默认 server 无鉴权直通。
+    if (prev && prev.provider !== b.provider) {
+      for (const k of [...this.#registered]) {
+        if (k.startsWith(`${key}:`)) this.#registered.delete(k);
+      }
+    }
     this.#opts.log?.(`proxy: enrolled ${b.port}${b.label ? `-${b.label}` : ""} → site ${b.site} (${b.provider || "open"})`);
     this.#opts.onChange?.();
   }
@@ -383,12 +394,12 @@ export class ProxyManager {
       // basic：provider 自描述（nginx auth_basic，无 forward-auth 探针）
       if ((provider.gatewayMode ?? "forward-auth") === "basic") {
         const gw = await this.#ensureGateway();
+        const htpasswd = (provider as unknown as { htpasswdFile?: string }).htpasswdFile;
         if (!this.#registered.has(key)) {
-          const htpasswd = (provider as unknown as { htpasswdFile?: string }).htpasswdFile;
           await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http", site: binding.site });
           this.#registered.add(key);
         }
-        return { basicGatewayPort: gw.port };
+        return { basicGatewayPort: gw.port, htpasswdFile: htpasswd };
       }
       if (!this.#registered.has(key)) {
         await provider.registerHost(vhost, binding.policy);

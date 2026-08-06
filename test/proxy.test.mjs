@@ -70,10 +70,10 @@ function spawnEchoServer() {
 }
 
 /** Raw HTTP GET with a custom Host header (no DNS needed). */
-function rawGet(port, host, path) {
+function rawGet(port, host, path, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: "127.0.0.1", port, path, headers: { host, connection: "close" } },
+      { host: "127.0.0.1", port, path, headers: { host, connection: "close", ...extraHeaders } },
       (res) => {
         let body = "";
         res.setEncoding("utf8");
@@ -676,33 +676,44 @@ test("labeled vhost forward-auth: 302 → login page via basePath → 200 with c
   await new Promise((r) => svc.close(r));
 });
 
-test("labeled vhost basic (D2): request piped to the nginx gateway with Host preserved", { timeout: 20_000 }, async () => {
+test("labeled vhost basic (D2): basic auth verified in the decision API (401 → service with valid creds)", { timeout: 20_000 }, async () => {
   const svc = await spawnInProcEcho();
   const svcPort = svc.address().port;
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const dir = mkdtempSync(join(tmpdir(), "st-basic-"));
+  const htpasswd = join(dir, "htpasswd");
+  const hash = execFileSync("openssl", ["passwd", "-apr1", "-salt", "ab", "pw123"], { encoding: "utf8" }).trim();
+  writeFileSync(htpasswd, `alice:${hash}\n`, "utf8");
 
-  // fake nginx gateway: would run auth_basic + backend routing; here just
-  // echoes the Host it received (proves the proxy piped the vhost through)
-  const gateway = httpServer((req, res) => {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ host: req.headers.host, url: req.url }));
-  });
-  await new Promise((r) => gateway.listen(0, "127.0.0.1", r));
-  const gatewayPort = gateway.address().port;
+  // fake gateway port (decision API 校验通过后不再依赖 gateway 的 server_name
+  // —— 嵌入方 Next rewrite 无法保留 vhost Host,直接 pipe 到服务)
+  const gatewayPort = (await new Promise((r) => {
+    const s = httpServer((_q, res) => { res.writeHead(500); res.end("should not be hit"); });
+    s.listen(0, "127.0.0.1", () => r(s.address().port));
+  }));
 
   const proxy = await startProxy({
     resolveLabel: (label) => (label === "services" ? "services" : null),
-    resolveSite: async (port, site) => (site === "services" ? { basicGatewayPort: gatewayPort } : null),
+    resolveSite: async (port, site) => (site === "services" ? { basicGatewayPort: gatewayPort, htpasswdFile: htpasswd } : null),
   });
   try {
-    const res = await rawGet(proxy.port, `${svcPort}-services.st.localhost`, "/deep?a=1");
-    assert.equal(res.status, 200);
-    const body = JSON.parse(res.body);
-    assert.equal(body.host, `${svcPort}-services.st.localhost`, "vhost piped to gateway");
-    assert.equal(body.url, "/deep?a=1");
+    // 无凭证 → 401(决策 API 校验)
+    const unauth = await rawGet(proxy.port, `${svcPort}-services.st.localhost`, "/");
+    assert.equal(unauth.status, 401);
+    assert.match(String(unauth.headers?.["www-authenticate"] || unauth.body), /Basic/);
+    // 凭证错误 → 401
+    const bad = await rawGet(proxy.port, `${svcPort}-services.st.localhost`, "/", { authorization: "Basic " + Buffer.from("alice:wrong").toString("base64") });
+    assert.equal(bad.status, 401);
+    // 凭证正确 → 直接 pipe 到服务(绕过 gateway)
+    const ok = await rawGet(proxy.port, `${svcPort}-services.st.localhost`, "/deep?a=1", { authorization: "Basic " + Buffer.from("alice:pw123").toString("base64") });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(JSON.parse(ok.body), { url: "/deep?a=1", host: `${svcPort}-services.st.localhost` }, "service answered directly with vhost Host");
   } finally {
     await proxy.close();
   }
-  await new Promise((r) => gateway.close(r));
   await new Promise((r) => svc.close(r));
 });
 

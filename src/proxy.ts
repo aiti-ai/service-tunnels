@@ -149,6 +149,8 @@ export interface ProxySiteBackend {
    * registered (authMode "basic").
    */
   basicGatewayPort?: number;
+  /** per-site htpasswd file for the basic gate (decision-API verification). */
+  htpasswdFile?: string;
 }
 
 /**
@@ -337,7 +339,16 @@ async function gateBackend(
   input: ServiceHostResolveInput,
 ): Promise<ServiceHostDecision | null> {
   if (backend.basicGatewayPort) {
-    return { kind: "pipe", port: backend.basicGatewayPort, url: input.url ?? "/" };
+    // basic 认证在决策 API 进程内校验:嵌入方(pi-web Next middleware)的 rewrite
+    // 无法保留 vhost Host(forbidden header),nginx gateway 的 server_name 匹配
+    // 不到会落到默认 server → auth_basic 被绕过。有效凭证 → 直接 pipe 到服务;
+    // 无效/缺失 → 401。网关仍生成 auth_basic 配置(独立 createProxyServer 保留
+    // Host 的直连路径也走同一决策,双保险)。
+    const { verifyHtpasswd } = await import("./providers/basic.ts");
+    if (!backend.htpasswdFile || !verifyHtpasswd(input.authorization, backend.htpasswdFile)) {
+      return { kind: "deny-auth", status: 401, wwwAuthenticate: 'Basic realm="service-tunnels", charset="UTF-8"' };
+    }
+    return null;
   }
   if (backend.forwardAuth) {
     const pathname = input.url.split("?")[0] ?? "/";
