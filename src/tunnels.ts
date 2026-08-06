@@ -742,7 +742,7 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
       key: "server",
       label: "bore server",
       default: "bore.pub",
-      description: "bore server 地址(host 或 host:port);默认 bore.pub:7835(公共服务器,免注册);自建填 localhost:7835",
+      description: "bore server 地址(host 或 host:port);默认 bore.pub:7835(公共服务器,免注册);自建填你的服务器 IP:端口(如 1.2.3.4:7835)",
     },
     { key: "remotePort", type: "number", label: "远程端口", description: "-p 请求固定端口;留空=server 随机分配" },
     { key: "token", type: "password", label: "Secret", description: "-s 共享密钥;server 未设 secret 则留空" },

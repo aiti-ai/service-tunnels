@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+## [0.3.25] - 2026-08-07
+
+### Fixed
+- **bore server 字段描述纠正**：自建场景应填「你的服务器 IP:端口」
+  （bore 客户端要连的 server 地址），而非误导性的 localhost:7835。
+
 ## [0.3.24] - 2026-08-07
 
 ### Changed
