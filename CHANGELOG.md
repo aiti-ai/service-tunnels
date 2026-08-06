@@ -16,6 +16,17 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
+## [0.3.18] - 2026-08-06
+
+### Fixed
+- **proxy/both 模式缺端口归属校验**(`src/expose.ts`)：verifyPortOwner 只在
+  tunnel 模式,proxyExpose 可对任意端口注册 vhost——已补齐。
+- **authelia 被 deployBasePath 合并弄坏**(`src/expose.ts` /
+  `src/auth-provider.ts` / `src/providers/portal.ts`)：0.3.11 修 portal 合并时
+  authelia 的 server.address 变成多段(/dev/autheliaxxx) → config validate
+  失败。新增 `nestedBasePath` 能力标记,仅 portal(Node 服务)合并部署前缀,
+  authelia 等单段约束 provider 不合并。
+
 ## [0.3.17] - 2026-08-06
 
 ### Fixed

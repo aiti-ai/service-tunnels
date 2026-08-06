@@ -50,6 +50,13 @@ export interface AuthProviderCapabilities {
   multiHost: boolean;
   /** Needs a session store (Redis for authelia; oauth2-proxy/basic don't). */
   needsSessionStore: boolean;
+  /**
+   * server.address / 登录路径支持多段 base path(如 /dev/portal-xxx)。
+   * 缺省 false:只支持单段(authelia 的 server.address 必须单子路径)。
+   * 不支持嵌套路径的 provider 不合并 deployBasePath(0.3.11 起 portal 合并
+   * 时曾把 authelia 的 /dev/autheliaxxx 传给 authelia → config validate 失败)。
+   */
+  nestedBasePath?: boolean;
 }
 
 /** 免认证直达内容（域名验证文件 + 预登录设置页）——oauth2-proxy 等 IdP 联动场景。 */

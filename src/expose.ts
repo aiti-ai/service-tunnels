@@ -261,6 +261,15 @@ async function proxyExpose(
   siteCfg: SiteConfig | undefined,
 ): Promise<ExposeResult> {
   const log = ctx.log ?? (() => {});
+  // 与 exposeTunnel 一致:proxy/both 模式同样做端口归属校验(多用户安全),
+  // 否则可对任意端口注册 vhost 绕过校验。
+  if (!opts.force) {
+    const { verifyPortOwner } = await import("./discovery.ts");
+    const check = verifyPortOwner(port, ctx.internal);
+    if (!check.allowed) {
+      return { url: null, tunnel: "", error: check.reason ?? "Port ownership verification failed" };
+    }
+  }
   const cfgFile = readConfigFile(ctx.configDir);
   const proxy = ctx.proxy ?? new ProxyManager({
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
@@ -335,8 +344,11 @@ async function proxyExpose(
     // Merge the embedder's deployment base path (host /dev) under the
     // provider's own base path: /dev + /portal → /dev/portal — login pages,
     // authz probes and redirects all live under the combined path.
-    const mergedBasePath = gwMode === "basic"
-      ? ""
+    // 仅支持嵌套路径的 provider(portal)合并部署前缀;authelia 等单段约束
+    // 的 provider 不合并,否则 server.address=/dev/autheliaxxx 校验失败。
+    const supportsNested = provider.capabilities.nestedBasePath === true;
+    const mergedBasePath = gwMode === "basic" || !supportsNested
+      ? basePath
       : sanitizeBasePath(`${(proxy.basePath ?? "").replace(/\/+$/, "")}${basePath}`);
     if (!hasPath && gwMode !== "basic") await provider.setBasePath?.(mergedBasePath);
     const problems = (await provider.validate?.()) ?? [];

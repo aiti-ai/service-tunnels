@@ -110,6 +110,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     randomDomain: true,
     multiHost: true,
     needsSessionStore: false,
+    nestedBasePath: true, // Node 服务支持任意嵌套路径
   };
 
   #ctx: ProviderContext;
