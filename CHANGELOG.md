@@ -7,7 +7,21 @@
 > （如 0.2.38–0.2.41）若未出现在 registry 发布列表中，其功能统一计入下一个
 > 实际发布版本。
 
-## [Unreleased]
+## [0.3.13] - 2026-08-06
+
+### Fixed
+- **oauth2 变体审核加固**：
+  - UI 暴露页预填值（含 clientSecret）JSON 转义 `<` 防 `</script>` 逃逸 +
+    属性值 HTML 转义（防引号逃逸注入事件属性）——纵深防御（值来自配置档/环境变量）；
+  - 变体内部角色改按变体 id（oauth2-github/...）登记——同 site 多个变体端口
+    互不覆盖/互不注销（原统一 "oauth2-proxy" 角色会互相注销）；
+  - 自定义声明忽略托管键（http_address/upstreams 恒由 provider 生成）防 TOML
+    重复键；`cookie_secure` 允许自定义覆盖默认 false；
+  - 内置变体配置键统一 snake_case（oauth2-proxy TOML 约定：`github_org` /
+    `gitlab_url` / `azure_tenant`，原 kebab 不生效）；`github_org` 等列表键
+    写 TOML 数组。
+
+## [0.3.12] - 2026-08-06
 
 ### Added
 - **OAuth2 变体 provider**（`src/providers/oauth2-variants.ts`，docs/oauth2-variants.md）：
