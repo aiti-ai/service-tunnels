@@ -141,7 +141,7 @@ test("gateway: nginx config generation + host registration", async () => {
     { host: "demo.ngrok-free.app", port: 5173, authPort: 9091, basePath: "/authelia", authMode: "forward-auth" },
     { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
   );
-  assert.match(host, /server_name demo\\.ngrok-free\\.app/);
+  assert.match(host, /server_name demo\.ngrok-free\.app/);
   assert.match(host, /auth_request \/authelia\/api\/authz\/auth-request/);
   assert.match(host, /proxy_pass http:\/\/127\.0\.0\.1:5173/);
   assert.match(host, /location \/authelia\//);

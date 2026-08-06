@@ -58,7 +58,7 @@ test("nginx gateway + portal provider: 302→login→cookie→200 (real nginx)",
     log: () => {},
   };
 
-  const portal = new PortalAuthProvider(ctx, { user: { name: "admin", password: "pw" } });
+  const portal = new PortalAuthProvider(ctx, { user: { name: "admin", password: "pw" }, basePath: "/portal" });
   await portal.prepare();
   await portal.start();
 

@@ -130,7 +130,8 @@ test("basic provider: htpasswd generation + nginx auth_basic config", { timeout:
       { host: "demo.ngrok-free.app", port: 5173, authMode: "basic", htpasswdFile: join(cacheDir, "tmp", "basic", "htpasswd") },
       { nginxPort: 4100, nginxRoot: join(cacheDir, "tmp", "nginx") },
     );
-    assert.match(host, /auth_basic "service-tunnels"/);
+    // basic realm 现带 site(990f4ae: 隧道域 realm 也带 site,"service-tunnels default")
+    assert.match(host, /auth_basic "service-tunnels( [a-z0-9-]+)?"/);
     assert.match(host, /auth_basic_user_file/);
     assert.equal(host.includes("auth_request"), false, "basic mode must not use auth_request");
 
@@ -209,7 +210,7 @@ test("expose --auth basic end-to-end with real nginx", { timeout: 40_000 }, asyn
     const nginxDir = readdirSync(join(cacheDir, "tmp")).find((n) => /^nginx-\d+$/.test(n));
     assert.ok(nginxDir, "per-ppid nginx dir exists");
     const hostConf = readFileSync(join(cacheDir, "tmp", nginxDir, "conf.d", "demo-basic.trycloudflare.com.conf"), "utf8");
-    assert.match(hostConf, /auth_basic "service-tunnels"/);
+    assert.match(hostConf, /auth_basic "service-tunnels( [a-z0-9-]+)?"/);
     assert.match(hostConf, /server_name demo-basic/);
     const mainConf = readFileSync(join(cacheDir, "tmp", nginxDir, "nginx.conf"), "utf8");
     assert.match(mainConf, /include .*conf\.d\/\*\.conf;/);

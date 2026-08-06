@@ -59,7 +59,7 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
       },
       log: () => {},
     },
-    { user: { name: "admin", password: "pw" } },
+    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
 
   await provider.prepare();
@@ -148,7 +148,7 @@ test("portal login redirect: hidden `next` survives the browser round-trip (no d
       },
       log: () => {},
     },
-    { user: { name: "admin", password: "pw" } },
+    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
   await provider.prepare();
   await provider.start();
@@ -184,7 +184,7 @@ test("portal login password transport: RSA-OAEP front-end encryption", { timeout
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" } },
+    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
   await provider.prepare();
   await provider.start();
@@ -249,7 +249,7 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" } },
+    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
   await provider.prepare();
   await provider.start();
@@ -277,7 +277,7 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const provider2 = new P2(
     { configDir: d2.configDir, cacheDir: d2.cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" } },
+    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
   await provider2.prepare();
   await provider2.start();

@@ -7,6 +7,26 @@
 > （如 0.2.38–0.2.41）若未出现在 registry 发布列表中，其功能统一计入下一个
 > 实际发布版本。
 
+## [Unreleased]
+
+### Changed
+- **portal 登录体验优化**（`src/providers/portal.ts`）：loading 过渡完全放在客户端——
+  点击 Sign in / Verify 的瞬间立即弹出全屏过渡页（spinner + “Signing in… / Please
+  wait”，卡片样式与登录表单一致），提交期间与 302 跳转期间保持显示，直到目标页面
+  渲染；登录失败（401 返回登录页）时过渡页随之消失并展示错误。服务端协议不变
+  （成功仍是经典 302 到 `next`，curl/API 客户端不受影响）
+
+### Fixed
+- **deployBasePath 合并失效**（`src/providers/portal.ts` / `src/authelia.ts` /
+  `src/expose.ts`）：portal/authelia 的内置 `#basePath` 默认值非空（`/portal`、
+  `/authelia`），导致 `expose.ts` 的 `hasPath` 恒真，嵌入方部署路径（如 `/dev`）
+  永远合并不进去——带 basePath 部署时登录重定向丢前缀（`/portal/login` 而非
+  `/dev/portal-xxx/login`）。现改为内置默认空串（自描述默认仍在 `defaultBasePath()`），
+  basePath 解析链 `??` 改 `||`（空串继续 fall through 到配置/默认），合并后经
+  `setBasePath` 生效。**注意**：无显式 basePath 的 portal/authelia 默认登录路径
+  从固定 `/portal`、`/authelia` 变为 `defaultBasePath()` 的随机路径
+  （`/portal-xxx`、`/authelia<alnum>`），升级后旧登录书签/会话失效
+
 ## [0.3.1] - 2026-08-06
 
 ### Changed

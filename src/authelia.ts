@@ -146,7 +146,7 @@ export class AutheliaProvider implements AuthProvider {
     this.#ctx = ctx;
     this.#opts = opts;
     this.#port = opts.port ?? 0;
-    this.#basePath = opts.basePath ?? DEFAULT_BASE_PATH;
+    this.#basePath = opts.basePath ?? ""; // 内置默认交给 defaultBasePath();非空会让 deployBasePath 合并失效
     this.#tmpDir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "authelia");
     this.#dataDir = opts.dataDir ?? join(ctx.cacheDir, "data", "authelia");
     this.#mainConfig = join(this.#tmpDir, "configuration.yml");

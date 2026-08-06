@@ -313,12 +313,14 @@ async function proxyExpose(
     const gwMode = provider.gatewayMode ?? "forward-auth";
     const hasPath = (provider as { basePath?: string }).basePath;
     // 已存在的共享实例用自己的 basePath；否则 用户配置 > provider 默认
+    // 用 || 而非 ??:provider 内置默认现在为空串(自描述默认在 defaultBasePath()),
+    // 空串必须继续 fall through 到 用户配置 > provider 默认,再合并部署 basePath。
     const basePath = hasPath
-      ?? opts.basePath
-      ?? siteCfg?.basePath
-      ?? (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
-      ?? provider.defaultBasePath?.()
-      ?? `/${providerType}`;
+      || opts.basePath
+      || siteCfg?.basePath
+      || (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+      || provider.defaultBasePath?.()
+      || `/${providerType}`;
     // Merge the embedder's deployment base path (host /dev) under the
     // provider's own base path: /dev + /portal → /dev/portal — login pages,
     // authz probes and redirects all live under the combined path.
@@ -495,11 +497,11 @@ async function exposeTunnel(
   const gwMode = provider.gatewayMode ?? "forward-auth";
   const hasPath = (provider as { basePath?: string }).basePath;
   const initialBasePath = hasPath
-    ?? opts.basePath
-    ?? siteCfg?.basePath
-    ?? (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
-    ?? provider.defaultBasePath?.()
-    ?? `/${providerType}`;
+    || opts.basePath
+    || siteCfg?.basePath
+    || (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+    || provider.defaultBasePath?.()
+    || `/${providerType}`;
   // basePath is interpolated into nginx locations + 302 redirects + authelia's
   // server.address — allow a plain URL path only (no ; {} whitespace quotes
   // which would inject nginx directives or break the config).

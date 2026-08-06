@@ -19,6 +19,11 @@ import { randomName } from "../auth-provider.ts";
  *   GET {basePath}/login                    portal page
  *   POST {basePath}/login                   credential check → signed cookie
  *
+ * Successful login keeps the classic 302 to `next`; the loading transition is
+ * handled client-side: submitting the form instantly pops a full-screen
+ * transition page (spinner), which stays up until the 302 lands — a failed
+ * login returns the login page and the overlay simply disappears.
+ *
  * Security model (1FA baseline, see docs/config.md):
  *   - passwords hashed with scrypt (node:crypto, random 16B salt, 64B key)
  *   - session cookie = base64url(expiry.name) + HMAC-SHA256 signature,
@@ -113,7 +118,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   #usersFile = "";
   #serverFile = "";
   #port = 0;
-  #basePath = "/portal";
+  #basePath = ""; // 内置默认交给 defaultBasePath();非空会让 expose.ts hasPath 恒真,deployBasePath 合并失效
   #deployBasePath = "";
   #secret = "";
   #proc: ReturnType<typeof spawn> | null = null;
@@ -130,7 +135,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     this.#usersFile = join(this.#dir, "users.json");
     this.#serverFile = join(this.#dir, "server.mjs");
     this.#port = opts.port ?? 0;
-    this.#basePath = opts.basePath ?? "/portal";
+    this.#basePath = opts.basePath ?? "";
     this.#deployBasePath = (opts.deployBasePath ?? "").replace(/\/+$/, "");
     this.site = opts.site ?? "default";
     // per-instance random secret — NOT persisted: exposes are lifecycle-only,
@@ -556,14 +561,22 @@ function totpPage(next, error, host) {
     + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .6rem}'
     + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px;letter-spacing:.35em;text-align:center}'
-    + 'button{margin-top:1.2rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}</style>'
+    + 'button{margin-top:1.2rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
+    + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}'
+    + '#busy .card{background:#fff;padding:2.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem;text-align:center}'
+    + '#busy .spin{width:2.2rem;height:2.2rem;margin:0 auto 1rem;border:3px solid #d0d3da;border-top-color:#2d6cdf;border-radius:50%;animation:st .8s linear infinite}'
+    + '@keyframes st{to{transform:rotate(360deg)}}'
+    + '#busy p{margin:.25rem 0;color:#555;font-size:.9rem}#busy p.t{font-weight:600;color:#222;font-size:1.05rem}</style>'
     + '</head><body><form method="post" action="' + BASE + '/login/2fa">'
     + '<h1>Two-factor authentication</h1>'
     + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
     + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
     + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err
     + '<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>'
-    + '<button type="submit">Verify</button></form></body></html>';
+    + '<button type="submit">Verify</button></form>'
+    + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Verifying…</p><p>Please wait</p></div></div>'
+    + '<script>var f=document.querySelector("form");if(f)f.addEventListener("submit",function(){var o=document.getElementById("busy");if(o)o.style.display="flex";var b=f.querySelector("button");if(b){b.disabled=true;b.textContent="Verifying…";}});</script>'
+    + '</body></html>';
 }
 
 // —— brute-force protection (authelia-style) ————————————————
@@ -660,10 +673,15 @@ function html(next, error, keyId, publicKey, host) {
       + 'const PUB="' + publicKey + '";'
       + 'const KEY_ID="' + keyId + '";'
       + 'function b64ToBuf(b){const bin=atob(b);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return u.buffer;}'
+      + 'function showBusy(){var o=document.getElementById("busy");if(o)o.style.display="flex";var b=document.querySelector("button[type=submit]");if(b){b.disabled=true;b.textContent="Signing in…";}}'
+      + 'function hideBusy(){var o=document.getElementById("busy");if(o)o.style.display="none";var b=document.querySelector("button[type=submit]");if(b){b.disabled=false;b.textContent="Sign in";}}'
       + 'document.addEventListener("DOMContentLoaded",async()=>{'
       + 'const f=document.getElementById("login");'
       + 'f.addEventListener("submit",async(e)=>{'
+      + 'if(!window.crypto||!crypto.subtle)return;' // no WebCrypto → plaintext fallback (js-warn banner already shown)
       + 'e.preventDefault();'
+      + 'showBusy();'
+      + 'try{'
       + 'const pw=document.getElementById("pw").value;'
       + 'const key=await crypto.subtle.importKey("spki",b64ToBuf(PUB),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);'
       + 'const enc=new Uint8Array(await crypto.subtle.encrypt({name:"RSA-OAEP"},key,new TextEncoder().encode(pw)));'
@@ -672,6 +690,7 @@ function html(next, error, keyId, publicKey, host) {
       + 'document.getElementById("keyId").value=KEY_ID;'
       + 'document.getElementById("pw").value="";'
       + 'f.submit();'
+      + '}catch(err){hideBusy();alert("Encryption failed — please try again.");}'
       + '});});</script>'
     : "";
   return '<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title>'
@@ -681,7 +700,12 @@ function html(next, error, keyId, publicKey, host) {
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px}'
     + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
     + 'p.warn{background:#fdf3e0;border:1px solid #f0c36d;color:#8a6d1a;font-size:.8rem;padding:.5rem .7rem;border-radius:6px;margin:1rem 0 .2rem;line-height:1.4}'
-    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}</style>'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
+    + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}'
+    + '#busy .card{background:#fff;padding:2.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:22rem;text-align:center}'
+    + '#busy .spin{width:2.2rem;height:2.2rem;margin:0 auto 1rem;border:3px solid #d0d3da;border-top-color:#2d6cdf;border-radius:50%;animation:st .8s linear infinite}'
+    + '@keyframes st{to{transform:rotate(360deg)}}'
+    + '#busy p{margin:.25rem 0;color:#555;font-size:.9rem}#busy p.t{font-weight:600;color:#222;font-size:1.05rem}</style>'
     + '</head><body>' + enc
     + '<form id="login" method="post" action="' + BASE + '/login">'
     + '<h1>Sign in to access this service</h1>'
@@ -691,7 +715,9 @@ function html(next, error, keyId, publicKey, host) {
     + '<input type="hidden" name="keyId" id="keyId">'
     + '<label>Username</label><input name="username" autocomplete="username" required autofocus>'
     + '<label>Password</label><input name="password" id="pw" type="password" autocomplete="current-password" required>'
-    + '<button type="submit">Sign in</button></form></body></html>';
+    + '<button type="submit">Sign in</button></form>'
+    + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Signing in…</p><p>Please wait</p></div></div>'
+    + '</body></html>';
 }
 
 function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS) {
