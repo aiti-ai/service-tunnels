@@ -70,6 +70,35 @@ interface PortalUserRecord {
  * logic; the parent needs an independent implementation to activate pending
  * enrollments (RFC 6238, SHA-1, 30s steps, ±1 window).
  */
+/** RFC 6238 TOTP 码生成(SHA-1 / 6 位 / 30s 步长,与 portal 校验同一实现)。
+ *  offset:0=当前窗口,1=下一窗口(倒计时余量)。无需手机 app——CLI/脚本直接算。 */
+export function generateTotpCode(secretB32: string, offset = 0): string | null {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = String(secretB32).toUpperCase().replace(/=+$/, "");
+  if (!clean) return null;
+  const key = Buffer.alloc((clean.length * 5) >> 3);
+  let bits = 0;
+  let value = 0;
+  let idx = 0;
+  for (const ch of clean) {
+    const v = alphabet.indexOf(ch);
+    if (v < 0) return null;
+    value = (value << 5) | v;
+    bits += 5;
+    if (bits >= 8) {
+      key[idx++] = (value >>> (bits - 8)) & 0xff;
+      bits -= 8;
+    }
+  }
+  if (idx === 0) return null;
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000) + offset));
+  const hmac = createHmac("sha1", key).update(counter).digest();
+  const o = hmac[hmac.length - 1]! & 0x0f;
+  const num = ((hmac[o]! & 0x7f) << 24) | (hmac[o + 1]! << 16) | (hmac[o + 2]! << 8) | hmac[o + 3]!;
+  return String(num % 1_000_000).padStart(6, "0");
+}
+
 function verifyTotpParent(secretB32: string, code: string): boolean {
   if (!/^\d{6}$/.test(code)) return false;
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";

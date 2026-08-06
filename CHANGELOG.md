@@ -16,6 +16,16 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
+## [0.3.20] - 2026-08-07
+
+### Added
+- **`st auth totp code`** — 不借助手机 app 生成 TOTP 验证码(CLI 内嵌 RFC 6238):
+  - `auth totp code <name> [--site <s>] [--provider portal]` — 从用户记录读
+    secret(pending 用 totpPending,激活后 totpSecret),打印当前码 + 下一窗口码 + 剩余秒数
+  - `auth totp code --secret <b32>` — 任意 base32 secret(otpauth URI 里的也行)
+  - 端到端验证:CLI 生成的码被 portal totp-activate 接受;与 pyotp 官方库逐窗口一致。
+- **`generateTotpCode()`** 导出(`src/providers/portal.ts`)——同一实现供 CLI/脚本复用。
+
 ## [0.3.19] - 2026-08-07
 
 ### Added

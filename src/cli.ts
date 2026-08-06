@@ -9,6 +9,8 @@ import { readState } from "./state.ts";
 import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 import { validateTunnelConfig } from "./validation.ts";
+import { readFileSync } from "fs";
+import { join } from "path";
 
 function usage(): void {
   console.log(`service-tunnels <command>
@@ -81,6 +83,8 @@ interface CliArgs {
   mode?: string;
   /** --site <name> (expose): auth realm for the local vhost. */
   site?: string;
+  /** --secret <b32> (auth totp code): 直接用给定 base32 secret 生成验证码。 */
+  secret?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
   policy?: string;
   /** --proxy-port <p>: proxy transport port (mode proxy/both). */
@@ -199,6 +203,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--site":
         args.site = argv[++i]!;
+        break;
+      case "--secret":
+        args.secret = argv[++i]!;
         break;
       case "--proxy-port":
         args.proxyPort = Number(argv[++i]!);
@@ -786,8 +793,35 @@ async function main(): Promise<void> {
         jsonOut({ disabled: cmd[3], site });
       } else if (op === "totp" && cmd[2] === "status") {
         jsonOut({ site, ...(await st.auth.totpStatus(cmd[3] ?? "", args.provider, site)) });
+      } else if (op === "totp" && cmd[2] === "code") {
+        // 不借助手机 app 生成当前 TOTP 验证码:从用户记录读 secret 或 --secret 直给
+        const name = cmd[3] ?? "";
+        const provider = args.provider ?? "portal";
+        let secret = args.secret as string | undefined;
+        if (!secret) {
+          const dir = site === "default"
+            ? join(st.dirs.cacheDir, "tmp", "portal")
+            : join(st.dirs.cacheDir, "tmp", "sites", site, provider);
+          try {
+            const users = JSON.parse(readFileSync(join(dir, "users.json"), "utf8"));
+            // pending(激活前)存 totpPending,激活后移到 totpSecret——两者都可生成码
+            secret = users[name]?.totpSecret ?? users[name]?.totpPending;
+          } catch { /* fallthrough */ }
+          if (!secret) {
+            console.error(`auth totp code: no enrolled TOTP for ${provider}/${site}/${name} (enroll first, or pass --secret)`);
+            process.exit(2);
+          }
+        }
+        const { generateTotpCode } = await import("./providers/portal.ts");
+        const code = generateTotpCode(secret, 0);
+        const next = generateTotpCode(secret, 1);
+        if (!code || !next) {
+          console.error("auth totp code: invalid secret (base32?)");
+          process.exit(2);
+        }
+        jsonOut({ name: name || "<raw>", site, provider, secret: args.secret ? undefined : secret, code, next, expiresIn: Math.ceil((30_000 - (Date.now() % 30_000)) / 1000) });
       } else {
-        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status [--site <s>] [--provider ...]");
+        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status|code [--site <s>] [--provider ...] [--secret <b32>]");
         process.exit(2);
       }
       break;
