@@ -37,6 +37,7 @@ import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths, type To
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAULT_SUFFIXES, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta } from "./tunnels.ts";
+import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { GatewayController } from "./gateway.ts";
@@ -54,6 +55,7 @@ export type { DaemonStatus } from "./daemon.ts";
 export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
 export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from "./tunnels.ts";
 export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
+export { CUSTOM_TUNNEL_ENV_PREFIX, customTunnelTemplates, customTunnelTemplate, isCustomTunnelType } from "./tunnels-custom.ts";
 export { authProviderSchemas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
@@ -193,10 +195,10 @@ export interface ServiceTunnels {
    *  (host renders inputs from these; adding a type/provider needs no
    *  client changes). */
   schemas: {
-    tunnels(): Record<TunnelType, ParamSpec[]>;
+    tunnels(): Record<string, ParamSpec[]>;
     tunnel(type: string): ParamSpec[];
     authProviders(): Promise<Record<string, ParamSpec[]>>;
-    metas(): Record<TunnelType, TunnelMeta>;
+    metas(): Record<string, TunnelMeta>;
   };
   auth: {
     /** Built-in + plugin providers. */
@@ -542,7 +544,9 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         tcpSupport: () => {
           const fixed: TunnelType[] = ["ssh"]; // resolved via PATH, not TOOLS
           const fromTools = (Object.keys(TOOLS) as TunnelType[]).filter((t) => tunnelSupportsTcp(t));
-          return [...new Set([...fixed, ...fromTools])];
+          // custom command tunnels (env-registered) are assumed tcp-capable
+          const custom = Object.keys(customTunnelTemplates());
+          return [...new Set([...fixed, ...fromTools, ...custom])];
         },
       };
     })(),
@@ -692,7 +696,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
      *  (host renders inputs from these; no client changes per provider). */
     schemas: {
       tunnels: () => tunnelParamSchemas(),
-      tunnel: (type: string) => tunnelParamSchema(type as TunnelType),
+      tunnel: (type: string) => tunnelParamSchema(type),
       metas: () => tunnelMetas(),
       authProviders: () => authProviderSchemas(dirs.configDir),
     },

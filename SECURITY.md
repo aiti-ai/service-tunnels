@@ -56,6 +56,11 @@
 | 7 | **DNS rebinding 防护**：虚拟主机后缀正则即主机白名单——`.st.localhost` 仅回环；远程后缀必须显式配置 | `src/proxy.ts` `serviceHostRegex` |
 | 8 | **Prototype pollution 防护**：schema 驱动参数展开时拒绝 `__proto__`/`constructor`/`prototype` 键 | `src/expose.ts` `unflattenParams` |
 | 9 | **端口合法性**：虚拟主机端口 2-5 位、10–65535 有效范围校验 | `src/proxy.ts` `parseServiceHost` |
+| 10 | **隧道参数输入验证**：所有用户输入在 `TunnelManager.start()`（库边界）与 daemon RPC `tunnel.add`/`expose`（IPC 边界）双入口 fail-closed 校验——ssh host/user 拒绝 `-` 开头（**选项注入 → 本机 RCE**）、token/server/domain 拒绝控制字符（**frpc INI 注入**）、隧道名拒绝路径分隔符（**路径穿越**）、端口 1–65535（expose 辅助端口 0=自动放行）、args/env 空字节拒绝、baseDomain 过 host[:port] 正则；内置隧道全部 `spawn` 无 shell，token 只经 env/单 argv 传递，shell 注入不可能成立；自定义命令隧道（`SERVICE_TUNNELS_TUNNEL_COMMAND_*`，env 注册即 opt-in）的**模板参数（插值进 shell 命令）做全字段控制字符扫描** + **POSIX 单引号转义**（`resolveCustomCommand`：占位符值 `'`→`'\''`，只作字面量——`;`/`|`/`$`/反引号/空格等元字符全部惰性化，无法改写命令结构） | `src/validation.ts` `src/tunnels-custom.ts` |
+| 11 | **`command` 类型显式 opt-in**：唯一 `shell: true` 的隧道类型标记 `dangerous`，经 daemon RPC 必须显式 `dangerous: true`（CLI/UI 均先向用户确认） | `src/daemon-server.ts` `tunnel.add` |
+| 12 | **UI CSRF 防护**：管理面板（127.0.0.1）所有 POST 要求同源 Origin + 随机 CSRF token（`timingSafeEqual`），不设置任何 CORS 放行头——本地恶意网页无法驱动面板执行隧道/改密操作 | `src/ui.ts` |
+| 13 | **Windows IPC 鉴权**：TCP IPC 要求每实例随机 secret 请求头（存 0600 state.json）；POSIX unix socket 0600 | `src/daemon-server.ts` `src/daemon.ts` |
+| 14 | **auth provider 参数验证**（与隧道同类的配置文件注入面）：用户名统一字符集门（`validateUserName`，YAML 键 / htpasswd 行 / totp 导出文件名的根修复，authelia/basic/portal 的 UserManager + daemon IPC 双入口）；oauth2-proxy OIDC 参数（issuerUrl 必须 http(s) URL、clientId/secret 拒控制字符）写入 TOML 前**转义**（TOML 注入同 frpc INI 类）；authelia users_database.yml 值 YAML 转义；`autheliaReloadCmd`（shell 命令）禁止经 IPC 传入（仅库/配置） | `src/validation.ts` `src/providers/oauth2-proxy.ts` `src/authelia.ts` `src/providers/basic.ts` `src/providers/portal.ts` `src/daemon-server.ts` |
 
 ### 2.3 凭据与会话（认证门户）
 
@@ -179,3 +184,11 @@ EDR / 网关反隧道策略拦截——这与程序名无关，是用户显式�
 | prototype pollution 防护 | `src/expose.ts` |
 | 孤儿进程清理 | `src/guardian.ts` `src/cleanup.ts` |
 | 工具下载原子性 | `src/tools.ts` |
+| 隧道参数验证（ssh 选项注入 / frpc INI 注入 / 名称路径穿越 / 端口范围） | `src/validation.ts` |
+| `command` 显式 opt-in（daemon RPC dangerous 门） | `src/daemon-server.ts` `tunnel.add` |
+| UI CSRF（同源 + token） | `src/ui.ts` |
+| Windows IPC secret 鉴权 | `src/daemon-server.ts` `src/daemon.ts` |
+| auth 用户名门（YAML 键 / htpasswd 行 / 文件名根修复） | `src/validation.ts` `validateUserName`；`src/providers/{basic,portal,authelia}.ts`；`src/daemon-server.ts` |
+| oauth2-proxy TOML 注入（OIDC 参数校验 + 转义） | `src/providers/oauth2-proxy.ts` `src/validation.ts` |
+| authelia users_database.yml YAML 转义 | `src/authelia.ts` `serializeUsers` |
+| autheliaReloadCmd 禁止经 IPC 传入 | `src/daemon-server.ts` `expose` |

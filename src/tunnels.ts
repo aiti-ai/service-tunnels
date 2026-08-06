@@ -3,6 +3,14 @@ import { promises as dns } from "node:dns";
 import { mkdirSync, writeFileSync, readFileSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
+import { validateTunnelConfig } from "./validation.ts";
+import {
+  customTunnelTemplates,
+  customTunnelParamSchemas,
+  customTunnelParamSchema,
+  isCustomTunnelType,
+  resolveCustomCommand,
+} from "./tunnels-custom.ts";
 
 /**
  * Tunnel management — type-aware, state-persisted, tool-resolved.
@@ -35,11 +43,12 @@ export type TunnelType =
  *  - frpc: `type = tcp` ✓
  *  - cloudflared free / localtunnel / bore: HTTP-only ✗
  *  - command: depends on the user's command (assume tcp-capable). */
-export function tunnelSupportsTcp(type: TunnelType): boolean {
+export function tunnelSupportsTcp(type: string): boolean {
   // ngrok tcp, ssh -R, frpc tcp are raw-TCP capable. serveo is HTTP-only
   // (fixed `-R 80:` + https subdomain), localtunnel/cloudflared-free/bore are
-  // HTTP. `command` depends on the user's command (assume capable).
-  return type === "ngrok" || type === "ssh" || type === "frpc" || type === "command";
+  // HTTP. `command` depends on the user's command (assume capable), and so do
+  // user-registered custom command tunnels (env SERVICE_TUNNELS_TUNNEL_COMMAND_*).
+  return type === "ngrok" || type === "ssh" || type === "frpc" || type === "command" || isCustomTunnelType(type);
 }
 
 /**
@@ -112,6 +121,10 @@ export interface TunnelConfig {
   /** Extra env vars for the tunnel process, merged over process.env at spawn
    *  (e.g. `{ NGROK_AUTHTOKEN: "..." }` so ngrok authenticates). */
   env?: Record<string, string>;
+  /** Explicit opt-in required by the daemon RPC boundary for dangerous types
+   *  (`command` runs a raw shell command). Set by callers that surfaced the
+   *  shell-command semantics to the user; enforced in daemon-server.ts. */
+  dangerous?: boolean;
 }
 
 export interface TunnelInfo {
@@ -195,6 +208,23 @@ async function detectLocalScheme(port: number, timeoutMs = 1500): Promise<"http"
 
 export function extractTunnelUrl(output: string, type?: string): string | null {
   if (!output) return null;
+  // Explicit URL declaration for shell-based tunnels (env-registered custom
+  // types + the built-in "command" type): the template echoes
+  // `ST_TUNNEL_URL:<url>` (also `=`/space separator; quotes + Windows CRLF
+  // tolerated; case-insensitive) and the OPERATOR declares the URL instead of
+  // relying on regex sniffing — this wins over everything below. Windows
+  // friendly: `echo ST_TUNNEL_URL:http://127.0.0.1:8080` (cmd) or
+  // `Write-Output "ST_TUNNEL_URL:http://x"` (PowerShell). A scheme-less
+  // host[:port] gets http:// prepended.
+  if (type === "command" || isCustomTunnelType(type ?? "")) {
+    const m = /ST_TUNNEL_URL[\s:=]+["']?([^\s"'<>]+)["']?/i.exec(output);
+    if (m && m[1]) {
+      const raw = m[1].replace(/[.,;]+$/, ""); // echo 尾随标点/CRLF 残留
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw)) return raw;
+      if (/^[^\s/]+(:\d+)?(\/.*)?$/.test(raw)) return `http://${raw}`;
+      return raw;
+    }
+  }
   const known =
     /(https?:\/\/[a-z0-9][a-z0-9.-]*\.(?:ngrok(?:\.app|\.io|\-free\.app|\-free\.dev)|trycloudflare\.com|loca\.lt|serveo\.net|serveousercontent\.com|wormhole\.app|localhost\.run|hop\.to|natappfree\.cc|natapp\.cc|natapp\.shop|natapp\.top)[^\s"'<>)\]]*)/i.exec(
       output,
@@ -206,7 +236,7 @@ export function extractTunnelUrl(output: string, type?: string): string | null {
     if (m && m[1]) return `http://${m[1]}`;
     return null;
   }
-  if (type !== "command" && type !== "ssh") return null;
+  if (type !== "command" && type !== "ssh" && !isCustomTunnelType(type ?? "")) return null;
   // command/ssh: any http(s) URL not preceded by "(" and not localhost
   const any = /(?<![(\w])(https?:\/\/[a-z0-9][a-z0-9.-]*(?::\d+)?[^\s"'<>)\]]*)/i.exec(output);
   if (any && any[1] && !/localhost|127\.0\.0\.1|0\.0\.0\.0|::1?|cloudflare\.com/.test(any[1])) return any[1];
@@ -226,6 +256,9 @@ interface SpawnSpec {
   args: string[];
   /** shell form (command type): bin is the raw command line. */
   shell?: boolean;
+  /** Extra env for this specific tunnel (merged over the manager env, under
+   *  cfg.env). E.g. NGROK_AUTHTOKEN wired from cfg.token for ngrok. */
+  env?: Record<string, string>;
 }
 
 /** Build an `ssh` forward spec. SSH tunnels need more than host+target:
@@ -343,6 +376,11 @@ export class TunnelManager {
     }
 
     const cfg = s.cfg;
+    // Fail-closed input validation before ANY spawn: rejects ssh option
+    // injection (host/user starting with "-"), frpc INI injection (control
+    // chars), path traversal (name), and garbage ports/types (see
+    // docs/input-validation-security.md).
+    validateTunnelConfig(cfg, name);
     const spec = await this.#build(cfg);
     s.output = "";
     s.error = undefined;
@@ -351,7 +389,7 @@ export class TunnelManager {
     const child = spec.shell
       ? spawn(spec.bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] })
       : spawn(spec.bin, spec.args, {
-          env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...cfg.env },
+          env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...spec.env, ...cfg.env },
           detached: true, // own process group → group kill
           stdio: ["ignore", "pipe", "pipe"],
         });
@@ -406,8 +444,10 @@ export class TunnelManager {
       if (s.child === child) s.child = null;
       // ssh synth URL is PROVISIONAL: if ssh exits with an error (e.g. an
       // unreachable host hit its ConnectTimeout AFTER the 1.5s synth window),
-      // revoke the URL so we don't report a false success.
-      if (code !== 0 && cfg.type === "ssh") {
+      // revoke the URL so we don't report a false success. Custom command
+      // tunnels behave the same: a declared ST_TUNNEL_URL is only valid while
+      // the process is alive — non-zero exit revokes it.
+      if (code !== 0 && (cfg.type === "ssh" || isCustomTunnelType(cfg.type))) {
         s.url = null;
         s.error = `exited (${signal ?? code})`;
       } else if (code !== 0 && !s.url) {
@@ -472,7 +512,13 @@ export class TunnelManager {
         const args = [cfg.protocol === "tcp" ? "tcp" : "http", String(target), "--log", "stdout"];
         if (cfg.protocol !== "tcp" && domain) args.push("--domain", domain);
         args.push(...(cfg.args ?? []));
-        return { bin, args };
+        // Authtoken from the config/schema (tunnel add --token / expose) →
+        // NGROK_AUTHTOKEN env so ngrok authenticates instead of exiting
+        // ERR_NGROK_4018. env goes in as a single environment entry — no argv,
+        // no shell — so the token can never break out into a command.
+        const env: Record<string, string> = {};
+        if (cfg.token && !cfg.env?.NGROK_AUTHTOKEN) env.NGROK_AUTHTOKEN = cfg.token;
+        return { bin, args, env };
       }
       case "frpc": {
         const bin = await tool("frpc");
@@ -557,8 +603,14 @@ export class TunnelManager {
         if (!cmd) throw new Error(`tunnel '${cfg.name}': command type requires cmd`);
         return { bin: cmd, args: [], shell: true };
       }
-      default:
+      default: {
+        // User-registered custom command tunnel (SERVICE_TUNNELS_TUNNEL_COMMAND_*):
+        // assemble the shell command from its template + config values.
+        if (isCustomTunnelType(cfg.type)) {
+          return { bin: resolveCustomCommand(cfg.type, cfg), args: [], shell: true };
+        }
         throw new Error(`tunnel '${cfg.name}': unsupported type ${cfg.type}`);
+      }
     }
   }
 
@@ -698,21 +750,29 @@ export function tunnelSupportsRandomDomain(type: TunnelType): boolean {
   return ["natapp", "localtunnel", "serveo", "cloudflared"].includes(type);
 }
 
-/** Param schema for one tunnel type ([] when unknown). */
-export function tunnelParamSchema(type: TunnelType): ParamSpec[] {
-  return TUNNEL_PARAM_SCHEMAS[type] ?? [];
+/** Param schema for one tunnel type ([] when unknown). Custom command tunnel
+ *  types (env-registered) generate their schema from the template. */
+export function tunnelParamSchema(type: string): ParamSpec[] {
+  if (type in TUNNEL_PARAM_SCHEMAS) return TUNNEL_PARAM_SCHEMAS[type as TunnelType];
+  return customTunnelParamSchema(customTunnelTemplates()[type] ?? "");
 }
 
-/** All tunnel-type param schemas (keyed by type). */
-export function tunnelParamSchemas(): Record<TunnelType, ParamSpec[]> {
-  return TUNNEL_PARAM_SCHEMAS;
+/** All tunnel-type param schemas (keyed by type): built-ins + user-registered
+ *  custom command tunnels (SERVICE_TUNNELS_TUNNEL_COMMAND_*). */
+export function tunnelParamSchemas(): Record<string, ParamSpec[]> {
+  return { ...TUNNEL_PARAM_SCHEMAS, ...customTunnelParamSchemas() };
 }
 
 /** Per-type UI metadata. `favorite` marks zero-account / few-params /
  *  immediately-usable types (localtunnel/serveo/cloudflared/bore) — clients
- *  sort them first and surface a badge. */
+ *  sort them first and surface a badge. `dangerous` marks types that execute
+ *  arbitrary user-supplied shell commands (e.g. `command`) — clients should
+ *  hide or gate them behind explicit confirmation. */
 export interface TunnelMeta {
   favorite?: boolean;
+  /** Type executes arbitrary shell / external tooling — clients must not
+   *  offer it as a one-click option without explicit opt-in. */
+  dangerous?: boolean;
 }
 
 export const TUNNEL_META: Record<TunnelType, TunnelMeta> = {
@@ -724,15 +784,21 @@ export const TUNNEL_META: Record<TunnelType, TunnelMeta> = {
   localtunnel: { favorite: true },
   bore: { favorite: true },
   natapp: { favorite: true },
-  command: {},
+  // `command` runs a raw shell command as the tunnel — dangerous by design;
+  // consumers that expose a one-click tunnel picker must hide it (meta flag).
+  command: { dangerous: true },
 };
 
-export function tunnelMeta(type: TunnelType): TunnelMeta {
-  return TUNNEL_META[type] ?? {};
+export function tunnelMeta(type: string): TunnelMeta {
+  return TUNNEL_META[type as TunnelType] ?? {};
 }
 
-export function tunnelMetas(): Record<TunnelType, TunnelMeta> {
-  return TUNNEL_META;
+/** Built-in metadata + user-registered custom command tunnels (explicit env
+ *  opt-in → never marked dangerous). */
+export function tunnelMetas(): Record<string, TunnelMeta> {
+  const custom: Record<string, TunnelMeta> = {};
+  for (const type of Object.keys(customTunnelTemplates())) custom[type] = {};
+  return { ...TUNNEL_META, ...custom };
 }
 
 /** Coerce a form/CLI string against a param spec (number/boolean/string). */

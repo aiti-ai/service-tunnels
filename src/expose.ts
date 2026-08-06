@@ -3,6 +3,7 @@ import { ProxyManager } from "./proxy-manager.ts";
 import { readSites, type SiteConfig } from "./sites.ts";
 import { readConfigFile, resolveBaseDomains } from "./config.ts";
 import { RedisController } from "./redis.ts";
+import { validateBypassPaths } from "./auth-provider.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 import { AuthRegistry } from "./auth-registry.ts";
 import { tunnelSupportsTcp } from "./tunnels.ts";
@@ -77,6 +78,9 @@ export interface ExposeOptions {
   /** Skip starting the proxy transport (an embedder middleware serves vhosts
    *  in-process via resolve()); localUrl is then empty. Default: start. */
   startTransport?: boolean;
+  /** 认证放行白名单（URL 路径前缀）：这些路径跳过认证直接转发应用
+   *  （/health、/metrics 等公开端点）。proxy/nginx 双路径生效。 */
+  bypassPaths?: string[];
   /**
    * User's wildcard-DNS base domain (e.g. "example.com") — overrides
    * config service-tunnels.json `baseDomain`. expose also returns a PORTLESS
@@ -112,6 +116,11 @@ export interface ExposeOptions {
    *  fields (domain/server/token/host/user/port/remotePort/cmd/...). Applied
    *  BEFORE name/type/target/env so those can't be overridden. */
   tunnelParams?: Record<string, unknown>;
+  /** Dangerous-type opt-in for `tunnelType: "command"` (runs a raw shell
+   *  command). Required at the daemon RPC boundary — the CLI carries it for
+   *  `--tunnel command`; library callers that surfaced the semantics set it
+   *  explicitly. */
+  dangerous?: boolean;
   /** Extra auth-provider options (schema-driven form). Dot keys nest
    *  ("oidc.issuerUrl" → { oidc: { issuerUrl } }). */
   providerParams?: Record<string, unknown>;
@@ -278,22 +287,12 @@ async function proxyExpose(
   if (authRequested) {
     const pctx = providerCtx(ctx);
     const registry = ctx.auth ?? new AuthRegistry(pctx);
-    const basePath = opts.basePath
-      ?? siteCfg?.basePath
-      ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
-      ?? defaultBasePath(providerType);
-    // Merge the embedder's deployment base path (host /dev) under the
-    // provider's own base path: /dev + /portal → /dev/portal — login pages,
-    // authz probes and redirects all live under the combined path.
-    const mergedBasePath = providerType === "basic"
-      ? ""
-      : sanitizeBasePath(`${(proxy.basePath ?? "").replace(/\/+$/, "")}${basePath}`);
+    // 先建 provider（缓存实例直接取），再按自描述能力算 basePath
     const provider = registry.create(
       providerType,
       {
         ...unflattenParams(opts.providerParams ?? {}),
         ...(siteCfg?.providerParams ?? {}),
-        basePath: providerType === "basic" ? "" : mergedBasePath,
         deployBasePath: proxy.basePath || undefined,
         policy: opts.policy ?? siteCfg?.policy,
         user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
@@ -302,6 +301,22 @@ async function proxyExpose(
       },
       site,
     );
+    const gwMode = provider.gatewayMode ?? "forward-auth";
+    const hasPath = (provider as { basePath?: string }).basePath;
+    // 已存在的共享实例用自己的 basePath；否则 用户配置 > provider 默认
+    const basePath = hasPath
+      ?? opts.basePath
+      ?? siteCfg?.basePath
+      ?? (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+      ?? provider.defaultBasePath?.()
+      ?? `/${providerType}`;
+    // Merge the embedder's deployment base path (host /dev) under the
+    // provider's own base path: /dev + /portal → /dev/portal — login pages,
+    // authz probes and redirects all live under the combined path.
+    const mergedBasePath = gwMode === "basic"
+      ? ""
+      : sanitizeBasePath(`${(proxy.basePath ?? "").replace(/\/+$/, "")}${basePath}`);
+    if (!hasPath && gwMode !== "basic") await provider.setBasePath?.(mergedBasePath);
     const problems = (await provider.validate?.()) ?? [];
     if (problems.length) {
       throw new Error(`auth provider ${providerType} not ready:\n  - ${problems.join("\n  - ")}`);
@@ -324,6 +339,7 @@ async function proxyExpose(
     provider: authRequested ? providerType : "",
     policy: opts.policy ? { policy: opts.policy } : undefined,
     providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
+    ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
   });
   const localUrl = transportPort ? `http://${proxy.vhost(port, label)}:${transportPort}` : "";
   const baseVhost = proxy.baseVhost(port, label);
@@ -450,25 +466,16 @@ async function exposeTunnel(
   const pctx = providerCtx(ctx);
   const registry = ctx.auth ?? new AuthRegistry(pctx);
   // basePath resolution: explicit opts (library/CLI) > configDir/
-  // service-tunnels.json (basePath / basePathByProvider) > per-expose random
-  // name so nginx (auth_request) and the provider agree AND generic paths
-  // (/{provider}) never collide with app routes (portal → /portal-sneaky-capybara).
+  // service-tunnels.json (basePath / basePathByProvider) > provider 自描述默认
+  // （portal → /portal-sneaky-capybara，authelia → /authelia<alnum>，basic → ""）。
   const cfgFile = readConfigFile(ctx.configDir);
-  const initialBasePath = opts.basePath
-    ?? siteCfg?.basePath
-    ?? (providerType === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
-    ?? defaultBasePath(providerType);
-  // basePath is interpolated into nginx locations + 302 redirects + authelia's
-  // server.address — allow a plain URL path only (no ; {} whitespace quotes
-  // which would inject nginx directives or break the config).
-  const basePath = providerType === "basic" ? "" : sanitizeBasePath(initialBasePath);
+  // 先建 provider（缓存实例直接取），再按自描述能力算 basePath
   const provider: AuthProvider = registry.create(
     providerType,
     {
       ...unflattenParams(opts.providerParams ?? {}),
       ...(siteCfg?.providerParams ?? {}),
       port: opts.autheliaPort,
-      basePath,
       sessionSecret: opts.sessionSecret,
       policy: opts.policy ?? siteCfg?.policy,
       user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
@@ -476,6 +483,19 @@ async function exposeTunnel(
     },
     site,
   );
+  const gwMode = provider.gatewayMode ?? "forward-auth";
+  const hasPath = (provider as { basePath?: string }).basePath;
+  const initialBasePath = hasPath
+    ?? opts.basePath
+    ?? siteCfg?.basePath
+    ?? (gwMode === "basic" ? "" : (cfgFile.basePathByProvider?.[providerType] ?? cfgFile.basePath))
+    ?? provider.defaultBasePath?.()
+    ?? `/${providerType}`;
+  // basePath is interpolated into nginx locations + 302 redirects + authelia's
+  // server.address — allow a plain URL path only (no ; {} whitespace quotes
+  // which would inject nginx directives or break the config).
+  const basePath = gwMode === "basic" ? "" : sanitizeBasePath(initialBasePath);
+  if (!hasPath && gwMode !== "basic") await provider.setBasePath?.(basePath);
   // The registry caches ONE provider per `type#site` (P1): every expose of
   // this site shares the SAME process + basePath + user db. Use the provider's
   // own basePath (the first expose set it) — do NOT regenerate or setBasePath,
@@ -508,7 +528,8 @@ async function exposeTunnel(
   }
 
   const nginxPort = opts.nginxPort ?? 0; // 0 = random
-  const authMode: GatewayAuthMode = provider.type === "basic" ? "basic" : "forward-auth";
+  // 网关模式：provider 自描述（basic → auth_basic；oauth2-proxy → /oauth2/ 协议）
+  const authMode: GatewayAuthMode = provider.gatewayMode ?? "forward-auth";
   const htpasswdFile = (provider as { htpasswdFile?: string }).htpasswdFile;
   // Shared gateway singleton (one nginx for all exposes); fall back to a
   // local instance when no shared one is provided (standalone/tests).
@@ -556,16 +577,29 @@ async function exposeTunnel(
   const url = await waitForUrl(ctx.tunnels, name, 30_000);
   const publicHost = url ? new URL(url).host : null;
   if (publicHost) {
-    // provider-specific login redirect target (nginx vars $host/$request_uri):
-    //  - portal:  /<basePath>/login?next=<path>   (portal's `next` param)
-    //  - authelia: /<basePath>/?rd=https://$host$request_uri  (authelia's `rd`
-    //             param + portal root — NOT /login, which isn't authelia's entry)
-    const loginRedirect = providerType === "authelia"
-      ? `https://$host${providerBasePath}/?rd=https://$host$request_uri`
-      : `https://$host${providerBasePath}/login?next=$request_uri`;
+    // provider-specific login redirect target —— provider 自描述（loginRedirect
+    // 方法），缺省 portal 风格（插件等未实现时兜底）。
+    const o2Setup = provider.setupConfig?.();
+    // 隧道边缘 TLS 终结 → 重定向用 https；provider 方法自行决定路径
+    const loginRedirect =
+      provider.loginRedirect?.(providerBasePath, "https")
+      ?? `https://$host${providerBasePath}/login?next=$request_uri`;
     const scheme = protocol === "https" ? "https" : "http";
     try {
-      await gateway.registerHost(publicHost, port, { authPort, basePath: providerBasePath, authMode, htpasswdFile, loginRedirect, scheme });
+      await gateway.registerHost(publicHost, port, {
+        authPort,
+        basePath: providerBasePath,
+        authMode,
+        htpasswdFile,
+        loginRedirect,
+        scheme,
+        // oauth2-proxy 联动：nginx 直接渲染域名验证文件 + 设置页（模板含 $host）
+        ...(o2Setup
+          ? { setup: { verification: o2Setup.verification, infoPath: o2Setup.infoPath, infoHtmlTemplate: o2Setup.infoHtmlTemplate } }
+          : {}),
+        // 认证放行白名单：这些 location 不带 auth_request
+        ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
+      });
     } catch (err) {
       // unsafe host — tear down the tunnel so nothing is left half-registered
       await ctx.tunnels.stop(name).catch(() => {});
@@ -581,7 +615,9 @@ async function exposeTunnel(
     tunnel: name,
     provider: providerType,
     protocol,
-    loginUrl: url && basePath ? `${url}${basePath}/login` : undefined,
+    loginUrl: url
+      ? (provider.loginUrl?.(url, providerBasePath) ?? (providerBasePath ? `${url}${providerBasePath}/login` : undefined))
+      : undefined,
     gateway: { nginx: gatewayPort, authelia: authPort, redis: redis?.port ?? 0 },
     ...(url ? {} : tunnelFailure(ctx.tunnels, name)),
   };
@@ -605,49 +641,12 @@ export function sanitizeBasePath(p: string): string {
   return p.replace(/\/+$/, "");
 }
 
-export function defaultBasePath(providerType: string): string {  if (providerType === "basic") return "";
-  if (providerType === "portal") {
-    // memorable random name avoids clashing with app routes
-    return `/${providerType}-${randomName()}`;
-  }
-  if (providerType === "authelia") {
-    // authelia's server.address path allows ONLY [a-z0-9] — no dashes
-    return `/${providerType}${randomAlnum(8)}`;
-  }
-  // oauth2-proxy has its own fixed /oauth2 endpoints wired by the gateway
-  return `/${providerType}`;
-}
-
-const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
-export function randomAlnum(len: number): string {
-  let out = "";
-  for (let i = 0; i < len; i++) out += ALNUM[Math.floor(Math.random() * ALNUM.length)];
-  return out;
-}
-
 /** Random secret for bootstrap users without an explicit password. */
 function randomSecret(len = 12): string {
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let out = "";
   for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
   return out;
-}
-
-const BASE_ADJECTIVES = [
-  "fuzzy", "wobbly", "sneaky", "cosmic", "jolly", "mellow", "zippy", "quirky",
-  "lucky", "crimson", "brisk", "witty", "dizzy", "spicy", "frosty", "peachy",
-  "snazzy", "twisty", "velvet", "bouncy",
-];
-const BASE_ANIMALS = [
-  "narwhal", "wombat", "capybara", "platypus", "axolotl", "llama", "gecko",
-  "badger", "otter", "moose", "panda", "raccoon", "sloth", "tapir", "lemur",
-  "ferret", "ibex", "kitten", "puffin", "dragon",
-];
-
-export function randomName(): string {
-  const a = BASE_ADJECTIVES[Math.floor(Math.random() * BASE_ADJECTIVES.length)]!;
-  const n = BASE_ANIMALS[Math.floor(Math.random() * BASE_ANIMALS.length)]!;
-  return `${a}-${n}`;
 }
 
 /** A human-readable failure reason for a tunnel that didn't produce a URL.

@@ -2,6 +2,7 @@ import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
+import { validateSetupEntry } from "./auth-provider.ts";
 
 /**
  * nginx gateway — the local host that owns auth (design.md §5).
@@ -38,9 +39,19 @@ export interface GatewayHost {
    *  specific: portal uses `${basePath}/login?next=`, authelia uses
    *  `${basePath}/?rd=https://$host$request_uri`. Uses nginx vars. */
   loginRedirect?: string;
+  /** oauth2-proxy 联动：域名验证文件 + 预登录设置页（免认证 location）。 */
+  setup?: {
+    verification: Array<{ path: string; content: string }>;
+    infoPath?: string;
+    /** 设置页 HTML 模板（nginx $host/$arg_rd 变量，return 200 直接输出）。 */
+    infoHtmlTemplate?: string;
+  };
+  /** 认证放行白名单（URL 路径前缀）：这些 location 不带 auth_request，直接
+   *  转发应用（/health、/metrics 等公开端点）。 */
+  bypassPaths?: string[];
 }
 
-export type GatewayAuthMode = "forward-auth" | "basic" | "none";
+export type GatewayAuthMode = "forward-auth" | "oauth2-proxy" | "basic" | "none";
 
 export interface GatewayConfig {
   nginxPort: number;
@@ -114,24 +125,30 @@ export function generateHostNginx(
   const nginxRoot = defaults.nginxRoot;
   const escaped = h.host.replace(/\./g, "\\.");
   const portal = `${basePath}/`;
-  const authz = `${basePath}/api/authz/auth-request`;
-  const authzPath = authz.replace(/^\//, "");
   const portalPath = portal.replace(/^\//, "");
+  // oauth2-proxy serves its own fixed /oauth2/auth probe (authelia/portal use
+  // {basePath}/api/authz/auth-request).
+  const authzPath = authMode === "oauth2-proxy"
+    ? "oauth2/auth"
+    : `${basePath}/api/authz/auth-request`.replace(/^\//, "");
+  const isFwd = authMode === "forward-auth";
+  const isOauth2 = authMode === "oauth2-proxy";
   const authLine =
     authMode === "basic"
       ? `      auth_basic "service-tunnels";\n      auth_basic_user_file ${htpasswdFile};`
-      : authMode === "forward-auth"
+      : isFwd || isOauth2
         ? `      auth_request /${authzPath};\n      error_page 401 @auth_redirect;`
         : ""; // "none" — plain proxy, no auth (but still logged)
   const authzBlock =
-    authMode !== "forward-auth"
+    !isFwd && !isOauth2
       ? ""
       : `    location = /${authzPath} {
       internal;
       proxy_pass http://127.0.0.1:${authPort}/${authzPath};
-      proxy_set_header Host $host;
-      # the tunnel edge terminates TLS; authelia refuses http target URLs
-      proxy_set_header X-Original-URL https://$host$request_uri;
+      # $http_host 保留原始端口（本地 http 测试）；真实隧道无端口时与 $host 等价
+      proxy_set_header Host ${isOauth2 ? "$http_host" : "$host"};
+      ${isOauth2 ? "" : `# the tunnel edge terminates TLS; authelia refuses http target URLs
+      proxy_set_header X-Original-URL https://$host$request_uri;`}
       proxy_set_header X-Original-Method $request_method;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
@@ -140,9 +157,22 @@ export function generateHostNginx(
 
 `;
   const portalBlock =
-    authMode !== "forward-auth"
-      ? ""
-      : `    location /${portalPath} {
+    isOauth2
+      ? `    location /oauth2/ {
+      proxy_pass http://127.0.0.1:${authPort};
+      # $http_host 保留原始端口（本地 http 测试）；真实隧道无端口时与 $host 等价
+      proxy_set_header Host $http_host;
+      # oauth2-proxy needs the original URI to redirect back after login
+      proxy_set_header X-Auth-Request-Redirect $request_uri;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-Host $host;
+    }
+
+`
+      : !isFwd
+        ? ""
+        : `    location /${portalPath} {
       proxy_pass http://127.0.0.1:${authPort}/${portalPath};
       proxy_set_header Host $host;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -161,24 +191,75 @@ export function generateHostNginx(
 
 `;
   const authFailBlock =
-    authMode !== "forward-auth"
+    !isFwd && !isOauth2
       ? ""
       : `    location @auth_redirect {
       internal;
       # absolute https + PUBLIC host (no internal nginx port): nginx would
       # otherwise synthesize http://<host>:<listen-port>/... from the relative
       # path, which is unreachable behind the tunnel.
-      return 302 ${h.loginRedirect ?? `https://$host${basePath}/login?next=$request_uri`};
+      return 302 ${h.loginRedirect ?? (isOauth2 ? `https://$host/oauth2/start?rd=$request_uri` : `https://$host${basePath}/login?next=$request_uri`)};
     }
 
 `;
+  // oauth2-proxy 联动：域名验证文件 + 预登录设置页（免认证直达；return 200
+  // 支持 $host/$arg_rd 变量——回调地址按当前隧道域名实时渲染）。
+  const setupBlock =
+    !isOauth2 || !h.setup
+      ? ""
+      : h.setup.verification
+          .map((v) => {
+            // 渲染前白名单校验（防 nginx 配置注入）——非法直接抛错
+            validateSetupEntry(v);
+            return `    location = ${v.path} {
+      default_type text/plain;
+      return 200 '${v.content}';
+    }
+
+`;
+          })
+          .join("") +
+        (h.setup.infoPath && h.setup.infoHtmlTemplate
+          ? (() => {
+              // infoPath 同样只允许 URL 路径字符；模板不得含单引号/反斜杠
+              validateSetupEntry({ path: h.setup.infoPath, content: "x" });
+              if (/['\\]/.test(h.setup.infoHtmlTemplate)) {
+                throw new Error("invalid oauth2 setup page template: no quotes/backslashes allowed");
+              }
+              return `    location = ${h.setup.infoPath} {
+      default_type text/html;
+      return 200 '${h.setup.infoHtmlTemplate}';
+    }
+
+`;
+            })()
+          : "");
+  // 认证放行白名单：不带 auth_request 的 location，直接转发应用（前缀匹配，
+  // nginx 最长前缀优先 → 覆盖 location / 的 auth_request）。
+  const bypassBlock = (h.bypassPaths ?? [])
+    .map((p) => {
+      return `    location ${p} {
+      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_set_header X-Forwarded-Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    }
+
+`;
+    })
+    .join("");
   return `  server {
     listen 127.0.0.1:${nginxPort};
     server_name ${escaped};
     access_log ${nginxRoot}/logs/${h.host}.access.log;
     error_log ${nginxRoot}/logs/${h.host}.error.log warn;
 
-${authzBlock}${portalBlock}${authFailBlock}    location / {
+${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
 ${authLine}
       proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};${h.scheme === "https" ? `
       proxy_ssl_verify off;
@@ -444,7 +525,7 @@ export class GatewayController {
   async registerHost(
     host: string,
     port: number,
-    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https" },
+    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[] },
   ): Promise<void> {
     const safe = this.#sanitizeHost(host);
     this.#hosts.set(safe, {
@@ -456,6 +537,8 @@ export class GatewayController {
       htpasswdFile: auth?.htpasswdFile ?? (this.#htpasswdFile || undefined),
       loginRedirect: auth?.loginRedirect,
       scheme: auth?.scheme,
+      setup: auth?.setup,
+      bypassPaths: auth?.bypassPaths,
     });
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     this.#writeHostFile(this.#hosts.get(safe)!);

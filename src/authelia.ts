@@ -4,6 +4,8 @@ import { join } from "path";
 import { randomBytes } from "crypto";
 import { roleEnv } from "./marker.ts";
 import { base32Encode } from "./providers/portal.ts";
+import { randomAlnum } from "./auth-provider.ts";
+import { validateUserName, validateDisplayName, validateEmail, yamlEscape } from "./validation.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser } from "./auth-provider.ts";
 
 /**
@@ -86,17 +88,21 @@ function parseUsersYaml(raw: string): UserRecord[] {
   return out.filter((u) => u.name && !u.name.startsWith("#") && u.name !== "users");
 }
 
-/** Serialize records back to users_database.yml. */
-function serializeUsers(users: UserRecord[]): string {
+/** Serialize records back to users_database.yml. Values are YAML-escaped
+ *  (double-quoted strings escape `\` and `"`) — usernames are additionally
+ *  restricted by validateUserName so the `name:` keys can never carry a
+ *  newline/colon that would restructure the document. */
+export function serializeUsers(users: UserRecord[]): string {
+  const esc = (s: string) => yamlEscape(s);
   return (
     "users:\n" +
     users
       .map(
         (u) =>
           `  ${u.name}:\n` +
-          `    displayname: "${u.displayName || u.name}"\n` +
-          `    password: "${u.passwordHash}"\n` +
-          `    email: ${u.email ?? `${u.name}@localhost`}\n`,
+          `    displayname: "${esc(u.displayName || u.name)}"\n` +
+          `    password: "${esc(u.passwordHash)}"\n` +
+          `    email: "${esc(u.email ?? `${u.name}@localhost`)}"\n`,
       )
       .join("")
   );
@@ -200,6 +206,16 @@ export class AutheliaProvider implements AuthProvider {
     // The gateway wires auth_request to ${basePath}/api/authz/auth-request
     // automatically (see gateway.ts); this provider needs no extra snippet.
     return "";
+  }
+
+  /** 未认证跳转：authelia 门户根（rd 参数），不是 /login（authelia 无此入口）。 */
+  loginRedirect(basePath: string, scheme: "http" | "https"): string {
+    return `${scheme}://$host${basePath}/?rd=${scheme}://$host$request_uri`;
+  }
+
+  /** 默认 basePath：authelia server.address 只允许 [a-z0-9]（无横线）。 */
+  defaultBasePath(): string {
+    return `/authelia${randomAlnum(8)}`;
   }
 
   /** Generate both configs + users db. Idempotent. */
@@ -443,6 +459,12 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Add a user (or update displayName/email). Restarts authelia if running. */
   async addUser(name: string, password: string, displayName?: string, email?: string): Promise<void> {
+    // username becomes a YAML key + a totp export filename — charset gate is
+    // the root fix for both injection surfaces; displayName/email are escaped
+    // in serializeUsers.
+    validateUserName(name);
+    validateDisplayName(displayName);
+    validateEmail(email);
     const records = await readUsersFile(this.#usersDb);
     const existing = records.find((r) => r.name === name);
     if (existing) {
@@ -466,6 +488,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Change a user's password. Restarts authelia if running. */
   async setUserPassword(name: string, password: string): Promise<void> {
+    validateUserName(name);
     const records = await readUsersFile(this.#usersDb);
     const rec = records.find((r) => r.name === name);
     if (!rec) throw new Error(`user ${name} not registered`);
@@ -479,6 +502,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Remove a user. Restarts authelia if running. */
   async removeUser(name: string): Promise<void> {
+    validateUserName(name);
     const records = await readUsersFile(this.#usersDb);
     const next = records.filter((r) => r.name !== name);
     if (next.length === records.length) throw new Error(`user ${name} not registered`);
@@ -512,6 +536,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Enroll TOTP for a user (base32 secret written via authelia's CLI). */
   async totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }> {
+    validateUserName(name);
     const rec = (await readUsersFile(this.#usersDb)).find((r) => r.name === name);
     if (!rec) throw new Error(`user ${name} not registered`);
     const bin = await this.#ensureStorageReady();
@@ -531,6 +556,9 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Whether the user has a TOTP credential in storage. */
   async totpStatus(name: string): Promise<{ enrolled: boolean }> {
+    // name is interpolated into the export FILE name — the charset gate
+    // blocks path traversal (../) here.
+    validateUserName(name);
     const bin = await this.#ensureStorageReady();
     const outFile = join(this.#tmpDir, `totp-export-${name}.yml`);
     // export exits non-zero when NO configurations exist (e.g. right after
@@ -545,6 +573,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
 
   /** Delete a user's TOTP credential. */
   async totpDisable(name: string): Promise<void> {
+    validateUserName(name);
     const bin = await this.#ensureStorageReady();
     execFileSync(bin, ["storage", "user", "totp", "delete", name, "--config", this.#mainConfig], { stdio: "ignore" });
     this.#ctx.log(`authelia: TOTP disabled for ${name}`);

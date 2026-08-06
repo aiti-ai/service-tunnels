@@ -328,31 +328,66 @@ test("AuthRegistry userManagers() detects UserManager providers", async () => {
   assert.deepEqual(managers, ["authelia", "basic", "portal"]);
 });
 
-test("defaultBasePath: random memorable name, basic gets none", async () => {
-  const { defaultBasePath, randomName } = await import("../src/expose.ts");
+test("bypassPaths: 白名单校验（禁根/禁注入），前缀放行合法", async () => {
+  const { validateBypassPaths } = await import("../src/auth-provider.ts");
+  // 根路径禁白名单（会整体逃逸认证）
+  assert.throws(() => validateBypassPaths(["/"]), /would bypass ALL auth/);
+  assert.throws(() => validateBypassPaths([""]), /invalid bypass path/);
+  // 注入/穿越拒绝
+  assert.throws(() => validateBypassPaths(["/x; } server { listen 8.8.8.8:80; }"]), /invalid bypass path/);
+  assert.throws(() => validateBypassPaths(["/../etc"]), /invalid bypass path/);
+  assert.throws(() => validateBypassPaths(["/a b"]), /invalid bypass path/);
+  // 合法前缀通过
+  assert.deepEqual(validateBypassPaths(["/health", "/metrics"]), ["/health", "/metrics"]);
+});
+
+test("defaultBasePath: provider 自描述 —— random memorable name, basic gets none", async () => {
+  const { AuthRegistry } = await import("../src/auth-registry.ts");
+  const { randomName } = await import("../src/auth-provider.ts");
+  const reg = new AuthRegistry({
+    configDir: "/tmp/st-test-bp",
+    cacheDir: "/tmp/st-test-bp",
+    resolveTool: async () => "/usr/bin/authelia",
+    registerInternal: () => {},
+    unregisterInternal: () => {},
+    registerPid: () => {},
+    pickPort: async () => 20001,
+    log: () => {},
+  });
+  const mk = (type, oidc) => reg.create(type, oidc ? { oidc } : {}, "default");
   // format {provider}-{word}-{word}, no generic /{provider}
-  const p = defaultBasePath("portal");
+  const p = mk("portal").defaultBasePath();
   assert.match(p, /^\/portal-[a-z]+-[a-z]+$/);
-  const a = defaultBasePath("authelia");
+  const a = mk("authelia").defaultBasePath();
   assert.match(a, /^\/authelia[a-z0-9]{8}$/, "authelia path must be alnum only (no dashes)");
   assert.notEqual(p, a, "two exposes must not collide");
-  assert.equal(defaultBasePath("basic"), "");
-  assert.equal(defaultBasePath("oauth2-proxy"), "/oauth2-proxy", "oauth2-proxy keeps fixed path");
+  assert.equal(mk("basic").defaultBasePath(), "");
+  assert.equal(mk("oauth2-proxy").defaultBasePath(), "/oauth2-proxy", "oauth2-proxy keeps fixed path");
   // randomName always valid pair, no repeats in a decent sample
   const names = new Set(Array.from({ length: 50 }, () => randomName()));
   assert.ok(names.size > 30, "random names should vary");
 });
 
 test("basePath resolution: CLI/opts > config file > random", async () => {
-  const { defaultBasePath } = await import("../src/expose.ts");
   const { readConfigFile } = await import("../src/config.ts");
   const { mkdtempSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "st-cfg-"));
-  // no config file → random name
+  // no config file → random name（portal provider 自描述）
   assert.deepEqual(readConfigFile(dir), {});
-  assert.match(defaultBasePath("portal"), /^\/portal-[a-z]+-[a-z]+$/);
+  const { AuthRegistry } = await import("../src/auth-registry.ts");
+  const reg = new AuthRegistry({
+    configDir: dir,
+    cacheDir: dir,
+    resolveTool: async () => "/usr/bin/authelia",
+    registerInternal: () => {},
+    unregisterInternal: () => {},
+    registerPid: () => {},
+    pickPort: async () => 20001,
+    log: () => {},
+  });
+  assert.match(reg.create("portal", {}, "default").defaultBasePath(), /^\/portal-[a-z]+-[a-z]+$/);
   // config file: global basePath + per-provider
   writeFileSync(join(dir, "service-tunnels.json"), JSON.stringify({
     basePath: "/global-path",

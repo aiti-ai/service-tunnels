@@ -611,7 +611,7 @@ export const TOOLS: Record<string, ToolDef> = {
     platforms: ["linux", "darwin", "win32"],
     download: {
       official:
-        "https://github.com/cloudflare/cloudflared/releases/download/v{version}/cloudflared-{platform}-{arch}{exe}",
+        "https://github.com/cloudflare/cloudflared/releases/download/{version}/cloudflared-{platform}-{arch}{exe}",
       mirrors: [
         "https://gitee.com/justdb-mirrors/downloads/releases/download/cloudflared-2026.7.3/cloudflared-{platform}-{arch}{exe}",
         ...GH_MIRRORS,

@@ -8,6 +8,9 @@ import { dirname } from "path";
 export interface DaemonState {
   pid: number;
   ipc: string; // "unix://<path>" | "tcp://127.0.0.1:<port>"
+  /** Per-instance random secret for Windows TCP IPC (no filesystem peer gate
+   *  on TCP). POSIX unix sockets (0600) don't need it. state.json is 0600. */
+  ipcSecret?: string;
 }
 
 export interface InternalPortState {
@@ -30,6 +33,8 @@ export interface BindingRuntimeState {
   provider: string;
   policy?: { policy?: "one_factor" | "two_factor" | "deny"; subject?: string[]; methods?: string[] };
   providerParams?: Record<string, unknown>;
+  /** 认证放行白名单（URL 路径前缀）。 */
+  bypassPaths?: string[];
 }
 
 export interface RuntimeState {

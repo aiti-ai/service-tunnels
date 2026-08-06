@@ -47,6 +47,8 @@ export interface ProxyBinding {
   policy?: AuthPolicy;
   /** Extra provider options (schema-driven form params, dotted keys nested). */
   providerParams?: Record<string, unknown>;
+  /** 认证放行白名单（URL 路径前缀）：这些路径跳过认证直接转发应用。 */
+  bypassPaths?: string[];
 }
 
 export interface ProxyManagerOptions {
@@ -92,10 +94,9 @@ export interface ProxyManagerStatus {
 
 /** Local login-redirect template for the given provider (local http scheme). */
 export function localLoginRedirect(provider: string, basePath: string): string {
+  // 仅作未实现 loginRedirect 的插件 provider 的兜底——内置 provider 全部自描述
   const p = basePath.replace(/\/+$/, "") || "";
-  if (provider === "authelia") return `http://$host${p}/?rd=http://$host$request_uri`;
-  if (provider === "oauth2-proxy") return `http://$host/oauth2/start?rd=$request_uri`;
-  return `http://$host${p}/login?next=$request_uri`; // portal & forward-auth defaults
+  return `http://$host${p}/login?next=$request_uri`; // portal 风格默认
 }
 
 /** Split "host:port" (base domain form) into host + valid port ("" if none). */
@@ -375,28 +376,35 @@ export class ProxyManager {
     // server blocks are per host.
     const key = `${port}:${label}:${vhost}`;
     try {
-      if (binding.provider === "basic") {
+      const provider = await this.#ensureProvider(binding);
+      // basic：provider 自描述（nginx auth_basic，无 forward-auth 探针）
+      if ((provider.gatewayMode ?? "forward-auth") === "basic") {
         const gw = await this.#ensureGateway();
         if (!this.#registered.has(key)) {
-          const basicProvider = this.#opts.registry?.create("basic", { ...(binding.providerParams ?? {}) }, binding.site) as
-            unknown as { htpasswdFile?: string } | undefined;
-          const htpasswd = basicProvider?.htpasswdFile;
+          const htpasswd = (provider as unknown as { htpasswdFile?: string }).htpasswdFile;
           await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http" });
           this.#registered.add(key);
         }
         return { basicGatewayPort: gw.port };
       }
-      const provider = await this.#ensureProvider(binding);
       if (!this.#registered.has(key)) {
         await provider.registerHost(vhost, binding.policy);
         this.#registered.add(key);
       }
       const authPort = (provider as unknown as { port?: number }).port ?? 0;
       const basePath = (provider as unknown as { basePath?: string }).basePath ?? "";
+      const o2Setup = provider.setupConfig?.();
       const fw: ProxyAuth = {
         port: authPort,
         basePath,
-        loginRedirect: localLoginRedirect(binding.provider, basePath),
+        // 未认证跳转：provider 自描述（oauth2-proxy 会先到预登录设置页）
+        loginRedirect: provider.loginRedirect?.(basePath, "http") ?? localLoginRedirect(binding.provider, basePath),
+        // 协议适配全由 provider 自描述：oauth2-proxy 探 /oauth2/auth、登录/回调
+        // 直达侧车、域名验证文件 + 设置页免认证直达。
+        ...(provider.authzPath ? { authzPath: provider.authzPath } : {}),
+        ...(provider.providerPaths ? { providerPaths: provider.providerPaths } : {}),
+        ...(o2Setup ? { setup: o2Setup } : {}),
+        ...(binding.bypassPaths ? { bypassPaths: binding.bypassPaths } : {}),
       };
       return { forwardAuth: fw };
     } catch (err) {

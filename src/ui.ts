@@ -12,10 +12,12 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse, type RequestListener } from "http";
+import { randomBytes, timingSafeEqual } from "crypto";
 import { platform } from "os";
 import { exec } from "child_process";
 import type { ServiceTunnels } from "./index.ts";
 import type { AuthUser } from "./auth-provider.ts";
+import { validateTunnelConfig } from "./validation.ts";
 
 export interface UiServerOptions {
   /** Port to listen on (default 4181). */
@@ -27,15 +29,19 @@ export interface UiServerOptions {
 interface UiContext {
   st: ServiceTunnels;
   port: number;
+  /** Per-server random CSRF token (injected into every page; required on
+   *  every POST — same-origin scripts can read it, cross-origin pages can't). */
+  csrfToken: string;
 }
 
 /** Simple HTML templates (no template engine dependency). */
 const TEMPLATES = {
-  layout: (title: string, content: string) => `<!DOCTYPE html>
+  layout: (title: string, content: string, csrf: string) => `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="${csrf}">
   <title>${title} - service-tunnels</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -88,8 +94,9 @@ const TEMPLATES = {
     ${content}
   </div>
   <script>
+    function csrfToken() { return document.querySelector('meta[name="csrf-token"]')?.content || ''; }
     function httpPost(url, data) {
-      return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+      return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() }, body: JSON.stringify(data) });
     }
     function toggleTunnel(name) {
       httpPost('/tunnels/' + encodeURIComponent(name) + '/toggle').then(() => location.reload());
@@ -408,7 +415,7 @@ const TEMPLATES = {
         try {
           const r = await fetch('/api/expose', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
             body: JSON.stringify({ port: Number(port), auth: auth === 'none' ? false : auth, tunnel, mode, site: site || undefined })
           });
           const data = await r.json();
@@ -425,7 +432,7 @@ const TEMPLATES = {
     </script>
   `,
 
-  tunnelsAdd: (tunnelTypes: string[]) => `
+  tunnelsAdd: (schemas: Record<string, any[]>, metas: Record<string, any>) => `
     <div class="card">
       <h2>添加隧道</h2>
       <form id="tunnelForm">
@@ -435,30 +442,72 @@ const TEMPLATES = {
         </div>
         <div class="form-group">
           <label>类型</label>
-          <select name="type" class="form-control" required>
-            ${tunnelTypes.map(t => `<option value="${t}">${t}</option>`).join('')}
+          <select name="type" id="tunnelType" class="form-control" required>
+            ${Object.keys(schemas).map((t) => {
+              const dangerous = metas[t]?.dangerous;
+              return `<option value="${t}">${t}${dangerous ? " ⚠️ 危险" : ""}</option>`;
+            }).join("")}
           </select>
         </div>
         <div class="form-group">
           <label>目标端口</label>
           <input type="number" name="target" class="form-control" placeholder="例如: 4180">
         </div>
+        <div id="paramFields"></div>
         <button type="submit" class="btn btn-primary">添加</button>
       </form>
       <div id="result" style="margin-top: 15px;"></div>
     </div>
     <script>
+      const SCHEMAS = ${JSON.stringify(schemas)};
+      const METAS = ${JSON.stringify(metas)};
+      function renderParams(type) {
+        const wrap = document.getElementById('paramFields');
+        const specs = SCHEMAS[type] || [];
+        wrap.innerHTML = specs.map((s) => {
+          const label = (s.label || s.key) + (s.required ? ' *' : '');
+          const hint = s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
+            (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '';
+          const ph = s.placeholder ? ' placeholder="' + s.placeholder + '"' : '';
+          const def = s.default !== undefined ? ' value="' + s.default + '"' : '';
+          let input;
+          if (s.options && s.options.length) {
+            input = '<select name="' + s.key + '" class="form-control">' +
+              s.options.map((o) => '<option value="' + o.value + '">' + (o.label || o.value) + '</option>').join('') + '</select>';
+          } else if (s.type === 'number') {
+            input = '<input type="number" name="' + s.key + '" class="form-control"' + ph + def + '>';
+          } else if (s.type === 'password') {
+            input = '<input type="password" name="' + s.key + '" class="form-control"' + ph + def + '>';
+          } else {
+            input = '<input type="text" name="' + s.key + '" class="form-control"' + ph + def + '>';
+          }
+          return '<div class="form-group"><label>' + label + '</label>' + input + hint + '</div>';
+        }).join('');
+      }
+      const typeSel = document.getElementById('tunnelType');
+      typeSel.addEventListener('change', (e) => renderParams(e.target.value));
+      renderParams(typeSel.value);
       document.getElementById('tunnelForm').onsubmit = async (e) => {
         e.preventDefault();
         const fd = new FormData(e.target);
         const data = Object.fromEntries(fd.entries());
         data.target = Number(data.target) || undefined;
+        for (const s of SCHEMAS[data.type] || []) {
+          const raw = data[s.key];
+          if (raw === undefined || raw === '') { delete data[s.key]; continue; }
+          if (s.type === 'number') data[s.key] = Number(raw);
+        }
+        if (data.type === 'command') {
+          // command 类型直接执行 shell 命令 —— 显式确认后才提交（daemon 侧同样要求 dangerous: true）
+          if (!confirm('type "command" 会直接执行你输入的命令（危险）。确定继续？')) return;
+          data.dangerous = true;
+        }
         const result = document.getElementById('result');
         result.innerHTML = '<p>正在添加...</p>';
         try {
           const r = await fetch('/api/tunnels/add', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
             body: JSON.stringify(data)
           });
           const d = await r.json();
@@ -466,7 +515,7 @@ const TEMPLATES = {
             result.innerHTML = '<div class="alert alert-success">✅ 添加成功！</div>';
             setTimeout(() => location.href = '/tunnels', 1000);
           } else {
-            result.innerHTML = '<div class="alert alert-error">❌ 添加失败</div>';
+            result.innerHTML = '<div class="alert alert-error">❌ 添加失败: ' + (d.error || '未知错误') + '</div>';
           }
         } catch (err) {
           result.innerHTML = '<div class="alert alert-error">❌ 请求失败: ' + err + '</div>';
@@ -510,14 +559,24 @@ function createHandler(ctx: UiContext): RequestListener {
     const url = new URL(req.url ?? "", `http://${req.headers.host}`);
     const path = url.pathname;
 
-    // CORS for API calls
-    if (path.startsWith("/api/")) {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-      if (req.method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
+    // ── CSRF / same-origin enforcement ─────────────────────────────────────
+    // The UI binds 127.0.0.1 only, but ANY local web page can POST to it
+    // (browsers send simple requests without preflight). Every mutating
+    // request must (1) come from the page's own origin and (2) carry the
+    // per-session CSRF token — readable only by same-origin scripts (no
+    // Access-Control-Allow-Origin is ever set).
+    if (req.method === "POST") {
+      const origin = req.headers.origin;
+      if (origin !== undefined && origin !== `http://127.0.0.1:${ctx.port}` && origin !== `http://localhost:${ctx.port}`) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("cross-origin request rejected");
+        return;
+      }
+      const sent = Buffer.from(String(req.headers["x-csrf-token"] ?? ""));
+      const expected = Buffer.from(ctx.csrfToken);
+      if (sent.length !== expected.length || !timingSafeEqual(sent, expected)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("missing or invalid CSRF token");
         return;
       }
     }
@@ -529,7 +588,7 @@ function createHandler(ctx: UiContext): RequestListener {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
         const users: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
         const userCount = users.reduce((n, x) => n + x.users.length, 0);
-        const html = TEMPLATES.layout("概览", TEMPLATES.dashboard(dstat.running, tunnels.length, userCount));
+        const html = TEMPLATES.layout("概览", TEMPLATES.dashboard(dstat.running, tunnels.length, userCount), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -538,14 +597,16 @@ function createHandler(ctx: UiContext): RequestListener {
       // Tunnels
       if (path === "/tunnels") {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
-        const html = TEMPLATES.layout("隧道管理", TEMPLATES.tunnels(tunnels));
+        const html = TEMPLATES.layout("隧道管理", TEMPLATES.tunnels(tunnels), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
       }
 
       if (path === "/tunnels/add") {
-        const html = TEMPLATES.layout("添加隧道", TEMPLATES.tunnelsAdd(["ngrok", "frpc", "ssh", "serveo", "cloudflared", "localtunnel", "bore", "natapp", "command"]));
+        const schemas = ctx.st.schemas.tunnels();
+        const metas = ctx.st.schemas.metas();
+        const html = TEMPLATES.layout("添加隧道", TEMPLATES.tunnelsAdd(schemas, metas), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -564,7 +625,7 @@ function createHandler(ctx: UiContext): RequestListener {
             totpStatus[u.name] = false; // 未注册/不可查 → 视为未启用
           }
         }
-        const html = TEMPLATES.layout("用户管理", TEMPLATES.users(users, totpStatus));
+        const html = TEMPLATES.layout("用户管理", TEMPLATES.users(users, totpStatus), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -584,7 +645,7 @@ function createHandler(ctx: UiContext): RequestListener {
             domainUrl: ex.map((e) => e.domainUrl).find(Boolean),
           };
         });
-        const html = TEMPLATES.layout("站点管理", TEMPLATES.sites(withUrls, exposes));
+        const html = TEMPLATES.layout("站点管理", TEMPLATES.sites(withUrls, exposes), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -637,7 +698,7 @@ function createHandler(ctx: UiContext): RequestListener {
         }
         const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users(undefined, name);
         const users: AuthUser[] = groups.flatMap((g) => g.users);
-        const html = TEMPLATES.layout("站点用户", TEMPLATES.siteUsers(site, users));
+        const html = TEMPLATES.layout("站点用户", TEMPLATES.siteUsers(site, users), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -677,7 +738,7 @@ function createHandler(ctx: UiContext): RequestListener {
 
       // Config
       if (path === "/config") {
-        const html = TEMPLATES.layout("配置", TEMPLATES.config(ctx.st.dirs));
+        const html = TEMPLATES.layout("配置", TEMPLATES.config(ctx.st.dirs), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -686,7 +747,7 @@ function createHandler(ctx: UiContext): RequestListener {
       // Expose
       if (path === "/expose") {
         const sites = ctx.st.sites.list().filter((s) => s.name !== "default").map((s) => s.name);
-        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites));
+        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -738,7 +799,21 @@ function createHandler(ctx: UiContext): RequestListener {
           req.on("data", (chunk) => b += chunk);
           req.on("end", () => resolve(JSON.parse(b)));
         });
-        await ctx.st.daemon.request("tunnel.add", body);
+        // Validate here so the operator sees the exact reason (the daemon
+        // validates again at its boundary — defense in depth).
+        try {
+          validateTunnelConfig(body, body?.name);
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+          return;
+        }
+        const result = await ctx.st.daemon.request<{ ok: boolean }>("tunnel.add", body);
+        if (!result?.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "tunnel.add rejected by daemon (invalid config or daemon unavailable)" }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ added: body.name }));
         return;
@@ -806,26 +881,35 @@ function createHandler(ctx: UiContext): RequestListener {
 
 export interface UiServer {
   close(): void;
+  /** Actual listening port (resolves 0 → random at bind time). */
+  port: number;
 }
 
 /** Start the UI server. */
-export function startUi(st: ServiceTunnels, opts: UiServerOptions = {}): UiServer {
+/** Start the UI server. Resolves once the listener is up (with the actual
+ *  port, which is random when port: 0). The CSRF origin gate needs the REAL
+ *  bound port, so the listener binds first and the handler is attached after. */
+export async function startUi(st: ServiceTunnels, opts: UiServerOptions = {}): Promise<UiServer> {
   const port = opts.port ?? 4181;
-  const server = createServer(createHandler({ st, port }));
-
-  return new Promise<UiServer>((resolve, reject) => {
+  const csrfToken = randomBytes(32).toString("hex");
+  const server = createServer();
+  const actualPort = await new Promise<number>((resolve, reject) => {
+    server.once("error", reject);
     server.listen(port, "127.0.0.1", () => {
-      console.log(`UI server listening on http://127.0.0.1:${port}`);
-      if (opts.openBrowser !== false) {
-        openBrowser(`http://127.0.0.1:${port}`);
-      }
-      resolve({
-        close: () => {
-          server.close();
-          console.log("UI server stopped");
-        },
-      });
+      const addr = server.address();
+      resolve(typeof addr === "object" && addr ? addr.port : port);
     });
-    server.on("error", reject);
-  }) as any as UiServer;
+  });
+  server.on("request", createHandler({ st, port: actualPort, csrfToken }));
+  console.log(`UI server listening on http://127.0.0.1:${actualPort}`);
+  if (opts.openBrowser !== false) {
+    openBrowser(`http://127.0.0.1:${actualPort}`);
+  }
+  return {
+    port: actualPort,
+    close: () => {
+      server.close();
+      console.log("UI server stopped");
+    },
+  };
 }

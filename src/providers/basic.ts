@@ -1,6 +1,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from "fs";
 import { execFileSync } from "child_process";
 import { dirname, join } from "path";
+import { validateUserName } from "../validation.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager } from "../auth-provider.ts";
 
 /**
@@ -25,6 +26,13 @@ export interface BasicAuthProviderOptions {
 
 export class BasicAuthProvider implements AuthProvider, UserManager {
   readonly type = "basic";
+  /** nginx auth_basic：无 forward-auth 探针、无 basePath、无登录页。 */
+  readonly gatewayMode = "basic" as const;
+
+  /** basic 无 basePath（nginx auth_basic 不需要）。 */
+  defaultBasePath(): string {
+    return "";
+  }
   /** Site (auth realm) this instance belongs to ("default" when absent). */
   readonly site: string;
   readonly capabilities = {
@@ -152,6 +160,9 @@ export class BasicAuthProvider implements AuthProvider, UserManager {
   }
 
   async addUser(name: string, password: string, displayName?: string): Promise<void> {
+    // username becomes a htpasswd LINE (`name:hash`) — a `:` or newline in
+    // the name would inject a fake user entry
+    validateUserName(name);
     const rows = await this.#readDb();
     const isNew = !rows.has(name);
     rows.set(name, await this.#hash(password));
@@ -160,6 +171,7 @@ export class BasicAuthProvider implements AuthProvider, UserManager {
   }
 
   async setUserPassword(name: string, password: string): Promise<void> {
+    validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.has(name)) throw new Error(`user ${name} not registered`);
     rows.set(name, await this.#hash(password));
@@ -168,6 +180,7 @@ export class BasicAuthProvider implements AuthProvider, UserManager {
   }
 
   async removeUser(name: string): Promise<void> {
+    validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.delete(name)) throw new Error(`user ${name} not registered`);
     await this.#writeDb(rows);

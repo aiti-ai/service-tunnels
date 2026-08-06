@@ -3,7 +3,9 @@ import { execFileSync, spawn } from "child_process";
 import { join } from "path";
 import { randomBytes, scryptSync, createHmac, timingSafeEqual } from "crypto";
 import { connect } from "net";
+import { validateUserName } from "../validation.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager } from "../auth-provider.ts";
+import { randomName } from "../auth-provider.ts";
 
 /**
  * portal provider — self-contained Node forward-auth login portal.
@@ -236,6 +238,16 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     return ""; // gateway wires auth_request → {basePath}/api/authz/auth-request
   }
 
+  /** 默认 basePath：随机趣味名（避免与 app 路由冲突）。 */
+  defaultBasePath(): string {
+    return `/portal-${randomName()}`;
+  }
+
+  /** 未认证跳转：portal 登录页（next 参数带回原路径）。 */
+  loginRedirect(basePath: string, scheme: "http" | "https"): string {
+    return `${scheme}://$host${basePath}/login?next=$request_uri`;
+  }
+
   async registerHost(_host: string, _policy?: AuthPolicy): Promise<void> {
     // stateless forward-auth — cookies follow the request host, nothing to register
   }
@@ -280,6 +292,9 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   }
 
   async addUser(name: string, password: string, displayName?: string): Promise<void> {
+    // users.json is JSON (escaping-safe), but the name is also used as a
+    // cookie subject + otpauth label — keep the same charset gate everywhere.
+    validateUserName(name);
     const rows = await this.#readDb();
     const isNew = !rows.has(name);
     const salt = randomBytes(16).toString("hex");
@@ -293,6 +308,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   }
 
   async setUserPassword(name: string, password: string): Promise<void> {
+    validateUserName(name);
     const rows = await this.#readDb();
     const rec = rows.get(name);
     if (!rec) throw new Error(`user ${name} not registered`);
@@ -303,6 +319,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   }
 
   async removeUser(name: string): Promise<void> {
+    validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.delete(name)) throw new Error(`user ${name} not registered`);
     await this.#writeDb(rows);

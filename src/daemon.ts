@@ -112,38 +112,62 @@ export async function requestDaemon<T>(
   const status = daemonStatus(cacheDir);
   if (!status.running || !status.ipc) return null;
   const path = ipcPath(status.ipc);
-  if (!path) return null; // TCP (Windows) unsupported in M1 CLI transport
-
-  return new Promise<T | null>((resolvePromise) => {
-    const socket = connect(path);
-    const timer = setTimeout(() => {
-      socket.destroy();
-      resolvePromise(null);
-    }, timeoutMs);
-    let buf = "";
-    socket.setEncoding("utf8");
-    socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ id: 1, method, params })}\n`);
-    });
-    socket.on("data", (chunk: string) => {
-      buf += chunk;
-      const nl = buf.indexOf("\n");
-      if (nl < 0) return;
-      const line = buf.slice(0, nl);
-      clearTimeout(timer);
-      socket.destroy();
-      try {
-        const resp = JSON.parse(line) as { result?: T; error?: string };
-        resolvePromise(resp.error ? null : (resp.result ?? null));
-      } catch {
+  if (path) {
+    // POSIX: newline-delimited JSON over the 0600 unix socket
+    return new Promise<T | null>((resolvePromise) => {
+      const socket = connect(path);
+      const timer = setTimeout(() => {
+        socket.destroy();
         resolvePromise(null);
-      }
+      }, timeoutMs);
+      let buf = "";
+      socket.setEncoding("utf8");
+      socket.on("connect", () => {
+        socket.write(`${JSON.stringify({ id: 1, method, params })}\n`);
+      });
+      socket.on("data", (chunk: string) => {
+        buf += chunk;
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        const line = buf.slice(0, nl);
+        clearTimeout(timer);
+        socket.destroy();
+        try {
+          const resp = JSON.parse(line) as { result?: T; error?: string };
+          resolvePromise(resp.error ? null : (resp.result ?? null));
+        } catch {
+          resolvePromise(null);
+        }
+      });
+      socket.on("error", () => {
+        clearTimeout(timer);
+        resolvePromise(null);
+      });
     });
-    socket.on("error", () => {
-      clearTimeout(timer);
-      resolvePromise(null);
+  }
+
+  // Windows: HTTP on 127.0.0.1 with the per-instance secret header (the TCP
+  // listener rejects requests without it — daemon-server.ts).
+  const m = /^tcp:\/\/([^/:]+):(\d+)$/.exec(status.ipc);
+  if (!m) return null;
+  const { stateFile } = cachePaths(cacheDir);
+  const secret = readState(stateFile).daemon?.ipcSecret ?? "";
+  try {
+    const res = await fetch(`http://127.0.0.1:${m[2]}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-service-tunnels-auth": secret,
+      },
+      body: JSON.stringify({ id: 1, method, params }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-  });
+    if (!res.ok) return null;
+    const resp = (await res.json()) as { result?: T; error?: string };
+    return resp.error ? null : (resp.result ?? null);
+  } catch {
+    return null;
+  }
 }
 
 /** Stop the daemon: graceful shutdown via IPC, SIGTERM fallback. */

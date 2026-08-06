@@ -8,6 +8,7 @@ import { cachePaths, resolveDirs, readConfigFile, writeConfigFile, type ServiceT
 import { readState } from "./state.ts";
 import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
+import { validateTunnelConfig } from "./validation.ts";
 
 function usage(): void {
   console.log(`service-tunnels <command>
@@ -25,7 +26,7 @@ function usage(): void {
   schemas [--type <tunnel-type|auth>]   # 数据驱动参数 schema(客户端据此渲染表单)
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--allow-tool-download <true|false>] [--force]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--force]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
@@ -86,6 +87,8 @@ interface CliArgs {
   proxyPort?: number;
   /** --base-domain <d>: user's wildcard-DNS domain for portless base URLs. */
   baseDomain?: string;
+  /** --bypass-path /health --bypass-path /metrics：认证放行白名单（可重复）。 */
+  bypassPaths?: string[];
   /** --allow-tool-download <true|false>: per-expose tool-download override. */
   allowToolDownload?: boolean;
   [k: string]: unknown;
@@ -202,6 +205,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--base-domain":
         args.baseDomain = argv[++i]!;
+        break;
+      case "--bypass-path":
+        (args.bypassPaths ??= []).push(argv[++i]!);
         break;
       case "--allow-tool-download": {
         const raw = (argv[++i] ?? "true").toLowerCase();
@@ -641,8 +647,24 @@ async function main(): Promise<void> {
           ...(args.server ? { server: args.server } : {}),
           ...(args.token ? { token: args.token } : {}),
           ...(args.tunnelArgs?.length ? { args: args.tunnelArgs } : {}),
+          // `command` runs a raw shell command — this CLI invocation is the
+          // explicit opt-in the daemon requires (dangerous gate).
+          ...(args.type === "command" ? { dangerous: true } : {}),
         };
-        await d.request("tunnel.add", cfg);
+        // Validate client-side so the operator sees the exact reason instead
+        // of a silent daemon rejection (ssh option injection / INI control
+        // chars / name path traversal / bad ports).
+        try {
+          validateTunnelConfig(cfg as Parameters<typeof validateTunnelConfig>[0], name);
+        } catch (err) {
+          console.error(String(err instanceof Error ? err.message : err));
+          process.exit(2);
+        }
+        const res = await d.request<{ ok: boolean }>("tunnel.add", cfg);
+        if (!res?.ok) {
+          console.error("tunnel.add rejected by daemon (invalid config or daemon unavailable)");
+          process.exit(1);
+        }
         jsonOut({ added: name });
       } else if (op === "start" || op === "stop" || op === "remove") {
         if (!name) {
@@ -702,8 +724,12 @@ async function main(): Promise<void> {
         site: args.site,
         proxyPort: args.proxyPort != null ? Number(args.proxyPort) : undefined,
         baseDomain: args.baseDomain,
+        bypassPaths: args.bypassPaths,
         tunnelType: args.tunnel,
         tunnelName: args.name,
+        // `--tunnel command` runs a raw shell command — this CLI invocation is
+        // the explicit opt-in (same gate as tunnel add).
+        dangerous: args.tunnel === "command",
         nginxPort: args.nginxPort ? Number(args.nginxPort) : undefined,
         basePath: args.basePath,
         tunnelParams,

@@ -22,6 +22,7 @@ service-tunnels expose 5173 --mode tunnel --auth auto     # 公网隧道 + 认�
 service-tunnels expose 5173 --mode proxy --auth portal   # 本地虚拟主机（无隧道）→ http://5173-portal.st.localhost:4180
 service-tunnels expose 5173 --mode both --auth auto      # 本地 + 公网，同一 site 同一批用户
 service-tunnels expose 5173 --mode proxy --auth none     # 本地开放（显式 enrollment，可选 --password）
+service-tunnels expose 5173 --auth authelia --bypass-path /health --bypass-path /metrics  # 白名单免认证（健康检查/指标）
 
 # 站点（认证域）：宿主自身 vs 子进程各自独立用户库
 service-tunnels site add host --provider portal --domain web.example.com
@@ -88,6 +89,19 @@ proxy 默认**零转发**（D4）：虚拟主机必须显式 enrollment（`expos
 | `serveo` | ✓ | ✗ | 无 | serveo.net 免费 ssh 托管（HTTP 子域） |
 | `frpc` | ✓ | ✓（tcp） | 自建 frps server | 自建 frp 服务端，完全自控 |
 | `command` | 取决于命令 | 取决于命令 | — | 任意命令兜底，解析输出中的 URL |
+
+> **自定义命令隧道（env 注册）**：设置 `SERVICE_TUNNELS_TUNNEL_COMMAND_<NAME>` 即可注册你自己的隧道方法，
+> NAME 自动出现在所有 schema 驱动的客户端（表单/下拉框）。值是一段 shell 命令模板，`{{token}}`
+> 占位符即表单参数：`{{port}}` 必填输入；`{{port:8080}}` 固定默认值；`{{localport}}` 自动填入被暴露的本地端口。
+> 例如 `SERVICE_TUNNELS_TUNNEL_COMMAND_sshbox="ssh -R {{port}}:127.0.0.1:{{localport}} myuser@host"`
+> → 隧道列表出现 `sshbox`，要求输入 `port`，启动时自动组装为 `ssh -R <port>:127.0.0.1:<本地端口> myuser@host`。
+> **URL 返回**：命令输出 `ST_TUNNEL_URL:<url>` 标记即声明隧道 URL（冒号/等号/空格分隔均可，引号与 CRLF 容忍，大小写不敏感；
+> 无 scheme 的 `host:port` 自动补 `http://`）。适合先声明再跑真实命令：
+> `SERVICE_TUNNELS_TUNNEL_COMMAND_box="echo ST_TUNNEL_URL:https://myapp.example.com && ssh -R 80:127.0.0.1:{{localport}} u@h"`。
+> Windows（cmd）：`set "SERVICE_TUNNELS_TUNNEL_COMMAND_win=echo ST_TUNNEL_URL:http://127.0.0.1:8080 && ssh -R {{port}}:127.0.0.1:{{localport}} u@h"`
+> （URL 避免 `& | < > ^ ( )` 等 cmd 特殊字符；PowerShell 用 `$env:SERVICE_TUNNELS_TUNNEL_COMMAND_win='...'` 同样由 cmd 执行）。
+> **安全**：所有占位符值（表单输入/默认值/localport）按字面量单引号转义注入（`'`→`'\''`，POSIX），
+> 空格/`$`/反引号/`;`/`|`/`&` 等全部惰性化——值只是数据，绝不成为 shell 语法；控制字符 fail-closed 拒绝。
 
 > 二进制工具自动下载：官方源 → Gitee/ghproxy/npmmirror 镜像回退；`config set allow-tool-download false` 可关闭。
 
@@ -185,7 +199,9 @@ config path | show | get <key> | set <key> <value>   # base-domain / proxy-port 
 ## 设计文档
 
 - [`docs/sites-design.md`](docs/sites-design.md) — **站点（认证域）隔离 + proxy 暴露模式**（site / enrollment / hostsubfix / baseDomain）
+- [`docs/auth-provider.md`](docs/auth-provider.md) — **编写 AuthProvider 指南**（接口 / 自描述协议字段 / 最小示例 / 注册 / 检查清单）
 - [`docs/design.md`](docs/design.md) — 架构 / 模块 / 认证 provider 模型 / 平台矩阵
+- [`docs/input-validation-security.md`](docs/input-validation-security.md) — **隧道参数输入安全**（审计 + 加固方案与实现）
 - [`docs/api.md`](docs/api.md) — 库 API
 - [`docs/cli.md`](docs/cli.md) — CLI 参考
 - [`docs/config.md`](docs/config.md) — 配置与目录规范
@@ -196,6 +212,8 @@ config path | show | get <key> | set <key> <value>   # base-domain / proxy-port 
 - 代理/隧道目标只允许 127.0.0.1；未知站点 label → 403；后缀即主机白名单（防 DNS rebinding）
 - 每 site 独立用户库/密钥（`cacheDir/tmp/sites/<site>/...`）；state.json 不含 secret
 - 框架辅助进程带 `SERVICE_TUNNELS_ROLE` 标记：发现时排除、daemon 退出时清理
+- **隧道参数输入校验**（`src/validation.ts`）：所有用户输入在 `start()` 与 daemon RPC 双入口 fail-closed——ssh `host/user` 以 `-` 开头（选项注入 → 本机 RCE）拒绝、token/server/domain 控制字符（frpc INI 注入）拒绝、隧道名路径穿越拒绝；内置隧道全部无 shell spawn，token 只经 env/单 argv 传递；`command` 类型（唯一 shell）经 daemon 必须显式 `dangerous: true`；`tunnel add --type ngrok --token x` 自动注入 `NGROK_AUTHTOKEN` env
+- **管理面板 CSRF 防护**（`src/ui.ts`）：所有 POST 要求同源 Origin + 随机 CSRF token；**Windows IPC** 带每实例 secret 鉴权（state.json 0600）
 - 隧道工具（尤其 frpc）可能被安全软件标记为 HackTool/RiskWare——属工具自身问题，见 design.md §8.1
 
 ## License

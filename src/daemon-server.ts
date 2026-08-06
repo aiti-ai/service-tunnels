@@ -12,6 +12,7 @@
  */
 import { createServer, type Socket } from "net";
 import { existsSync, unlinkSync } from "fs";
+import { randomBytes } from "crypto";
 import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
@@ -19,6 +20,7 @@ import { readState, writeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
 import { readConfigFile, writeConfigFile, resolveBaseDomains } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
+import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { registerPid } from "./pid-registry.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
@@ -102,6 +104,18 @@ const methods = new Map<string, Handler>([
     "tunnel.add",
     (params) => {
       const cfg = params as Parameters<TunnelManager["add"]>[0];
+      // Dangerous-type gate: `command` runs a raw shell command — the client
+      // must explicitly opt in (CLI sets it for --type command; the UI sets
+      // it after an explicit confirm). Rejects accidental/scripted command
+      // tunnels at the IPC boundary.
+      if (cfg?.type === "command" && cfg?.dangerous !== true) {
+        throw new Error(
+          `tunnel '${cfg?.name ?? "?"}': type "command" runs a raw shell command — explicit opt-in required (dangerous: true)`,
+        );
+      }
+      // Fail-closed input validation BEFORE anything is persisted: ssh option
+      // injection / frpc INI injection / name path traversal / bad ports.
+      validateTunnelConfig(cfg, cfg?.name);
       tunnels.add(cfg);
       const all = readTunnelConfigs(configDir);
       const idx = all.findIndex((c) => c.name === cfg.name);
@@ -115,13 +129,22 @@ const methods = new Map<string, Handler>([
     "tunnel.remove",
     (params) => {
       const name = String(params);
+      validateTunnelName(name); // fail-closed name gate (state keys + file names)
       tunnels.remove(name);
       writeTunnelConfigs(configDir, readTunnelConfigs(configDir).filter((c) => c.name !== name));
       return { ok: true };
     },
   ],
-  ["tunnel.start", (params) => tunnels.start(String(params)).then((i) => ({ ...i }))],
-  ["tunnel.stop", (params) => tunnels.stop(String(params)).then(() => ({ ok: true }))],
+  ["tunnel.start", (params) => {
+    const name = String(params);
+    validateTunnelName(name);
+    return tunnels.start(name).then((i) => ({ ...i }));
+  }],
+  ["tunnel.stop", (params) => {
+    const name = String(params);
+    validateTunnelName(name);
+    return tunnels.stop(name).then(() => ({ ok: true }));
+  }],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
   ["config.allow-download", () => ({ allowToolDownload: toolAllowDownload })],
   [
@@ -170,8 +193,12 @@ const methods = new Map<string, Handler>([
   })],
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
+
   ["auth.totp.enroll", (params) => {
     const p = params as { name?: string; provider?: string; site?: string };
+    // username gate at the IPC boundary (also enforces the totp export
+    // filename charset in the authelia provider)
+    validateUserName(p?.name);
     const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }>;
     };
@@ -179,6 +206,7 @@ const methods = new Map<string, Handler>([
   }],
   ["auth.totp.disable", (params) => {
     const p = params as { name?: string; provider?: string; site?: string };
+    validateUserName(p?.name);
     const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpDisable(name: string): Promise<void>;
     };
@@ -186,6 +214,7 @@ const methods = new Map<string, Handler>([
   }],
   ["auth.totp.status", (params) => {
     const p = params as { name?: string; provider?: string; site?: string };
+    validateUserName(p?.name);
     const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
       totpStatus(name: string): Promise<{ enrolled: boolean }>;
     };
@@ -208,6 +237,7 @@ const methods = new Map<string, Handler>([
         site?: string;
       };
       const targets = resolveDaemonUserTargets(authRegistry, provider);
+      validateUserName(name); // same charset gate as the providers (YAML/htpasswd safety)
       return Promise.all(targets.map((t) => authRegistry.userManager(t, site).addUser(name, password, displayName, email)))
         .then(() => ({ ok: true, providers: targets }));
     },
@@ -221,6 +251,7 @@ const methods = new Map<string, Handler>([
         provider?: string | string[];
         site?: string;
       };
+      validateUserName(name);
       const targets = resolveDaemonUserTargets(authRegistry, provider);
       return Promise.all(targets.map((t) => authRegistry.userManager(t, site).setUserPassword(name, password)))
         .then(() => ({ ok: true, providers: targets }));
@@ -230,6 +261,7 @@ const methods = new Map<string, Handler>([
     "auth.user.remove",
     (params) => {
       const p = params as { name?: string; provider?: string | string[]; site?: string };
+      validateUserName(p?.name);
       const targets = resolveDaemonUserTargets(authRegistry, p.provider);
       return Promise.all(targets.map((t) => authRegistry.userManager(t, p.site).removeUser(p.name ?? "")))
         .then(() => ({ ok: true, providers: targets }));
@@ -239,6 +271,32 @@ const methods = new Map<string, Handler>([
     "expose",
     (params) => {
       const o = params as ExposeOptions & { toolPaths?: Record<string, string> };
+      // Fail-closed boundary checks before the expose flow touches anything:
+      // the port must be real, and schema-driven tunnel params must be an
+      // object (the final tunnel config itself is validated at start()).
+      validatePort(o?.port, "port");
+      if (o?.tunnelParams !== undefined && (typeof o.tunnelParams !== "object" || o.tunnelParams === null || Array.isArray(o.tunnelParams))) {
+        throw new Error(`expose: tunnelParams must be an object`);
+      }
+      // auxiliary ports (0 = auto/random) and the base domain (host[:port],
+      // interpolated into generated vhost URLs) get the same boundary checks.
+      for (const f of ["proxyPort", "nginxPort", "autheliaPort", "redisPort"] as const) {
+        const p = (o as unknown as Record<string, unknown>)[f];
+        if (p !== undefined && p !== 0 && p !== null && p !== "") validatePort(p, f);
+      }
+      if (o?.baseDomain !== undefined && o.baseDomain !== "") validateServer(o.baseDomain);
+      // Same dangerous gate as tunnel.add: `--tunnel command` runs a raw shell
+      // command — requires the explicit opt-in (CLI carries it for command).
+      if (o?.tunnelType === "command" && o?.dangerous !== true) {
+        throw new Error("expose: tunnel type \"command\" runs a raw shell command — explicit opt-in required (dangerous: true)");
+      }
+      // autheliaReloadCmd is a SHELL command executed on host registration
+      // (operator-managed authelia) — it is library/config-only, never meant
+      // to travel over IPC. Block it here so a daemon RPC client can't turn
+      // `expose --auth authelia` into local command execution.
+      if (o?.autheliaReloadCmd !== undefined && o?.autheliaReloadCmd !== "") {
+        throw new Error("expose: autheliaReloadCmd is operator-only (library/config) — not accepted over IPC");
+      }
       return exposeFlow(o.port, o, {
         configDir,
         cacheDir,
@@ -308,10 +366,21 @@ async function handleLine(socket: Socket, line: string) {
   }
 }
 
-async function listen(): Promise<string> {
+async function listen(): Promise<{ path: string; secret?: string }> {
   if (process.platform === "win32") {
+    // Windows IPC: TCP on 127.0.0.1 with a per-instance random secret (stored
+    // in state.json, 0600). POSIX uses a 0600 unix socket (filesystem peer
+    // gate); TCP has no such gate, so every request must prove the secret.
     const { createServer: createHttp } = await import("http");
+    const ipcSecret = randomBytes(32).toString("hex");
     const httpServer: HttpServer = createHttp((req, res) => {
+      if (req.headers["x-service-tunnels-auth"] !== ipcSecret) {
+        // audit: unauthorized IPC access attempt (wrong/missing secret)
+        console.error(`[daemon] IPC auth failed from ${req.socket?.remoteAddress ?? "?"} (${req.method} ${req.url ?? ""})`);
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
@@ -340,7 +409,7 @@ async function listen(): Promise<string> {
     });
     const addr = httpServer.address();
     if (!addr || typeof addr === "string") throw new Error("no tcp addr");
-    return `tcp://127.0.0.1:${addr.port}`;
+    return { path: `tcp://127.0.0.1:${addr.port}`, secret: ipcSecret };
   }
 
   if (existsSync(sockPath)) {
@@ -360,7 +429,7 @@ async function listen(): Promise<string> {
   } catch {
     // socket chmod is best-effort
   }
-  return `unix://${sockPath}`;
+  return { path: `unix://${sockPath}` };
 }
 
 const authRegistry = new AuthRegistry({
@@ -434,8 +503,17 @@ const ipc = await listen();
 // watch ourselves: if this daemon is ever SIGKILLed, the guardian reaps the
 // role-marked helpers (nginx/authelia/redis/tunnels) we spawned
 spawnGuardian(process.pid);
-writeState(stateFile, { ...readState(stateFile), daemon: { pid: process.pid, ipc } });
-console.log(`daemon ready ${ipc}`);
+writeState(stateFile, {
+  ...readState(stateFile),
+  daemon: {
+    pid: process.pid,
+    ipc: ipc.path,
+    // Windows TCP IPC has no filesystem peer gate — the per-instance secret
+    // (state.json is 0600) authenticates every request.
+    ...(ipc.secret ? { ipcSecret: ipc.secret } : {}),
+  },
+});
+console.log(`daemon ready ${ipc.path}`);
 
 process.once("exit", () => {
   try {

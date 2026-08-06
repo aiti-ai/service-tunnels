@@ -97,6 +97,17 @@ export function proxyTarget(port: number, path: string): string {
   return `http://127.0.0.1:${port}${p}`;
 }
 
+export interface ProxySetup {
+  /** 域名所有权验证文件：IdP 会直接抓取 http://<host>/<path> 校验内容。免认证直达。 */
+  verification: Array<{ path: string; content: string }>;
+  /** 预登录设置提示页路径（缺省关闭；oauth2-proxy 用 /oauth2-setup）。 */
+  infoPath?: string;
+  /** 设置页 HTML 模板（nginx $host/$arg_rd 变量形式；node proxy 自行替换）。 */
+  infoHtmlTemplate?: string;
+  /** 设置页 HTML 渲染（host + 原请求路径 → html）。 */
+  infoHtml?: (host: string, next: string) => string;
+}
+
 export interface ProxyAuth {
   /** Provider authz port (portal/authelia server or oauth2-proxy sidecar). */
   port: number;
@@ -109,6 +120,17 @@ export interface ProxyAuth {
    * TLS-terminating tunnel).
    */
   loginRedirect: string;
+  /** Authz probe path override. Default: `${basePath}/api/authz/auth-request`
+   *  (authelia protocol). oauth2-proxy serves its own fixed `/oauth2/auth`. */
+  authzPath?: string;
+  /** Provider-owned path prefixes piped DIRECTLY to the provider port (no
+   *  authz probe). oauth2-proxy's login/start/callback live under `/oauth2`. */
+  providerPaths?: string[];
+  /** 认证放行白名单（URL 路径前缀）：命中则跳过认证直接转发应用（/health、
+   *  /metrics 等公开端点）。Node proxy 门禁在此放行。 */
+  bypassPaths?: string[];
+  /** 免认证直达：域名验证文件 + 预登录设置页（oauth2-proxy 等 IdP 联动场景）。 */
+  setup?: ProxySetup;
 }
 
 /** Per-site auth backend resolved for an enrolled virtual host. */
@@ -232,7 +254,8 @@ export type ServiceHostDecision =
   | { kind: "deny-auth"; status: 401; wwwAuthenticate: string }
   | { kind: "pipe"; port: number; url: string }
   | { kind: "redirect"; location: string }
-  | { kind: "forward"; target: string };
+  | { kind: "forward"; target: string }
+  | { kind: "static"; status: 200; contentType: string; body: string };
 
 export interface ServiceHostResolveInput {
   host: string | undefined;
@@ -314,10 +337,35 @@ async function gateBackend(
   }
   if (backend.forwardAuth) {
     const pathname = input.url.split("?")[0] ?? "/";
-    if (isBasePathPath(pathname, backend.forwardAuth.basePath)) {
-      return { kind: "pipe", port: backend.forwardAuth.port, url: input.url ?? "/" };
+    const fw = backend.forwardAuth;
+    // 认证放行白名单：命中前缀 → 跳过认证直接转发应用（/health、/metrics 等）
+    if ((fw.bypassPaths ?? []).some((p) => pathname === p || pathname.startsWith(p.replace(/\/+$/, "") + "/"))) {
+      return null;
     }
-    return gateForwardAuthDecision(backend.forwardAuth, input);
+    // 免认证直达（IdP 域名验证抓取 / 预登录设置页）
+    const setup = fw.setup;
+    if (setup) {
+      const vf = setup.verification.find((v) => v.path === pathname);
+      if (vf) {
+        return { kind: "static", status: 200, contentType: "text/plain; charset=utf-8", body: vf.content };
+      }
+      if (setup.infoPath && pathname === setup.infoPath) {
+        const next = new URLSearchParams(input.url.split("?")[1] ?? "").get("rd") ?? "/";
+        return {
+          kind: "static",
+          status: 200,
+          contentType: "text/html; charset=utf-8",
+          body: setup.infoHtml ? setup.infoHtml(input.host ?? "", next) : `<a href="/oauth2/start?rd=${encodeURIComponent(next)}">继续登录</a>`,
+        };
+      }
+    }
+    const onProviderPath =
+      isBasePathPath(pathname, fw.basePath) ||
+      (fw.providerPaths ?? []).some((p) => isBasePathPath(pathname, p));
+    if (onProviderPath) {
+      return { kind: "pipe", port: fw.port, url: input.url ?? "/" };
+    }
+    return gateForwardAuthDecision(fw, input);
   }
   return null;
 }
@@ -335,7 +383,8 @@ async function checkForwardAuthReq(
   auth: ProxyAuth,
   input: ServiceHostResolveInput,
 ): Promise<"ok" | "redirect" | "deny"> {
-  const authzPath = `${auth.basePath.replace(/\/+$/, "")}/api/authz/auth-request`;
+  const authzPath =
+    auth.authzPath ?? `${auth.basePath.replace(/\/+$/, "")}/api/authz/auth-request`;
   const host = input.host ?? "";
   const proto = input.forwardedProto ?? "http";
   return new Promise((resolve) => {
@@ -358,7 +407,9 @@ async function checkForwardAuthReq(
       },
       (r) => {
         r.resume();
-        if (r.statusCode === 200) resolve("ok");
+        // nginx auth_request 语义：任意 2xx = 放行。authelia/portal 回 200，
+        // oauth2-proxy 7.6 的 /oauth2/auth（AuthOnly）回 202 Accepted。
+        if (r.statusCode !== undefined && r.statusCode >= 200 && r.statusCode < 300) resolve("ok");
         else if (r.statusCode === 401 || r.statusCode === 302 || r.statusCode === 403) resolve("redirect");
         else resolve("deny");
       },
@@ -522,6 +573,11 @@ export function createProxyServer(opts: ProxyOptions): Server {
         log(`auth 302 ${req.headers.host} → ${decision.location}`);
         res.writeHead(302, { "cache-control": "no-store", location: decision.location });
         res.end();
+        return;
+      case "static":
+        log(`static ${req.headers.host}${req.url ?? ""} (${decision.contentType})`);
+        res.writeHead(decision.status, { "content-type": decision.contentType, "cache-control": "no-store" });
+        res.end(decision.body);
         return;
       case "forward": {
         const t = new URL(decision.target);

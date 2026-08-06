@@ -68,6 +68,22 @@ service-tunnels expose status
 未就绪自动绿色拉起（缺二进制/缺 OIDC 注册等会在 validate 阶段给出修复提示）。
 流程见 `docs/design.md §4.7`。
 
+**认证放行白名单**（`--bypass-path <path>`，可重复）：命中前缀的 URL **跳过
+认证**直接转发应用（/health、/metrics 等公开端点），Node proxy 与 nginx 网关
+双路径生效：
+
+```bash
+service-tunnels expose 5173 --auth authelia --bypass-path /health --bypass-path /metrics
+service-tunnels expose 5173 --auth oauth2-proxy --bypass-path /.well-known/status
+```
+
+- 前缀匹配：`/health` 命中 `/health` 与 `/health/...`；
+- 路径白名单校验（`[a-zA-Z0-9._~/-]`，禁 `;{}'\"` 空白换行与 `..`）防
+  nginx 配置注入；
+- **禁止白名单 `/`（根路径）**——会匹配全部路径导致认证整体逃逸；想完全
+  免认证请用 `--auth none`；
+- ⚠️ 白名单路径是**公开可达**的——只放行确实无需认证的端点。
+
 ## tunnel — 隧道清单管理
 
 ```bash
@@ -86,6 +102,28 @@ service-tunnels tunnel start web
 service-tunnels tunnel stop web
 service-tunnels tunnel remove web
 ```
+
+> **输入校验**（`src/validation.ts`，详见 [input-validation-security.md](input-validation-security.md)）：
+> - 所有隧道参数在 `start()` 与 daemon RPC 双入口 fail-closed 校验——ssh `host/user`
+>   以 `-` 开头（如 `-oProxyCommand=...`）会触发**本机任意命令执行**，一律拒绝；
+>   token/server/domain 含换行/控制字符（frpc INI 注入）拒绝；隧道名禁止路径分隔符
+>   （路径穿越）；端口 1–65535。
+> - `--type command` 是唯一经 shell 执行的类型：CLI 提交时自动携带显式 opt-in
+>   （`dangerous: true`），daemon 校验缺失即拒绝；UI 需确认对话框。
+> - **自定义命令隧道**：`SERVICE_TUNNELS_TUNNEL_COMMAND_<NAME>` 注册自己的隧道方法
+>   （如 `sshbox`），模板 `{{token}}` 占位符即 `--set` 参数、`{{localport}}` 自动填
+>   被暴露的本地端口——`tunnel add box --type sshbox --target 4180 --set port=8080`
+>   等价于 `ssh -R 8080:127.0.0.1:4180 ...`。
+> - **URL 声明标记**：命令输出 `ST_TUNNEL_URL:<url>`（`=`/空格分隔、引号/CRLF 容忍）即
+>   显式声明隧道 URL（优先于输出解析；无 scheme 的 `host:port` 补 `http://`；`tcp://` 原样）。
+>   典型写法 `echo ST_TUNNEL_URL:https://myapp.example.com && <真实隧道命令>`；
+>   Windows cmd 同样适用（URL 避免 `& | < > ^ ( )`）。进程非零退出撤销该 URL（不报假成功）。
+> - **自定义值注入防护**：占位符值（表单/`--set`/默认值）一律单引号转义后注入 shell
+>   （`'`→`'\''`，值只作字面量，`;`/`|`/`$`/反引号/空格全部惰性）；控制字符
+>   （含换行/NUL）在 `validateTunnelConfig` 与命令组装双入口 fail-closed 拒绝。
+> - `tunnel add --type ngrok --token <authtoken>` 的 token 自动注入 `NGROK_AUTHTOKEN`
+>   env（不经 argv、不经 shell），未认证的 ngrok 不会 ERR_NGROK_4018。
+> - `--arg <a>` 透传与直接运行该隧道工具等价，属显式特性，不作内容过滤。
 
 认证与隧道解耦：`--auth` 在 nginx 网关侧统一生效（provider：authelia 默认 /
 oauth2-proxy / basic / 插件），隧道进程本身不参与认证；`none`（默认，无认证）。
