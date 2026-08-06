@@ -41,6 +41,19 @@ export interface ServiceTunnelsConfigFile {
   /** Fallback for `allowToolDownload` when no explicit option is passed.
    *  Read-only fallback — the library/CLI never writes this file. */
   allowToolDownload?: boolean;
+  /** Auth 配置档（docs/oauth2-variants.md §3）：变体共享凭据 + 旧 oidc 字段。
+   *  只读 fallback——表单/CLI --provider-set 的显式参数永远优先于它。 */
+  auth?: {
+    /** oauth2-proxy 原始路径（向后兼容，docs/config.md §config.json）。 */
+    oidc?: {
+      issuerUrl?: string;
+      clientId?: string;
+      clientSecret?: string;
+      cookieSecret?: string;
+    };
+    /** oauth2 变体凭据（按变体携带 → 页面表单默认填入，可编辑覆盖）。 */
+    oauth2?: import("./providers/oauth2-variants.ts").OAuth2VariantCredsFile;
+  };
 }
 
 /** Read configDir/service-tunnels.json (loose: missing/malformed → {}). */

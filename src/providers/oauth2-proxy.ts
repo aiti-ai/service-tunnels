@@ -3,8 +3,16 @@ import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "../marker.ts";
 import { validateSetupEntry } from "../auth-provider.ts";
-import { validateOidcOptions, tomlEscape } from "../validation.ts";
+import { validateOidcOptions, validateOidcUrl, validateOidcSecret, tomlEscape } from "../validation.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus } from "../auth-provider.ts";
+import {
+  oauth2Variant,
+  resolveOAuth2VariantParams,
+  missingVariantParams,
+  substituteVariantTemplate,
+  isListConfigKey,
+  type OAuth2VariantDef,
+} from "./oauth2-variants.ts";
 
 /**
  * oauth2-proxy provider — local gateway + OIDC (design.md §5.3).
@@ -16,10 +24,17 @@ import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus } fr
  *
  * Config: OIDC issuer/clientId/clientSecret (from provider options or
  * config.json auth.oidc). Binary auto-downloaded (tools.ts "oauth2-proxy").
+ *
+ * 变体路径（oauth2-variants.ts）：`variant` 选项把本类注册成 oauth2-<name>
+ * 类型（oauth2-github/google/keycloak/...）——端点/scope/flags 由变体定义
+ * 携带，凭据由 表单/CLI/配置档 auth.oauth2 合并（docs/oauth2-variants.md）。
  */
 
 export interface OAuth2ProxyProviderOptions {
   port?: number;
+  /** 变体 id（oauth2-github/google/...，见 oauth2-variants.ts）。缺省 = 原始
+   *  oidc 手工配置路径（表单填 issuerUrl/clientId/clientSecret）。 */
+  variant?: string;
   oidc?: {
     issuerUrl: string;
     clientId: string;
@@ -33,6 +48,9 @@ export interface OAuth2ProxyProviderOptions {
       verification?: Array<{ path: string; content: string }>;
     };
   };
+  /** 变体扁平参数（表单/CLI/站点 providerParams 注入；issuerUrl/cookieSecret
+   *  也在内，见 resolveOAuth2VariantParams）。 */
+  [formKey: string]: unknown;
   /** Per-site storage dir (P1); default = cacheDir/tmp/oauth2-proxy. */
   storageDir?: string;
   /** Site (auth realm) this instance belongs to. */
@@ -54,7 +72,10 @@ function alive(pid: number): boolean {
 }
 
 export class OAuth2ProxyProvider implements AuthProvider {
-  readonly type = "oauth2-proxy";
+  /** 变体 id（oauth2-github/...）；原始路径 = "oauth2-proxy"。 */
+  readonly type: string;
+  /** 变体定义（原始路径为 null）。 */
+  readonly variant: OAuth2VariantDef | null;
   /** Site (auth realm) this instance belongs to ("default" when absent). */
   readonly site: string;
   /** /oauth2/ 协议：探针 /oauth2/auth、登录/回调直达侧车。 */
@@ -82,6 +103,10 @@ export class OAuth2ProxyProvider implements AuthProvider {
     this.#port = opts.port ?? 0;
     this.#dir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "oauth2-proxy");
     this.site = opts.site ?? "default";
+    // 变体实例：type = 变体 id（registry 按 type#site 缓存 → 每个变体独立
+    // 侧车实例与配置）；原始路径保持 "oauth2-proxy"（向后兼容）。
+    this.variant = opts.variant ? (oauth2Variant(opts.variant) ?? null) : null;
+    this.type = this.variant ? this.variant.id : "oauth2-proxy";
   }
 
   get port(): number {
@@ -94,9 +119,26 @@ export class OAuth2ProxyProvider implements AuthProvider {
 
   async validate(): Promise<string[]> {
     const problems: string[] = [];
-    const oidc = this.#opts.oidc;
-    if (!oidc?.issuerUrl || !oidc?.clientId || !oidc?.clientSecret) {
-      problems.push("oauth2-proxy requires auth.oidc { issuerUrl, clientId, clientSecret } in config.json");
+    if (this.variant) {
+      // 变体路径：必填参数（表单 required）必须已由 表单/CLI/配置档 携带 ——
+      // 缺哪个提示到哪补（config.json auth.oauth2 或 --provider-set/表单）。
+      const { values } = resolveOAuth2VariantParams(
+        this.variant,
+        this.#ctx.configDir,
+        this.#opts as unknown as Record<string, unknown>,
+      );
+      for (const key of missingVariantParams(this.variant, values)) {
+        const cfgKey = this.variant.creds[key] ?? key;
+        problems.push(
+          `${this.variant.id}: missing ${key} — carry it in config.json auth.oauth2` +
+            ` (auth.oauth2.variants.${this.variant.id}.${cfgKey}) or pass ${key} in the form / --provider-set ${key}=...`,
+        );
+      }
+    } else {
+      const oidc = this.#opts.oidc;
+      if (!oidc?.issuerUrl || !oidc?.clientId || !oidc?.clientSecret) {
+        problems.push("oauth2-proxy requires auth.oidc { issuerUrl, clientId, clientSecret } in config.json");
+      }
     }
     try {
       await this.#ctx.resolveTool("oauth2-proxy");
@@ -104,6 +146,33 @@ export class OAuth2ProxyProvider implements AuthProvider {
       problems.push(`oauth2-proxy binary unavailable: ${(err as Error).message}`);
     }
     return problems;
+  }
+
+  /** 当前路径的解析后参数（变体 = 配置档/表单合并；原始路径 = opts.oidc）。
+   *  自定义变体（环境变量注册）：从声明行里找 client_id / oidc_issuer_url
+   *  并替换占位符（设置页展示用）。 */
+  #params(): { clientId: string; issuerUrl: string } {
+    if (this.variant) {
+      const { values } = resolveOAuth2VariantParams(
+        this.variant,
+        this.#ctx.configDir,
+        this.#opts as unknown as Record<string, unknown>,
+      );
+      if (this.variant.lines) {
+        const lines = this.variant.lines;
+        const lineVal = (key: string): string => {
+          const line = lines.find((l) => l.key === key);
+          return line ? substituteVariantTemplate(line.template, values) : "";
+        };
+        return { clientId: lineVal("client_id"), issuerUrl: lineVal("oidc_issuer_url") };
+      }
+      return {
+        clientId: values.clientId ?? "",
+        issuerUrl: values.issuerUrl ?? this.variant.issuerUrl ?? "",
+      };
+    }
+    const oidc = this.#opts.oidc;
+    return { clientId: oidc?.clientId ?? "", issuerUrl: oidc?.issuerUrl ?? "" };
   }
 
   renderNginxAuth(): string {
@@ -135,6 +204,96 @@ export class OAuth2ProxyProvider implements AuthProvider {
     if (!this.#port) this.#port = await this.#ctx.pickPort();
     const dir = this.#dir;
     mkdirSync(dir, { recursive: true });
+    const t = (s: string) => tomlEscape(s);
+    if (this.variant) {
+      // 变体路径：端点/scope/flags 来自变体定义（内置常量），凭据来自
+      // 表单/CLI/配置档（resolveOAuth2VariantParams）。Fail-closed 校验在
+      // 配置写入前：所有进 TOML 的值必须无控制字符（newline 会注入 TOML
+      // 指令，同 frpc INI 注入同类）并 TOML 转义。
+      const { values } = resolveOAuth2VariantParams(
+        this.variant,
+        this.#ctx.configDir,
+        this.#opts as unknown as Record<string, unknown>,
+      );
+      if (this.variant.lines) {
+        // 环境变量注册的自定义变体：按声明行逐行替换占位符写 conf。
+        // 缺必填 token → 抛错（fail-fast）；值过控制字符校验 + TOML 转义；
+        // 空值行跳过（可选字段留空）；列表型键（github_org 等）写 TOML 数组。
+        const missing = missingVariantParams(this.variant, values);
+        if (missing.length) {
+          throw new Error(
+            `${this.variant.id}: missing required parameter(s): ${missing.join(", ")}` +
+              ` — pass them in the form / --provider-set, or carry them in config.json auth.oauth2`,
+          );
+        }
+        const lines = [
+          `http_address = "127.0.0.1:${this.#port}"`,
+          `upstreams = ["static://200"]`,
+          `provider = "${t(this.variant.provider)}"`,
+        ];
+        for (const line of this.variant.lines) {
+          const text = substituteVariantTemplate(line.template, values);
+          if (!text) continue; // 可选字段留空 → 不写该行
+          validateOidcSecret(text, `${this.variant.id} ${line.key}`);
+          lines.push(
+            isListConfigKey(line.key)
+              ? `${line.key} = [${text.split(",").map((v) => `"${t(v.trim())}"`).join(", ")}]`
+              : `${line.key} = "${t(text)}"`,
+          );
+        }
+        if (!this.variant.lines.some((l) => l.key === "cookie_secret")) {
+          lines.push(`cookie_secret = "${randomSecret(32)}"`);
+        }
+        if (!this.variant.lines.some((l) => l.key === "email_domains")) lines.push(`email_domains = ["*"]`);
+        if (!this.variant.lines.some((l) => l.key === "set_xauthrequest")) lines.push(`set_xauthrequest = true`);
+        // Local-side gateway (nginx/node proxy talk to us over 127.0.0.1 http).
+        // cookie_secure=true (default) would force https redirect URIs and the
+        // Secure cookie attribute — breaking plain-http local testing.
+        // 自定义声明可显式写 cookie_secure 覆盖此默认。
+        if (!this.variant.lines.some((l) => l.key === "cookie_secure")) lines.push(`cookie_secure = false`);
+        writeFileSync(join(dir, "oauth2-proxy.conf"), lines.join("\n") + "\n", "utf8");
+        return this.status();
+      }
+      const issuer = values.issuerUrl ?? "";
+      if (issuer) validateOidcUrl(issuer, `${this.variant.id} issuerUrl`);
+      validateOidcSecret(values.clientId ?? "", `${this.variant.id} clientId`);
+      validateOidcSecret(values.clientSecret ?? "", `${this.variant.id} clientSecret`);
+      const cookieSecret = values.cookieSecret ?? randomSecret(32);
+      validateOidcSecret(cookieSecret, `${this.variant.id} cookieSecret`);
+      const scope = this.variant.scope ?? values.scope ?? "";
+      const lines = [
+        `http_address = "127.0.0.1:${this.#port}"`,
+        `upstreams = ["static://200"]`,
+        `provider = "${t(this.variant.provider)}"`,
+      ];
+      if (issuer) lines.push(`oidc_issuer_url = "${t(issuer)}"`);
+      lines.push(
+        `client_id = "${t(values.clientId ?? "")}"`,
+        `client_secret = "${t(values.clientSecret ?? "")}"`,
+        `cookie_secret = "${t(cookieSecret)}"`,
+      );
+      if (scope) lines.push(`scope = "${t(scope)}"`);
+      lines.push(`email_domains = ["*"]`, `set_xauthrequest = true`,
+        // Local-side gateway (nginx/node proxy talk to us over 127.0.0.1 http).
+        // cookie_secure=true (default) would force https redirect URIs and the
+        // Secure cookie attribute — breaking plain-http local testing.
+        `cookie_secure = false`);
+      // 固定额外配置（变体定义）+ 表单 flag 字段（org → github_org 等；
+      // list:true 的键写 TOML 数组，值逗号分隔）。
+      for (const [k, v] of Object.entries(this.variant.flags ?? {})) lines.push(`${k} = "${t(v)}"`);
+      for (const spec of this.variant.form) {
+        if (!spec.flag) continue; // issuerUrl/clientId/clientSecret 已单独处理
+        const v = values[spec.key];
+        if (!v) continue;
+        lines.push(
+          spec.list
+            ? `${spec.flag} = [${v.split(",").map((x) => `"${t(x.trim())}"`).join(", ")}]`
+            : `${spec.flag} = "${t(v)}"`,
+        );
+      }
+      writeFileSync(join(dir, "oauth2-proxy.conf"), lines.join("\n") + "\n", "utf8");
+      return this.status();
+    }
     const oidc = this.#opts.oidc!;
     // Fail-closed validation BEFORE the config is written: issuerUrl must be
     // a real http(s) URL and every value must be free of control characters
@@ -142,7 +301,6 @@ export class OAuth2ProxyProvider implements AuthProvider {
     // the frpc INI injection). Values are additionally TOML-escaped below.
     validateOidcOptions(oidc);
     const cookieSecret = oidc.cookieSecret ?? randomSecret(32);
-    const t = (s: string) => tomlEscape(s);
     writeFileSync(
       join(dir, "oauth2-proxy.conf"),
       [
@@ -176,8 +334,10 @@ export class OAuth2ProxyProvider implements AuthProvider {
     );
     child.stderr?.on("data", (c) => this.#ctx.log(`oauth2-proxy: ${c.toString().trim()}`));
     this.#child = child;
-    this.#ctx.registerInternal("oauth2-proxy", this.#port);
-    this.#ctx.registerPid("oauth2-proxy", child.pid ?? 0);
+    // 变体实例用自身 type 作角色（oauth2-github/...）——同 site 多个变体时
+    // 各自端口独立登记，互不覆盖/互不注销；原始路径保持 "oauth2-proxy"。
+    this.#ctx.registerInternal(this.type, this.#port);
+    this.#ctx.registerPid(this.type, child.pid ?? 0);
     // wait for readiness (TCP probe)
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline && alive(child.pid ?? 0)) {
@@ -197,29 +357,32 @@ export class OAuth2ProxyProvider implements AuthProvider {
       }
       this.#child = null;
     }
-    this.#ctx.unregisterInternal("oauth2-proxy");
+    this.#ctx.unregisterInternal(this.type);
   }
 
   async registerHost(_host: string, _policy?: AuthPolicy): Promise<void> {
     // oauth2-proxy accepts all hosts reaching it; nothing per-host to register
   }
 
-  /** 免认证直达内容（由 proxy/gateway 接线）：域名验证文件 + 预登录设置页。 */
+  /** 免认证直达内容（由 proxy/gateway 接线）：域名验证文件 + 预登录设置页。
+   *  原始路径：setup 缺省关闭；变体路径：恒开启（IdP 联动设置提示）。 */
   setupConfig(): import("../auth-provider.ts").ProviderSetup | undefined {
-    const setup = this.#opts.oidc?.setup;
-    if (!setup) return undefined;
-    const verification = normalizeVerification(setup.verification);
+    const setup = this.variant ? undefined : this.#opts.oidc?.setup;
+    if (!this.variant && !setup) return undefined;
+    const verification = normalizeVerification(setup?.verification);
     const out: import("../proxy.ts").ProxySetup = { verification };
-    if (setup.infoPage !== false) {
-      out.infoPath = "/oauth2-setup";
-      out.infoHtmlTemplate = renderSetupHtml({
-        verification,
-        clientId: this.#opts.oidc?.clientId ?? "",
-        issuer: this.#opts.oidc?.issuerUrl ?? "",
-      });
-      out.infoHtml = (host, next) =>
-        (out.infoHtmlTemplate ?? "").replaceAll("$host", host).replaceAll("$arg_rd", next);
-    }
+    const wantInfo = this.variant ? true : setup?.infoPage !== false;
+    if (!wantInfo) return out;
+    const p = this.#params();
+    out.infoPath = "/oauth2-setup";
+    out.infoHtmlTemplate = renderSetupHtml({
+      verification,
+      clientId: p.clientId,
+      issuer: p.issuerUrl,
+      label: this.variant?.label,
+    });
+    out.infoHtml = (host, next) =>
+      (out.infoHtmlTemplate ?? "").replaceAll("$host", host).replaceAll("$arg_rd", next);
     return out;
   }
 
@@ -279,17 +442,23 @@ export function renderSetupHtml(o: {
   verification: Array<{ path: string; content: string }>;
   clientId: string;
   issuer: string;
+  /** 变体 label（oauth2-github → "GitHub OAuth"）；原始路径缺省。 */
+  label?: string;
 }): string {
+  const title = o.label ? `${o.label} 登录前设置` : "OAuth2 登录前设置";
+  const providerLine = o.label
+    ? `<p>登录方式：<code>${esc(o.label)}</code></p>`
+    : `<p>OAuth2 服务商：<code>${esc(o.issuer)}</code>，Client ID：<code>${esc(o.clientId)}</code></p>`;
   const vfItems = o.verification.length
     ? o.verification.map((v) => `  <li>域名所有权验证：请让服务商访问 <code>http://$host${esc(v.path)}</code> 并校验返回内容 <code>${esc(v.content)}</code></li>`).join("\n")
     : "  <li>（未配置域名验证文件，如服务商要求请添加）</li>";
   return `<!doctype html>
-<html lang="zh"><meta charset="utf-8"><title>OAuth2 登录前设置</title>
+<html lang="zh"><meta charset="utf-8"><title>${title}</title>
 <body style="font-family:system-ui,sans-serif;max-width:660px;margin:48px auto;padding:0 16px;line-height:1.7">
-<h2>登录前请先确认 OAuth2 应用配置</h2>
+<h2>${title}</h2>
 <p>当前服务地址：<code>$host</code></p>
 <p>回调地址（Callback / 重定向 URI）：<code>http://$host/oauth2/callback</code></p>
-<p>OAuth2 服务商：<code>${esc(o.issuer)}</code>，Client ID：<code>${esc(o.clientId)}</code></p>
+${providerLine}
 <ol>
   <li>到 OAuth2 服务商的应用设置里，把上面的<strong>回调地址</strong>加入重定向白名单
     （隧道域名是动态的，域名变化后需要更新）</li>

@@ -29,7 +29,7 @@
   "preferMirrors": false,                  // true=先镜像后官方（CN 网络）
   "auth": {
     "enabled": false,                      // 是否启用认证
-    "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|插件名
+    "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|oauth2-<变体>|插件名
     "nginxPort": 4180,                     // nginx 网关端口（本地型 provider）
     // —— authelia provider 专用 ——
     "autheliaPort": 9091,                  // Authelia 监听端口（随机端口时留 0）
@@ -40,6 +40,14 @@
     "user": { "name": "admin", "password": "" }  // 初始用户（首次启动生成）
     // —— oauth2-proxy provider 专用 ——
     // "oidc": { "issuerUrl": "...", "clientId": "...", "clientSecret": "...", "cookieSecret": "" }
+    // —— oauth2 变体专用（docs/oauth2-variants.md）——
+    // "oauth2": {
+    //   "clientId": "...", "clientSecret": "...", "cookieSecret": "",  // 共享凭据
+    //   "variants": {                                                    // 按变体覆盖/补齐
+    //     "oauth2-github": { "clientId": "...", "clientSecret": "..." },
+    //     "oauth2-keycloak": { "issuerUrl": "https://auth.example.com/realms/myrealm" }
+    //   }
+    // }
   },
   "redis": {
     "autoInstall": false,                  // 允许包管理器安装 redis-server（sudo/brew）

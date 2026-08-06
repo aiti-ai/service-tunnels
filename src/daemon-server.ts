@@ -29,7 +29,7 @@ import { spawnGuardian } from "./guardian-spawn.ts";
 import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
-import { AuthRegistry, authProviderSchemas } from "./auth-registry.ts";
+import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import type { AutheliaProvider } from "./authelia.ts";
@@ -190,6 +190,7 @@ const methods = new Map<string, Handler>([
     tunnels: tunnelParamSchemas(),
     metas: tunnelMetas(),
     authProviders: await authProviderSchemas(configDir),
+    authMetas: authProviderMetas(configDir),
   })],
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
@@ -277,6 +278,9 @@ const methods = new Map<string, Handler>([
       validatePort(o?.port, "port");
       if (o?.tunnelParams !== undefined && (typeof o.tunnelParams !== "object" || o.tunnelParams === null || Array.isArray(o.tunnelParams))) {
         throw new Error(`expose: tunnelParams must be an object`);
+      }
+      if (o?.providerParams !== undefined && (typeof o.providerParams !== "object" || o.providerParams === null || Array.isArray(o.providerParams))) {
+        throw new Error(`expose: providerParams must be an object`);
       }
       // auxiliary ports (0 = auto/random) and the base domain (host[:port],
       // interpolated into generated vhost URLs) get the same boundary checks.

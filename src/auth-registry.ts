@@ -7,6 +7,10 @@ import { AutheliaProvider, type AutheliaProviderOptions } from "./authelia.ts";
 import { BasicAuthProvider, type BasicAuthProviderOptions } from "./providers/basic.ts";
 import { OAuth2ProxyProvider, type OAuth2ProxyProviderOptions } from "./providers/oauth2-proxy.ts";
 import { PortalAuthProvider, type PortalAuthProviderOptions } from "./providers/portal.ts";
+import {
+  allOAuth2Variants,
+  oauth2VariantParamSchemas,
+} from "./providers/oauth2-variants.ts";
 import type { ParamSpec } from "./tunnels.ts";
 
 /**
@@ -47,6 +51,15 @@ export class AuthRegistry {
     this.#factories.set("basic", (c, o) => new BasicAuthProvider(c, (o ?? {}) as BasicAuthProviderOptions));
     this.#factories.set("oauth2-proxy", (c, o) => new OAuth2ProxyProvider(c, (o ?? {}) as OAuth2ProxyProviderOptions));
     this.#factories.set("portal", (c, o) => new PortalAuthProvider(c, (o ?? {}) as PortalAuthProviderOptions));
+    // oauth2 变体（声明式注册，docs/oauth2-variants.md）：内置表 + 环境变量
+    // 注册（SERVICE_TUNNELS_OAUTH2_VARIANT_*，类似 command 隧道）。每个变体
+    // 一个独立 type#site 实例 = 独立侧车端口/配置（oauth2-github#site ≠
+    // oauth2-google#site）。
+    for (const v of allOAuth2Variants()) {
+      this.#factories.set(v.id, (c, o) =>
+        new OAuth2ProxyProvider(c, { ...(o ?? {}), variant: v.id } as OAuth2ProxyProviderOptions),
+      );
+    }
     for (const f of plugins) {
       const probe = f(ctx, {});
       this.#factories.set(probe.type, f);
@@ -255,9 +268,14 @@ export interface AuthProviderParamSchemaExport {
   specs: ParamSpec[];
 }
 
-/** Built-in + plugin auth-provider param schemas (configDir plugins add). */
+/** Built-in + plugin auth-provider param schemas (configDir plugins add;
+ *  oauth2 变体 schema 依赖配置档凭据携带状态——已携带的字段默认填入). */
 export async function authProviderSchemas(configDir: string): Promise<Record<string, ParamSpec[]>> {
   const out: Record<string, ParamSpec[]> = { ...AUTH_PARAM_SCHEMAS };
+  // 变体 schema（数据驱动；配置档携带的必填凭据不在表单出现）
+  for (const [type, specs] of Object.entries(oauth2VariantParamSchemas(configDir))) {
+    out[type] = specs;
+  }
   const dir = join(configDir, "providers");
   if (!existsSync(dir)) return out;
   for (const entry of readdirSync(dir)) {
@@ -275,3 +293,8 @@ export async function authProviderSchemas(configDir: string): Promise<Record<str
   }
   return out;
 }
+
+/** Provider 页面元数据（label / 已配置状态 / 待填项）——客户端 picker 与
+ *  「✓已配置」徽标据此渲染（oauth2 变体 + 内置类型）。插件 provider 缺省
+ *  label = type（客户端兜底）。 */
+export { authProviderMetas } from "./providers/oauth2-variants.ts";

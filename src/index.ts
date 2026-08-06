@@ -43,7 +43,7 @@ import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./e
 import { GatewayController } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
-import { AuthRegistry, loadProviderPlugins, authProviderSchemas } from "./auth-registry.ts";
+import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
 import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
 import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
@@ -56,7 +56,7 @@ export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
 export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from "./tunnels.ts";
 export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
 export { CUSTOM_TUNNEL_ENV_PREFIX, customTunnelTemplates, customTunnelTemplate, isCustomTunnelType } from "./tunnels-custom.ts";
-export { authProviderSchemas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
+export { authProviderSchemas, authProviderMetas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
@@ -198,6 +198,8 @@ export interface ServiceTunnels {
     tunnels(): Record<string, ParamSpec[]>;
     tunnel(type: string): ParamSpec[];
     authProviders(): Promise<Record<string, ParamSpec[]>>;
+    /** Provider 页面元数据（label/已配置/待填）——picker 与「✓已配置」徽标。 */
+    authMetas(): Record<string, import("./providers/oauth2-variants.ts").AuthProviderMeta>;
     metas(): Record<string, TunnelMeta>;
   };
   auth: {
@@ -622,7 +624,13 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         providerOrder: () => {
           const KNOWN = ["authelia", "portal", "basic", "oauth2-proxy"];
           const list = registry.list();
-          return [...KNOWN.filter((p) => list.includes(p)), ...list.filter((p) => !KNOWN.includes(p))];
+          const metas = authProviderMetas(dirs.configDir);
+          // oauth2 变体：已配置（凭据已由配置档携带）优先，未配置按注册顺序
+          const variants = list
+            .filter((p) => metas[p]?.kind === "oauth2-variant")
+            .sort((a, b) => Number(metas[b]?.configured) - Number(metas[a]?.configured));
+          const rest = list.filter((p) => !KNOWN.includes(p) && metas[p]?.kind !== "oauth2-variant");
+          return [...KNOWN.filter((p) => list.includes(p)), ...variants, ...rest];
         },
         defaultProvider: () => {
           const order = ["authelia", "portal", "basic", "oauth2-proxy"].filter((p) => registry.list().includes(p));
@@ -699,6 +707,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       tunnel: (type: string) => tunnelParamSchema(type),
       metas: () => tunnelMetas(),
       authProviders: () => authProviderSchemas(dirs.configDir),
+      authMetas: () => authProviderMetas(dirs.configDir),
     },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
     shutdown: async () => {

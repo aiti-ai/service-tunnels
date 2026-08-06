@@ -353,7 +353,7 @@ const TEMPLATES = {
     </div>
   `,
 
-  expose: (sites: string[]) => `
+  expose: (sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[]) => `
     <div class="card">
       <h2>快速暴露端口</h2>
       <form id="exposeForm" style="max-width: 400px;">
@@ -371,14 +371,19 @@ const TEMPLATES = {
         </div>
         <div class="form-group">
           <label>认证方式</label>
-          <select name="auth" class="form-control">
+          <select name="auth" id="authType" class="form-control">
             <option value="auto">auto（自动选择）</option>
             <option value="none">none（无认证）</option>
-            <option value="authelia">authelia（Linux推荐）</option>
-            <option value="portal">portal（Windows推荐）</option>
-            <option value="basic">basic（简单认证）</option>
+            ${authOrder.map((t) => {
+              const meta = authMetas[t] || {};
+              const badge = meta.kind === "oauth2-variant"
+                ? (meta.configured ? " ✓已配置" : (meta.needsInput?.length ? " (缺: " + meta.needsInput.join("/") + ")" : ""))
+                : "";
+              return `<option value="${t}">${meta.label || t}${badge}</option>`;
+            }).join("")}
           </select>
         </div>
+        <div id="authParamFields"></div>
         <div class="form-group">
           <label>站点（认证域）</label>
           <select name="site" class="form-control">
@@ -402,6 +407,46 @@ const TEMPLATES = {
       <div id="result" style="margin-top: 15px;"></div>
     </div>
     <script>
+      // 预填值（含 clientSecret）会进页面 —— JSON 转义 < 防 </script> 逃逸；
+      // 属性值 HTML 转义防引号逃逸（配置档/环境变量是操作者输入，仍纵深防御）
+      const AUTH_SCHEMAS = ${JSON.stringify(authSchemas).replace(/</g, '\\u003c')};
+      const AUTH_METAS = ${JSON.stringify(authMetas).replace(/</g, '\\u003c')};
+      function escAttr(v) {
+        return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      }
+      function authInputHtml(s) {
+        const label = (s.label || s.key) + (s.required ? ' *' : '');
+        const hint = s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
+          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || '获取') + '</a>' : '') + '</div>' : '';
+        const ph = s.placeholder ? ' placeholder="' + escAttr(s.placeholder) + '"' : '';
+        const def = s.default !== undefined ? ' value="' + escAttr(s.default) + '"' : '';
+        let input;
+        if (s.options && s.options.length) {
+          input = '<select name="' + escAttr(s.key) + '" class="form-control">' +
+            s.options.map((o) => '<option value="' + escAttr(o.value) + '">' + escAttr(o.label || o.value) + '</option>').join('') + '</select>';
+        } else if (s.type === 'number') {
+          input = '<input type="number" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+        } else if (s.type === 'password') {
+          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+        } else {
+          input = '<input type="text" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+        }
+        return '<div class="form-group"><label>' + escAttr(label) + '</label>' + input + hint + '</div>';
+      }
+      function renderAuthParams(type) {
+        const wrap = document.getElementById('authParamFields');
+        const specs = AUTH_SCHEMAS[type] || [];
+        const meta = AUTH_METAS[type] || {};
+        const hint = meta.kind === 'oauth2-variant'
+          ? (meta.configured
+              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">✓ 已从配置档预填（可修改覆盖；清空则回落配置档值）</p>'
+              : '<p style="color:#999;font-size:12px;margin-bottom:4px;">以下字段可现场填写，或写入 config.json auth.oauth2 后自动预填</p>')
+          : '';
+        wrap.innerHTML = hint + (specs.map(authInputHtml).join('') || '');
+      }
+      const authSel = document.getElementById('authType');
+      authSel.addEventListener('change', (e) => renderAuthParams(e.target.value));
+      renderAuthParams(authSel.value);
       document.getElementById('exposeForm').onsubmit = async (e) => {
         e.preventDefault();
         const fd = new FormData(e.target);
@@ -410,13 +455,26 @@ const TEMPLATES = {
         const tunnel = fd.get('tunnel');
         const mode = fd.get('mode');
         const site = fd.get('site');
+        // 认证参数：变体/原始 oauth2-proxy 的待填字段（凭证未携带时才有）
+        const providerParams = {};
+        for (const s of AUTH_SCHEMAS[auth] || []) {
+          const raw = fd.get(s.key);
+          if (raw === undefined || raw === null || raw === '') continue;
+          providerParams[s.key] = raw;
+        }
         const result = document.getElementById('result');
         result.innerHTML = '<p>正在暴露...</p>';
         try {
           const r = await fetch('/api/expose', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
-            body: JSON.stringify({ port: Number(port), auth: auth === 'none' ? false : auth, tunnel, mode, site: site || undefined })
+            body: JSON.stringify({
+              port: Number(port),
+              auth: auth === 'none' ? false : auth,
+              tunnel, mode,
+              site: site || undefined,
+              providerParams: Object.keys(providerParams).length ? providerParams : undefined
+            })
           });
           const data = await r.json();
           if (data.url || data.localUrl) {
@@ -747,7 +805,10 @@ function createHandler(ctx: UiContext): RequestListener {
       // Expose
       if (path === "/expose") {
         const sites = ctx.st.sites.list().filter((s) => s.name !== "default").map((s) => s.name);
-        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites), ctx.csrfToken);
+        const authSchemas = await ctx.st.schemas.authProviders();
+        const authMetas = ctx.st.schemas.authMetas();
+        const authOrder = ctx.st.auth.providerOrder();
+        const html = TEMPLATES.layout("快速暴露", TEMPLATES.expose(sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;

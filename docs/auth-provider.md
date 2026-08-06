@@ -203,6 +203,7 @@ Node proxy 与 nginx 网关自动获得：`/oauth2/auth` 探针、`/oauth2/*` �
 | 方式 | 位置 | 说明 |
 |---|---|---|
 | 内置 | `auth-registry.ts` `#factories.set(type, factory)` | 随包发布 |
+| **oauth2 变体** | `oauth2-variants.ts` `OAUTH2_VARIANTS` 表加一条声明，或环境变量 `SERVICE_TUNNELS_OAUTH2_VARIANT_<NAME>` 注册 | 基于 oauth2-proxy 的变体 provider（`--auth oauth2-github` 等）；**零类代码**——工厂/表单/页面/元数据全自动注册，见 [oauth2-variants.md](oauth2-variants.md) |
 | 插件目录 | `configDir/providers/*.js/.mjs`（ESM，`default` 或 `factory` 导出） | 用户侧零编译 |
 | 构造注入 | `createServiceTunnels({ authPlugins: [factory] })` | 库模式 |
 | 运行时 | `st.auth.registerProvider?.(factory)`（registry.register，幂等） | 动态注册 |
@@ -251,3 +252,7 @@ provider 用 `ctx.resolveTool(name)` 解析（PATH > 缓存 > 自动下载）：
 - [ ] 需要二进制 → `tools.ts` 定义 + 镜像
 - [ ] setupConfig 的 verification 条目过 `validateSetupEntry`（防 nginx 注入）
 - [ ] 复用 mock IdP + 回归脚本测试双路径（Node proxy + nginx 网关）
+
+> 基于 oauth2-proxy 的变体（`--auth oauth2-<name>`）不走上面的类实现——在
+> `oauth2-variants.ts` 变体表加一条声明即可（label/provider/固定端点/scope/
+> 表单/凭据映射），工厂注册、表单生成、页面元数据全部数据驱动。

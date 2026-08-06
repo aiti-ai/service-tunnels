@@ -55,6 +55,7 @@ service-tunnels expose 5173                                # 默认隧道 ngrok�
 service-tunnels expose 5173 --tunnel frpc --auth           # frpc + 默认 provider（authelia）
 service-tunnels expose 5173 --auth basic                   # 最简 Basic 认证
 service-tunnels expose 5173 --auth oauth2-proxy            # 指定其他 provider
+service-tunnels expose 5173 --auth oauth2-github           # oauth2 变体（配置档携带凭据→零输入）
 service-tunnels expose 5173 --tunnel ssh --auth --name web
 service-tunnels expose stop 5173
 service-tunnels expose status
@@ -67,6 +68,24 @@ service-tunnels expose status
 可用 `--auth basic` / `--auth oauth2-proxy` / 插件名显式指定。provider
 未就绪自动绿色拉起（缺二进制/缺 OIDC 注册等会在 validate 阶段给出修复提示）。
 流程见 `docs/design.md §4.7`。
+
+**oauth2 变体**（`--auth oauth2-<name>`，详见 [docs/oauth2-variants.md](oauth2-variants.md)）：
+基于 oauth2-proxy 的声明式 provider 变体——固定端点/scope 由变体定义携带，
+凭据由配置档 `auth.oauth2` 携带（页面表单默认填入、可直接暴露，也可现场修改）：
+
+```bash
+service-tunnels expose 5173 --auth oauth2-github   # 端点/scope 固定；凭据来自配置档 → 零输入
+service-tunnels expose 5173 --auth oauth2-keycloak --provider-set issuerUrl=https://auth.example.com/realms/r \
+                          --provider-set clientId=myapp --provider-set clientSecret=***
+```
+
+自定义变体也可**环境变量注册**（零代码，类似 `SERVICE_TUNNELS_TUNNEL_COMMAND_*`）：
+
+```bash
+export SERVICE_TUNNELS_OAUTH2_VARIANT_MYIDP=\
+  "provider=oidc;issuerUrl=https://auth.example.com/realms/r;clientId={{clientId}};clientSecret={{clientSecret}}"
+service-tunnels expose 5173 --auth oauth2-myidp    # 新类型 oauth2-myidp；{{token}} 为表单参数
+```
 
 **认证放行白名单**（`--bypass-path <path>`，可重复）：命中前缀的 URL **跳过
 认证**直接转发应用（/health、/metrics 等公开端点），Node proxy 与 nginx 网关
