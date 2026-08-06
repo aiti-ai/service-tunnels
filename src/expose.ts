@@ -313,6 +313,7 @@ async function proxyExpose(
         ? (site === "default" ? "auth" : site)
         : (explicitProvider ? providerType : "auth"));
 
+  let authProvider: AuthProvider | null = null;
   if (authRequested) {
     const pctx = providerCtx(ctx);
     const registry = ctx.auth ?? new AuthRegistry(pctx);
@@ -362,6 +363,7 @@ async function proxyExpose(
       ctx.internal.register("redis", { port: redisPort, pid: 0, process: "redis", cmdline: "redis", addresses: ["127.0.0.1"] });
     }
     await provider.start();
+    authProvider = provider;
     log(`expose ${port} (proxy): provider ${providerType} up (site ${site})`);
   }
 
@@ -376,6 +378,11 @@ async function proxyExpose(
     ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
     ...(opts.serviceBasePath ? { serviceBasePath: opts.serviceBasePath } : {}),
   });
+  // proxy 模式同样注册 host 策略(与 tunnel 模式一致):auth-request 按 host
+  // 查 policy,否则策略文件为空 → 默认 one_factor,deny/two_factor 不生效。
+  if (authProvider) {
+    await authProvider.registerHost(proxy.vhost(port, label), { policy: opts.policy });
+  }
   // 部署前缀(deployBasePath,/dev)拼进对外 URL:路径路由部署下浏览器需带前缀到达
   // 正确实例;转发时 mapServicePath 剥前缀并接服务自身 serviceBasePath。
   const deploy = (proxy.basePath ?? "").replace(/\/+$/, "");

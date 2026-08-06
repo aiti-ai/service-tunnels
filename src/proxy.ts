@@ -421,6 +421,10 @@ async function gateForwardAuthDecision(
 ): Promise<ServiceHostDecision | null> {
   const verdict = await checkForwardAuthReq(fw, input);
   if (verdict === "ok") return null;
+  if (verdict === "deny") {
+    // fail closed:策略 403(deny policy)或 provider 异常 → 直接 403,不跳登录
+    return { kind: "deny", status: 403, body: "authentication forbidden" };
+  }
   return { kind: "redirect", location: renderLoginRedirectReq(fw.loginRedirect, input) };
 }
 
@@ -455,7 +459,10 @@ async function checkForwardAuthReq(
         // nginx auth_request 语义：任意 2xx = 放行。authelia/portal 回 200，
         // oauth2-proxy 7.6 的 /oauth2/auth（AuthOnly）回 202 Accepted。
         if (r.statusCode !== undefined && r.statusCode >= 200 && r.statusCode < 300) resolve("ok");
-        else if (r.statusCode === 401 || r.statusCode === 302 || r.statusCode === 403) resolve("redirect");
+        else if (r.statusCode === 401 || r.statusCode === 302) resolve("redirect");
+        // 403 = 策略级拒绝(deny policy / authelia forbidden)——fail closed,
+        // 不能当 redirect 否则 deny 策略变成无限登录跳转。
+        else if (r.statusCode === 403) resolve("deny");
         else resolve("deny");
       },
     );

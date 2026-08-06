@@ -152,6 +152,9 @@ export function generateHostNginx(
       proxy_pass http://127.0.0.1:${authPort}/${authzPath};
       # $http_host 保留原始端口（本地 http 测试）；真实隧道无端口时与 $host 等价
       proxy_set_header Host ${isOauth2 ? "$http_host" : "$host"};
+      # auth_request 子请求默认不转发 Cookie → 会话永远到不了 portal(auth-request
+      # 恒 401 → 302 登录);显式转发后 deny/two_factor 策略才能按会话判断。
+      proxy_set_header Cookie $http_cookie;
       ${isOauth2 ? "" : `# the tunnel edge terminates TLS; authelia refuses http target URLs
       proxy_set_header X-Original-URL https://$host$request_uri;`}
       proxy_set_header X-Original-Method $request_method;

@@ -16,6 +16,27 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
+## [0.3.19] - 2026-08-07
+
+### Added
+- **portal 认证策略(one_factor / two_factor / deny)端到端强制**(`src/providers/portal.ts`)：
+  per-host 策略经 `registerHost` 写入 hosts-policy.json,脚本按请求读取——
+  deny → 403;two_factor → 会话须含 2FA 标记(密码登录后必经 /login/2fa 步)。
+- **tools/verify-policy.mjs**:策略验证工具(单因素/双因素/拒绝全部 12 项端到端断言),
+  用法 `node tools/verify-policy.mjs`,失败退出码 1。
+
+### Fixed
+- **proxy 模式 authz 探测把 403 当 redirect**(`src/proxy.ts`)：deny 策略的 403 被转成
+  302 登录页 → 无限跳转。403 → fail closed(直接 403)。
+- **verifySession 改对象后 2FA 步骤用对象当 key**(`src/providers/portal.ts`)：`users[name]`
+  恒 undefined → 正确 TOTP 也 401。
+- **proxy 模式不注册 host 策略**(`src/expose.ts`)：仅 exposeTunnel 调 registerHost,
+  proxy/both 的策略文件恒空 → deny/two_factor 不生效。proxy 模式同样注册。
+- **deny 策略 portal 启动探测 403**(`src/providers/portal.ts`)：auth-request 先查会话
+  (未登录 401)再查 deny(已登录 403)——探测与 deny 语义都正确。
+- **auth_request 子请求不转发 Cookie**(`src/gateway.ts`)：gateway 的 authz location
+  显式 `proxy_set_header Cookie $http_cookie`,保证 portal 能拿到会话。
+
 ## [0.3.18] - 2026-08-06
 
 ### Fixed

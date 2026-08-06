@@ -49,6 +49,8 @@ export interface PortalAuthProviderOptions {
   storageDir?: string;
   /** Site (auth realm) this instance belongs to. */
   site?: string;
+  /** 缺省策略(registerHost 未指定时生效):one_factor | two_factor | deny。 */
+  policy?: AuthPolicy["policy"];
 }
 
 interface PortalUserRecord {
@@ -115,10 +117,12 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   #ctx: ProviderContext;
   #opts: PortalAuthProviderOptions;
+  #hosts = new Map<string, AuthPolicy["policy"]>();
   #dir = "";
   #usersFile = "";
   #serverFile = "";
   #port = 0;
+  #policyFile = "";
   #basePath = ""; // 内置默认交给 defaultBasePath();非空会让 expose.ts hasPath 恒真,deployBasePath 合并失效
   #deployBasePath = "";
   #secret = "";
@@ -173,6 +177,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   async prepare(): Promise<AuthProviderStatus> {
     mkdirSync(this.#dir, { recursive: true });
+    this.#policyFile = join(this.#dir, "hosts-policy.json");
     writeServerScript(this.#serverFile, this.#basePath, this.#deployBasePath, this.site);
     if (!existsSync(this.#usersFile)) {
       await this.addUser(this.#creds.name, this.#creds.password, this.#opts.user?.displayName ?? "Administrator");
@@ -194,6 +199,8 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
           USERS_FILE: this.#usersFile,
           BASE_PATH: this.#basePath,
           DEPLOY_BASE_PATH: this.#deployBasePath,
+          POLICY_FILE: this.#policyFile,
+          POLICY_DEFAULT: this.#opts.policy ?? "one_factor",
           SECURE: process.env.PORTAL_SECURE === "1" ? "1" : "",
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -254,8 +261,14 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     return `${scheme}://$host${basePath}/login?next=$request_uri`;
   }
 
-  async registerHost(_host: string, _policy?: AuthPolicy): Promise<void> {
-    // stateless forward-auth — cookies follow the request host, nothing to register
+  async registerHost(host: string, policy?: AuthPolicy): Promise<void> {
+    // per-host 策略:deny → 403;two_factor → 需完成 2FA 的会话;缺省 one_factor
+    this.#hosts.set(host, policy?.policy ?? this.#opts.policy ?? "one_factor");
+    // 服务端脚本按请求读 POLICY_FILE(JSON),无需重启
+    try {
+      mkdirSync(this.#dir, { recursive: true });
+      writeFileSync(this.#policyFile, JSON.stringify(Object.fromEntries(this.#hosts)));
+    } catch { /* best-effort */ }
   }
 
   async unregisterHost(_host: string): Promise<void> {
@@ -469,6 +482,8 @@ const SECRET = process.env.SECRET;
 const USERS_FILE = process.env.USERS_FILE;
 const BASE = process.env.BASE_PATH || "/portal";
 const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
+const POLICY_FILE = process.env.POLICY_FILE || "";
+const POLICY_DEFAULT = process.env.POLICY_DEFAULT || "one_factor";
 const SECURE = process.env.SECURE === "1";
 const COOKIE = "st_portal${site === "default" ? "" : "_" + site}_session";
 const COOKIE2 = "st_portal${site === "default" ? "" : "_" + site}_2fa";
@@ -487,10 +502,10 @@ function sign(payload) {
   return createHmac("sha256", SECRET).update(payload).digest("base64url");
 }
 
-function issueSession(name, cookieName = COOKIE, ttl = TTL_MS) {
+function issueSession(name, cookieName = COOKIE, ttl = TTL_MS, twoFactor = false) {
   // cookieName is mixed into the payload so a 2FA ticket can never be
   // replayed as a full session cookie (or vice versa)
-  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name;
+  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name + (twoFactor ? ".2fa" : "");
   const body = Buffer.from(payload).toString("base64url");
   return body + "." + sign(body);
 }
@@ -509,7 +524,17 @@ function verifySession(token, cookieName = COOKIE) {
   const expiry = Number(parts[0]);
   if (!expiry || expiry < Date.now()) return null;
   if (parts[1] !== cookieName) return null;
-  return parts.slice(2).join(".");
+  const twoFactor = parts[3] === "2fa";
+  return { name: parts.slice(2).join(".").replace(/\.2fa$/, ""), twoFactor };
+}
+
+function hostPolicy(host) {
+  try {
+    const map = JSON.parse(readFileSync(POLICY_FILE, "utf8"));
+    return map[String(host).toLowerCase()] ?? POLICY_DEFAULT;
+  } catch {
+    return POLICY_DEFAULT;
+  }
 }
 
 // —— TOTP (RFC 6238, SHA-1, 30s steps, ±1 window) ————————————————
@@ -721,8 +746,8 @@ function html(next, error, keyId, publicKey, host) {
     + '</body></html>';
 }
 
-function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS) {
-  const token = issueSession(name, cookieName, ttl);
+function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactor = false) {
+  const token = issueSession(name, cookieName, ttl, twoFactor);
   res.writeHead(302, {
     Location: next || "/",
     "Set-Cookie": cookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
@@ -738,13 +763,26 @@ createServer((req, res) => {
   if (url.pathname === BASE + "/api/authz/auth-request" && req.method === "GET") {
     const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
       .find((c) => c.startsWith(COOKIE + "="));
-    const name = cookie ? verifySession(cookie.slice(COOKIE.length + 1)) : null;
-    if (!name) {
+    const sess = cookie ? verifySession(cookie.slice(COOKIE.length + 1)) : null;
+    // 先查会话:未登录一律 401(启动探测依赖此);deny 策略在会话校验之后才 403
+    if (!sess) {
       res.writeHead(401, { "Content-Type": "text/plain" });
       res.end("unauthorized");
       return;
     }
-    res.writeHead(200, { "X-St-Auth-User": name });
+    const policy = hostPolicy((req.headers.host || "").split(":")[0]);
+    if (policy === "deny") {
+      // 已登录也拒绝(策略级拒绝)——gateway 403 直达,不再 302 登录页
+      res.writeHead(403, { "Content-Type": "text/plain" });
+      res.end("denied by policy");
+      return;
+    }
+    if (policy === "two_factor" && !sess.twoFactor) {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end("2fa required");
+      return;
+    }
+    res.writeHead(200, { "X-St-Auth-User": sess.name });
     res.end("ok");
     return;
   }
@@ -799,14 +837,15 @@ createServer((req, res) => {
         return;
       }
       clearFailures(name, ip);
-      // TOTP second factor when the user has one enrolled
-      if (rec.totpSecret) {
+      // TOTP second factor:user 已注册或该 host 策略要求双因素
+      const policy = hostPolicy((req.headers.host || "").split(":")[0]);
+      if (rec.totpSecret || policy === "two_factor") {
         const tmp = issueSession(name, COOKIE2, 5 * 60_000);
         res.writeHead(200, {
           "Content-Type": "text/html; charset=utf-8",
           "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
         });
-        res.end(totpPage(next, "", req.headers.host || ""));
+        res.end(totpPage(next, policy === "two_factor" && !rec.totpSecret ? "2FA is required for this host, but this account has no TOTP enrolled yet." : "", req.headers.host || ""));
         return;
       }
       setSession(res, name, next);
@@ -823,7 +862,8 @@ createServer((req, res) => {
       const next = params.get("next") || DEPLOY || "/";
       const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
         .find((c) => c.startsWith(COOKIE2 + "="));
-      const name = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
+      const sess2 = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
+      const name = sess2 ? sess2.name : null;
       if (!name) {
         res.writeHead(401, { "Content-Type": "text/html" });
         res.end(totpPage(next, "Session expired — please sign in again.", req.headers.host || ""));
@@ -838,7 +878,7 @@ createServer((req, res) => {
         return;
       }
       clearFailures(name, ip);
-      setSession(res, name, next);
+      setSession(res, name, next, COOKIE, TTL_MS, true); // 2FA 完成的会话
     });
     return;
   }
