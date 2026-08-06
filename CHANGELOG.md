@@ -9,6 +9,13 @@
 
 ## [Unreleased]
 
+## [0.3.23] - 2026-08-07
+
+### Changed
+- **bore 默认 server 改为 bore.pub**：schema `default` 与代码兜底
+  `cfg.server ?? SERVICE_TUNNELS_BORE_SERVER ?? "bore.pub"`——公共社区服务器
+  免注册即用；自建/离线场景显式填 `localhost:7835` 或用环境变量覆盖。
+
 ## [0.3.22] - 2026-08-07
 
 ### Fixed

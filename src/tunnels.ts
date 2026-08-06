@@ -102,7 +102,7 @@ export interface TunnelConfig {
    *  capable tunnel types: ngrok tcp, ssh, frpc tcp). */
   protocol?: "http" | "https" | "tcp";
   /** Tunnel server address. frpc: `host:port` (default 127.0.0.1:7000).
-   *  bore: `--to` target (default localhost; control port 7835). */
+   *  bore: `--to` target (default bore.pub; control port 7835). */
   server?: string;
   /** frpc token / bore shared secret (`-s`, env SERVICE_TUNNELS_BORE_SECRET). */
   token?: string;
@@ -593,11 +593,11 @@ export class TunnelManager {
       }
       case "bore": {
         // bore: minimal TCP tunnel (Rust, single static binary). `bore local`
-        // connects to an operator-run `bore server` — the lightest option for
-        // offline/CI end-to-end testing (no account, no public server). Default
-        // server = localhost (control port 7835, bore's built-in default).
+        // connects to a `bore server`. Default server = bore.pub (community
+        // public server, no account); self-hosted / offline use passes the
+        // server explicitly or via SERVICE_TUNNELS_BORE_SERVER=localhost.
         const bin = await tool("bore");
-        const server = cfg.server ?? process.env.SERVICE_TUNNELS_BORE_SERVER ?? "localhost";
+        const server = cfg.server ?? process.env.SERVICE_TUNNELS_BORE_SERVER ?? "bore.pub";
         const args = ["local", String(target), "--to", server];
         if (cfg.remotePort) args.push("-p", String(cfg.remotePort));
         const secret = cfg.token ?? process.env.SERVICE_TUNNELS_BORE_SECRET;
@@ -741,8 +741,8 @@ export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
     {
       key: "server",
       label: "bore server",
-      default: "localhost",
-      description: "自建 bore server 地址(host 或 host:port);默认 localhost:7835",
+      default: "bore.pub",
+      description: "bore server 地址(host 或 host:port);默认 bore.pub:7835(公共服务器,免注册);自建填 localhost:7835",
     },
     { key: "remotePort", type: "number", label: "远程端口", description: "-p 请求固定端口;留空=server 随机分配" },
     { key: "token", type: "password", label: "Secret", description: "-s 共享密钥;server 未设 secret 则留空" },

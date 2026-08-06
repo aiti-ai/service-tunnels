@@ -440,7 +440,7 @@ test("schemas: tunnel + auth provider param specs (data-driven forms)", async ()
   assert.ok(ssh.find((p) => p.key === "host")?.required, "ssh requires host");
   assert.equal(ssh.find((p) => p.key === "remotePort")?.type, "number");
   const bore = tunnelParamSchema("bore");
-  assert.equal(bore.find((p) => p.key === "server")?.default, "localhost");
+  assert.equal(bore.find((p) => p.key === "server")?.default, "bore.pub");
   assert.equal(bore.find((p) => p.key === "token")?.type, "password");
   assert.deepEqual(tunnelParamSchema("unknown-type"), []);
 
