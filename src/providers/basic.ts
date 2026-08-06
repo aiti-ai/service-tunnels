@@ -64,7 +64,7 @@ export function md5Crypt(password: string, salt: string): string {
 
 /**
  * 校验 HTTP Basic 凭证是否命中 htpasswd 文件(APR1 hash;其他 hash 类型一律
- * 拒绝,防误放行)。用于决策 API 进程内校验 basic 认证——嵌入方(pi-web)的
+ * 拒绝,防误放行)。用于决策 API 进程内校验 basic 认证——嵌入方宿主应用的
  * Next middleware 无法在 rewrite 时保留 vhost Host,nginx gateway 的
  * server_name 匹配不到会落到默认 server,绕过 auth_basic;故 basic 改在
  * 决策层校验,通过后直接 pipe 到服务。

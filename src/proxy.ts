@@ -330,7 +330,7 @@ export async function resolveServiceHost(
     if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled for site "${site}"` };
     const via = await gateBackend(backend, input);
     if (via) return via;
-    // labeled / site-domain vhost 是应用的完整入口(如 pi-web 部署在 /dev):即使
+    // labeled / site-domain vhost 是应用的完整入口(如嵌入方应用部署在 /dev):即使
     // open(无 auth)也原样转发,不 strip basePath——strip 仅用于裸 <port>.<suffix>
     // open vhost(部署前缀下的无 label 服务)
     // 转发到真实服务:剥 deployBasePath、接服务自身 base path(per-binding 优先)
@@ -367,7 +367,7 @@ async function gateBackend(
   input: ServiceHostResolveInput,
 ): Promise<ServiceHostDecision | null> {
   if (backend.basicGatewayPort) {
-    // basic 认证在决策 API 进程内校验:嵌入方(pi-web Next middleware)的 rewrite
+    // basic 认证在决策 API 进程内校验:嵌入方(Next middleware 类宿主)的 rewrite
     // 无法保留 vhost Host(forbidden header),nginx gateway 的 server_name 匹配
     // 不到会落到默认 server → auth_basic 被绕过。有效凭证 → 直接 pipe 到服务;
     // 无效/缺失 → 401。网关仍生成 auth_basic 配置(独立 createProxyServer 保留

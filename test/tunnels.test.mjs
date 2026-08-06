@@ -127,13 +127,13 @@ function fakeTool(base, name, output) {
 
 test("extractTunnelUrl: known domains win over unrelated links", async () => {
   const { extractTunnelUrl } = await loadSubject();
-  assert.equal(extractTunnelUrl("Forwarding https://abc.ngrok.io -> http://localhost:30141"), "https://abc.ngrok.io");
+  assert.equal(extractTunnelUrl("Forwarding https://abc.ngrok.io -> http://localhost:9090"), "https://abc.ngrok.io");
   assert.equal(extractTunnelUrl("url=https://demo.ngrok-free.app session=..."), "https://demo.ngrok-free.app");
   assert.equal(extractTunnelUrl("started tunnel url=https://mammogram-outgoing-launch.ngrok-free.dev"), "https://mammogram-outgoing-launch.ngrok-free.dev");
   assert.equal(extractTunnelUrl("Forwarding HTTP traffic from https://abc-61-149-239-106.serveousercontent.com\n"), "https://abc-61-149-239-106.serveousercontent.com");
   assert.equal(extractTunnelUrl("https://xyz.trycloudflare.com created"), "https://xyz.trycloudflare.com");
   assert.equal(extractTunnelUrl("url: https://abc.loca.lt/"), "https://abc.loca.lt/");
-  assert.equal(extractTunnelUrl("connecting to http://localhost:30141"), null);
+  assert.equal(extractTunnelUrl("connecting to http://localhost:9090"), null);
   assert.equal(extractTunnelUrl("no url"), null);
   // known tunnel domain wins even when an official-site link comes first
   const mixed = "Terms: https://www.cloudflare.com/website-terms/ tunnel: https://real.trycloudflare.com";

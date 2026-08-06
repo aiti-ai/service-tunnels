@@ -15,7 +15,7 @@ import { request as httpRequest } from "node:http";
  */
 
 const BINS = {
-  cloudflared: "/home/pi/bin/cloudflared",
+  cloudflared: "/usr/local/bin/cloudflared",
   authelia: "/usr/bin/authelia",
   redis: "/usr/bin/redis-server",
   nginx: "/usr/sbin/nginx",

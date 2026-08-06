@@ -74,7 +74,7 @@ export interface ExposeOptions {
    *  with a provider-name vhost label (D3: `5173-basic` = basic on default). */
   site?: string;
   /** Explicit vhost dash label — overrides the site/provider-derived label
-   *  (embedder wants a stable "<port>-pi-web.<domain>" entry even for
+   *  (embedder wants a stable "<port>-<label>.<domain>" entry even for
    *  auth=none opens; keeps basePath apps on the labeled pipe path). */
   label?: string;
   /** Proxy transport port for mode proxy/both (default 4180, busy → random). */
@@ -271,7 +271,7 @@ async function proxyExpose(
   }
   const authRequested =
     opts.auth === true || opts.auth === "auto" || (typeof opts.auth === "string" && opts.auth !== "none");
-  // 显式 label(embedder 固定 "<port>-pi-web.<domain>")时即使 auth=none 也保留
+  // 显式 label(embedder 固定 "<port>-<label>.<domain>")时即使 auth=none 也保留
   // opts.site——labeled 解析需要 binding.site 匹配,否则 "not enrolled"
   const site = authRequested
     ? (opts.site ?? "default")

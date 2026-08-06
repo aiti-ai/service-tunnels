@@ -389,7 +389,7 @@ export class ProxyManager {
       ? this.#bindings.get(`${port}:${label}`)
       : this.#findBySite(port, site);
     if (!binding || binding.site !== site) return null;
-    // provider 为空 → open labeled binding(如 pi-web auth=none):无认证,直接
+    // provider 为空 → open labeled binding(如嵌入方 auth=none):无认证,直接
     // 开放,不经过 provider 创建(registry.create("") 会抛 unknown provider)
     if (!binding.provider) return {};
     // registration is PER HOST: one binding serves both the default localhost
