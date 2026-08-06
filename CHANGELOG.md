@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-08-07
+
+### Fixed
+- **guardian 跨 owner 误杀**：`ensureMarker()` 不再复用环境继承的
+  `SERVICE_TUNNELS_MARKER`——泄漏到环境的旧实例 marker 会让所有实例共享同一
+  marker，一个实例退出时的 guardian `killRoleProcesses`（按 role+marker 全
+  /proc 扫描）会 SIGTERM 掉无关实例刚启动的 helper（oauth2-proxy 侧车等）。
+  现在每个进程生成独立 marker，自家子进程仍经 `roleEnv()` 显式继承。
+
+### Tests
+- oauth2-proxy / oauth2-gateway e2e 接入 `npm test`（`test/oauth2-proxy.test.mjs`
+  + `test/oauth2-gateway.test.mjs`）：mock IdP（`scripts/mock-idp.mjs`，RS256
+  OIDC + 回调白名单 + 域名验证模拟）驱动，覆盖侧车直连 / 库集成 mode=proxy /
+  nginx 网关完整登录链。外部依赖 oauth2-proxy + nginx 二进制缺失时 t.skip，
+  端口全随机（pickFreePort / proxyPort: 0），不触发网络下载。
+
 ### Security
 - **oauth2 变体秘密字段真掩码**：`clientSecret` 等 password 型字段由配置档携带时
   **不回显明文**（value 不写、schema JSON 不含明文，页面只显示「已由配置档提供」+

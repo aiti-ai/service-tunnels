@@ -15,9 +15,22 @@
 export const MARKER_ENV = "SERVICE_TUNNELS_MARKER";
 export const ROLE_ENV = "SERVICE_TUNNELS_ROLE";
 
-let currentMarker = process.env[MARKER_ENV] ?? "";
+let currentMarker = "";
 
-/** Ensure a marker exists (idempotent, survives hot reloads). */
+/**
+ * Ensure a marker exists (idempotent, survives hot reloads).
+ *
+ * ALWAYS generates a fresh per-process marker — never reuses an
+ * env-inherited SERVICE_TUNNELS_MARKER. Reusing an inherited marker is a
+ * cross-owner hazard: an unrelated process that leaked the variable into the
+ * environment (e.g. a dev server started from a shell that still carries an
+ * old instance's marker) would make every service-tunnels instance share ONE
+ * marker, so one instance's cleanup (guardian killRoleProcesses scans ALL of
+ * /proc for role + marker matches) SIGTERMs another instance's freshly
+ * spawned helpers. Children WE spawn receive the marker explicitly via
+ * roleEnv(); daemon/CLI cleanup always runs in the owning process, so no
+ * caller depends on env inheritance.
+ */
 export function ensureMarker(prefix = "service-tunnels"): string {
   if (!currentMarker) {
     currentMarker = `${prefix}-${process.pid}-${Date.now().toString(36)}`;
