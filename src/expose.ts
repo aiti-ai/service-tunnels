@@ -229,7 +229,16 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const proxyResult = mode === "both" ? await proxyExpose(port, opts2, ctx, siteCfg) : null;
   const result = await exposeTunnel(port, opts2, ctx, siteCfg);
   return proxyResult
-    ? { ...result, mode: "both", site: proxyResult.site, label: proxyResult.label, localUrl: proxyResult.localUrl }
+    ? {
+        ...result,
+        mode: "both",
+        site: proxyResult.site,
+        label: proxyResult.label,
+        localUrl: proxyResult.localUrl,
+        // both 模式的 vhost URL 一并返回(仅带隧道 URL 会让 exposes 记录缺 baseUrl)
+        baseUrl: proxyResult.baseUrl,
+        domainUrl: proxyResult.domainUrl,
+      }
     : result;
 }
 

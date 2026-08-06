@@ -16,6 +16,12 @@
   填写 = 覆盖。自定义变体 token 名含 secret/password（如 `{{clientSecret}}`）
   自动按秘密字段处理。
 
+## [0.3.17] - 2026-08-06
+
+### Fixed
+- **both 模式 exposes 记录缺 vhost URL**(`src/expose.ts`)：both 合并只带 localUrl,
+  baseUrl/domainUrl 丢失——暴露详情/活动列表看不到 both 的虚拟主机地址。
+
 ## [0.3.16] - 2026-08-06
 
 ### Fixed
