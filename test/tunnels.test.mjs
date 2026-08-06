@@ -218,7 +218,7 @@ test("serveo: builds ssh argv for the serveo.net hosted service", { timeout: 15_
     const argv = readFileSync(argvFile, "utf8").trim().split("\n");
     assert.ok(argv.includes("-R"), "serveo: -R present");
     assert.equal(argv[argv.indexOf("-R") + 1], "80:127.0.0.1:8901", "serveo forwards remote port 80");
-    assert.equal(argv[argv.length - 1], "serveo.net", "serveo dest is serveo.net");
+    assert.equal(argv[argv.length - 1], "user@serveo.net", "serveo dest is fixed user@serveo.net (ssh would default to the local user)");
     assert.ok(!argv.includes("-p"), "serveo: no -p when port unset");
     assert.ok(!argv.includes("-N"), "serveo: NO -N (URL is printed by serveo's forced session; -N suppresses it)");
     assert.ok(!argv.includes("BatchMode"), "serveo: NO BatchMode=yes (anonymous keyboard-interactive auth would be disabled)");

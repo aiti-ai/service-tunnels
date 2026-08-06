@@ -546,7 +546,9 @@ export class TunnelManager {
         // forwardOnly:false — serveo prints the URL via its forced session
         // command, which `-N` would suppress.
         const host = cfg.host ?? "serveo.net";
-        const dest = cfg.user ? `${cfg.user}@${host}` : host;
+        // serveo 匿名服务:ssh 默认用本机用户名(wind@serveo.net)会被拒——
+        // serveo 官方接受固定用户名 "user"(任意值即可);显式配置 user 时优先
+        const dest = cfg.user ? `${cfg.user}@${host}` : `user@${host}`;
         return sshSpec({ forward: `80:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false, batch: false });
       }
       case "cloudflared": {
