@@ -101,7 +101,7 @@ export interface ProxyManagerStatus {
 export function localLoginRedirect(provider: string, basePath: string): string {
   // 仅作未实现 loginRedirect 的插件 provider 的兜底——内置 provider 全部自描述
   const p = basePath.replace(/\/+$/, "") || "";
-  return `http://$host${p}/login?next=$request_uri`; // portal 风格默认
+  return `http://$http_host${p}/login?next=$request_uri`; // portal 风格默认
 }
 
 /** Split "host:port" (base domain form) into host + valid port ("" if none). */
@@ -390,8 +390,11 @@ export class ProxyManager {
       : this.#findBySite(port, site);
     if (!binding || binding.site !== site) return null;
     // provider 为空 → open labeled binding(如嵌入方 auth=none):无认证,直接
-    // 开放,不经过 provider 创建(registry.create("") 会抛 unknown provider)
-    if (!binding.provider) return {};
+    // 开放,不经过 provider 创建(registry.create("") 会抛 unknown provider)。
+    // serviceBasePath 必须保留:labeled vhost 是应用的完整入口(如 basePath
+    // 应用部署在 /dev),pipe 映射剥 deploy 前缀后要接回服务自身路径,否则
+    // 转发丢 /dev → Next 404 + 尾斜杠重定向死循环。
+    if (!binding.provider) return { serviceBasePath: binding.serviceBasePath };
     // registration is PER HOST: one binding serves both the default localhost
     // vhost and the base-domain vhost, and authelia cookie domains / nginx
     // server blocks are per host.

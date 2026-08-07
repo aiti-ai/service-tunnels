@@ -459,6 +459,22 @@ export function resolveOAuth2VariantParams(
       sources[spec.key] = "explicit";
     }
   }
+  // 可覆盖的预定义参数（scope / 无表单字段的 flags 端点）：显式 opts 覆盖
+  // 变体默认（表单/CLI 传 scope=…、gitlab_url=… 等）。
+  if (def.scope) {
+    const v = optsLower.scope;
+    if (v !== undefined && v !== null && v !== "") {
+      values.scope = String(v);
+      sources.scope = "explicit";
+    }
+  }
+  for (const [flagKey] of Object.entries(def.flags ?? {})) {
+    const v = optsLower[flagKey.toLowerCase()];
+    if (v !== undefined && v !== null && v !== "") {
+      values[flagKey] = String(v);
+      sources[flagKey] = "explicit";
+    }
+  }
   // cookieSecret 不在表单里，单独从 opts/配置档解析（prepare 里自动生成缺省）
   const cookie = opts.cookieSecret;
   if (typeof cookie === "string" && cookie !== "") {
@@ -491,35 +507,76 @@ export function missingVariantParams(
 export interface OAuth2VariantSchema extends ParamSpec {
   /** 秘密字段已由配置档携带：页面不预填明文，留空 = 回落配置档值。 */
   secretSet?: boolean;
+  /** 预定义固定参数（provider/scope/端点等）：只读展示，不可编辑。 */
+  fixed?: boolean;
+  /** 固定参数的当前值（固定参数用展示；普通参数仍用 default 预填）。 */
+  value?: string;
 }
 
 /**
  * 每个变体的页面表单：非秘密字段携带 → **默认填入**（default = 携带值，可编辑
  * 覆盖）；**秘密字段（clientSecret 等 password 型）不回显明文**——只标记
  * secretSet（页面显示「已设置」，留空提交 = 回落配置档值），避免 secret 明文
- * 出现在页面 HTML/JS 里。issuerUrl 由变体固定时删除（SaaS 端点不可改）。
+ * 出现在页面 HTML/JS 里。预定义参数（scope/flags 端点、固定 issuerUrl）不再
+ * 隐藏——默认值已填入、**可编辑**（用户自建 IdP 可覆盖；提交后库端按显式值
+ * 写入）。仅 provider 保持只读（它决定 oauth2-proxy 的 IdP 协议）。
  */
 export function oauth2VariantParamSchemas(configDir: string): Record<string, OAuth2VariantSchema[]> {
   const config = readOAuth2VariantCreds(configDir);
   const out: Record<string, OAuth2VariantSchema[]> = {};
   for (const def of allOAuth2Variants()) {
-    out[def.id] = def.form
-      .filter((spec) => !(spec.key === "issuerUrl" && def.issuerUrl)) // 固定端点不可改
-      .map((spec): OAuth2VariantSchema => {
-        const cfgKey = def.creds[spec.key];
-        const carried = cfgKey ? config.values[cfgKey] : undefined;
-        if (!carried) return spec;
-        // 秘密字段：明文不进页面；placeholder 提示替换方式
-        if (spec.type === "password") {
-          return {
-            ...spec,
-            secretSet: true,
-            placeholder: "已由配置档提供；留空使用配置档值，填写则覆盖",
-          };
-        }
-        // 非秘密字段：携带值 → default 预填（可编辑覆盖）
-        return { ...spec, default: carried };
+    const specs: OAuth2VariantSchema[] = [];
+    // provider 决定 oauth2-proxy 的 IdP 协议——保持只读；其余预定义参数
+    // （scope/flags 端点）放开可编辑，默认值 = 变体预设，用户可覆盖。
+    if (def.provider) {
+      specs.push({
+        key: "provider",
+        label: "Provider",
+        value: def.provider,
+        fixed: true,
+        description: "oauth2-proxy provider 名（变体固定，不可改）",
       });
+    }
+    if (def.scope) {
+      specs.push({
+        key: "scope",
+        label: "Scope",
+        default: def.scope,
+        description: `OAuth scope（默认 ${def.scope}，可覆盖）`,
+      });
+    }
+    // flags（端点等）：已有对应表单字段的（gitlabUrl→gitlab_url、
+    // azureTenant→azure_tenant）由该字段编辑，不重复出现；无对应字段的
+    // 才补可编辑项（默认值 = 变体常量）。
+    for (const [flagKey, flagValue] of Object.entries(def.flags ?? {})) {
+      if (def.form.some((s) => s.flag === flagKey)) continue;
+      specs.push({
+        key: flagKey,
+        label: flagKey,
+        default: String(flagValue),
+        description: "固定配置（端点，可覆盖）",
+      });
+    }
+    specs.push(...def.form.map((spec): OAuth2VariantSchema => {
+      const cfgKey = def.creds[spec.key];
+      const carried = cfgKey ? config.values[cfgKey] : undefined;
+      // issuerUrl 固定时不再删除——改只读展示（默认值已填入，不可改）
+      if (spec.key === "issuerUrl" && def.issuerUrl) {
+        return { ...spec, fixed: true, value: def.issuerUrl, required: false };
+      }
+      if (!carried) return spec;
+      // 秘密字段：明文不进页面；placeholder 提示替换方式
+      if (spec.type === "password") {
+        return {
+          ...spec,
+          secretSet: true,
+          placeholder: "已由配置档提供；留空使用配置档值，填写则覆盖",
+        };
+      }
+      // 非秘密字段：携带值 → default 预填（可编辑覆盖）
+      return { ...spec, default: carried };
+    }));
+    out[def.id] = specs;
   }
   return out;
 }

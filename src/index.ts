@@ -5,6 +5,7 @@ import {
   writeConfigFile,
   hardenDir,
   resolveBaseDomains,
+  resolveAllowAuthNone,
   type DirOptions,
   type ServiceTunnelsDirs,
 } from "./config.ts";
@@ -138,6 +139,14 @@ export interface ServiceTunnelsOptions extends DirOptions {
   deployBasePath?: string;
   /** 真实服务的默认 base path(转发映射)。 */
   serviceBasePath?: string;
+  /**
+   * 禁止无认证暴露（auth none）——安全开关：false = 本实例所有 expose
+   * （tunnel/proxy/both/tcp）必须带认证；"none" 不再出现在 auth providers()
+   * 列表，auth none 请求直接失败。任何一层为 false 即生效（显式参数 < env
+   * SERVICE_TUNNELS_ALLOW_AUTH_NONE < 配置档 allow-auth-none），单次调用的
+   * true 不能覆盖环境变量/配置档的禁止。
+   */
+  allowAuthNone?: boolean;
 }
 
 export interface ToolResolution {
@@ -228,8 +237,12 @@ export interface ServiceTunnels {
     metas(): Record<string, TunnelMeta>;
   };
   auth: {
-    /** Built-in + plugin providers. */
+    /** Built-in + plugin providers ("none" included when auth-none exposes
+     *  are allowed; omitted when allowAuthNone is false). */
     providers(): string[];
+    /** Whether unauthenticated (auth none) exposes are currently allowed
+     *  (createServiceTunnels opts / SERVICE_TUNNELS_ALLOW_AUTH_NONE / config). */
+    noneAllowed(): boolean;
     /** Register an extra provider factory (plugins). */
     registerProvider(factory: AuthProviderFactory): void;
     /** Expose with optional gateway auth (default provider: authelia). */
@@ -276,8 +289,16 @@ export interface ServiceTunnels {
      * instead of hardcoding provider names.
      */
     defaultProvider(): string;
-    /** Enroll TOTP 2FA for a user (portal) — returns secret + otpauth URL. */
-    totpEnroll(name: string, provider?: string, site?: string): Promise<{ secret: string; otpauthUrl: string }>;
+    /** Enroll TOTP 2FA for a user (portal) — returns secret + otpauth URL.
+     *  `label` 为 authenticator 标识（缺省 `<name>@<host>`），响应含生效 label。 */
+    totpEnroll(
+      name: string,
+      provider?: string,
+      site?: string,
+      label?: string,
+    ): Promise<{ secret: string; otpauthUrl: string; label: string }>;
+    /** 默认 TOTP 标识（UI 登记前预填用）：`<name>@<host>`。 */
+    totpDefaultLabel(name: string, provider?: string, site?: string): Promise<{ label: string }>;
     /** Disable TOTP 2FA for a user (portal). */
     totpDisable(name: string, provider?: string, site?: string): Promise<void>;
     /** TOTP enrollment status for a user (portal). */
@@ -340,6 +361,10 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     spawnGuardian(process.pid, { registrationFile: registrationFilePath(dirs.cacheDir, process.pid), cacheDir: dirs.cacheDir });
   }
   const internal = new InternalRegistry();
+  // auth-none ban (sticky): explicit createServiceTunnels opt > env
+  // SERVICE_TUNNELS_ALLOW_AUTH_NONE > config file; any false wins, a per-call
+  // true cannot re-enable an operator ban (resolveAllowAuthNone enforces).
+  const allowAuthNone = resolveAllowAuthNone(dirs.configDir, opts.allowAuthNone);
   // Priority: explicit option > env SERVICE_TUNNELS_ALLOW_DOWNLOAD > config-file
   // fallback > default true. Never persisted — config file is a read-only
   // fallback, not a dependency.
@@ -582,10 +607,14 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       // registry is hoisted (shared with the proxy transport's lazy wiring)
       const registry = authRegistry;
       return {
-        providers: () => ["none", ...registry.list()],
+        providers: () => (allowAuthNone ? ["none", ...registry.list()] : [...registry.list()]),
+        noneAllowed: () => allowAuthNone,
         registerProvider: (f: AuthProviderFactory) => registry.register(f),
         expose: async (port: number, o: Omit<ExposeOptions, "port"> = {}) => {
-          const r = await exposeFlow(port, { ...o, port }, {
+          // per-call false tightens; per-call true can't loosen the instance/
+          // env/config ban (sticky) — exposeFlow re-resolves with env+config
+          const effAllowNone = o.allowAuthNone === false ? false : allowAuthNone;
+          const r = await exposeFlow(port, { ...o, allowAuthNone: effAllowNone, port }, {
             configDir: dirs.configDir,
             cacheDir: dirs.cacheDir,
             resolveTool: async (name: string) =>
@@ -623,11 +652,18 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         },
         userManagers: () => registry.userManagers(),
         totpProviders: () => registry.totpProviders(),
-        totpEnroll: async (name: string, provider?: string, site?: string) => {
+        totpEnroll: async (name: string, provider?: string, site?: string, label?: string) => {
           const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
-            totpEnroll(n: string): Promise<{ secret: string; otpauthUrl: string }>;
+            totpEnroll(n: string, label?: string): Promise<{ secret: string; otpauthUrl: string; label: string }>;
           };
-          return mgr.totpEnroll(name);
+          return mgr.totpEnroll(name, label);
+        },
+        totpDefaultLabel: async (name: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
+            defaultTotpLabel?(n: string): string;
+          };
+          if (!mgr.defaultTotpLabel) throw new Error(`provider ${provider ?? "portal"} has no default TOTP label`);
+          return { label: mgr.defaultTotpLabel(name) };
         },
         totpDisable: async (name: string, provider?: string, site?: string) => {
           const mgr = registry.userManager(provider ?? "portal", site) as unknown as {

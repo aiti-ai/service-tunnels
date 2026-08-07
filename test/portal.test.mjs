@@ -285,6 +285,17 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   await provider2.addUser("alice", "alice-pw");
   const { secret, otpauthUrl } = await provider2.totpEnroll("alice");
   assert.match(otpauthUrl, /^otpauth:\/\/totp\//);
+  // 默认标识：user-auth-site 用 `-` 连接成 account，host 前保留 `@`
+  // （站点独立用户库，分开管理）；无 host 时省略 @host；可自定义 label。
+  const { label } = await provider2.totpEnroll("alice");
+  assert.equal(label, "alice-portal-default");
+  assert.equal(provider2.defaultTotpLabel("alice"), "alice-portal-default");
+  await provider2.registerHost("8905-pi-web.pi.example.com");
+  assert.equal(provider2.defaultTotpLabel("alice"), "alice-portal-default@8905-pi-web.pi.example.com");
+  const custom = await provider2.totpEnroll("alice", "alice@my.host");
+  assert.equal(custom.label, "alice@my.host");
+  assert.ok(custom.otpauthUrl.includes("issuer=my.host"), "issuer = label 的 host 部分");
+  assert.ok(custom.otpauthUrl.includes(encodeURIComponent("alice@my.host")), "label 被 URL 编码");
   // pending until activated (2FA-takeover guard): enrolling must NOT replace
   // the enforced secret or force 2FA before the user proves the code.
   assert.equal((await provider2.totpStatus("alice")).enrolled, false);
@@ -296,7 +307,8 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   assert.equal((await provider2.totpStatus("alice")).pending, true);
 
   // activate with the user's real code → now enforced
-  const activateCode = totp(secret);
+  // (pending 已被多次 re-enroll 替换 —— 激活/登录必须用最近一次 custom 的 secret)
+  const activateCode = totp(custom.secret);
   await provider2.totpActivate("alice", activateCode);
   assert.equal((await provider2.totpStatus("alice")).enrolled, true);
   assert.equal((await provider2.totpStatus("alice")).pending, false);
@@ -337,7 +349,7 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
     const num = ((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3];
     return String(num % 1_000_000).padStart(6, "0");
   }
-  const code = totp(secret);
+  const code = totp(custom.secret);
   const ok2fa = await postForm("/portal/login/2fa", port2, { code }, { cookie: `st_portal_2fa=${tmpCookie}` });
   assert.equal(ok2fa.status, 302, "valid TOTP completes login");
   assert.match(String(ok2fa.headers["set-cookie"]), /st_portal_session=/);

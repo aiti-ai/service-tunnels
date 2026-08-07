@@ -192,6 +192,7 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.expose.progress": "Exposing...",
     "ui.expose.success": "✅ Exposed!<br>",
     "ui.expose.failed": "❌ Expose failed: ",
+    "ui.expose.authRequired": "⚠️ Auth required: unauthenticated exposes are disabled on this host",
     "ui.unknownError": "Unknown error",
     "ui.requestFailed": "❌ Request failed: ",
     "ui.tunnelsAdd.title": "Add tunnel",
@@ -379,6 +380,7 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.expose.progress": "正在暴露...",
     "ui.expose.success": "✅ 暴露成功!<br>",
     "ui.expose.failed": "❌ 暴露失败: ",
+    "ui.expose.authRequired": "⚠️ 必须认证:本机已禁止无认证暴露",
     "ui.unknownError": "未知错误",
     "ui.requestFailed": "❌ 请求失败: ",
     "ui.tunnelsAdd.title": "添加隧道",
@@ -524,8 +526,14 @@ export function localizeSpecs(specs: ParamSpec[], lang: Lang): ParamSpec[] {
   if (lang === "en") return specs;
   return specs.map((s) => {
     const out: ParamSpec = { ...s };
-    const tr = (key: string | undefined, fb: string | undefined) =>
-      key ? translate(lang, key) : (fb ?? "");
+    // 翻译未命中(zh+en 目录都没有)→ translate 返回 key 本身;此时回落默认值
+    // fb(如 "Client ID"),默认值也没有 → 最终兜底 key 参数名(便于发现漏翻),
+    // 绝不把 i18n key 原样塞进页面文本。
+    const tr = (key: string | undefined, fb: string | undefined) => {
+      if (!key) return fb ?? "";
+      const v = translate(lang, key);
+      return v === key && fb !== undefined ? fb : v;
+    };
     if (s.labelKey) out.label = tr(s.labelKey, s.label);
     if (s.descriptionKey) out.description = tr(s.descriptionKey, s.description);
     if (s.placeholderKey) out.placeholder = tr(s.placeholderKey, s.placeholder);

@@ -136,6 +136,8 @@ const TEMPLATES = {
         const show = tr('ui.totpEnrollTitle', { name, otpauth, secretHint: secret ? tr('ui.totpEnrollSecretHint', { secret }) : '' }) + '\n' + tr('ui.totpEnrollEnterCode');
         const code = prompt(show);
         if (code) {
+          // TOTP 固定 6 位纯数字 —— 本地即校验，避免无谓的服务器往返
+          if (!/^\d{6}$/.test(code)) { alert(tr('ui.totpCodeWrong')); return; }
           httpPost('/users/' + encodeURIComponent(name) + '/totp-activate', { code }).then(r => r.json()).then(d => {
             alert(d.activated ? tr('ui.totpActivated') : tr('ui.totpCodeWrong'));
             location.reload();
@@ -375,7 +377,7 @@ const TEMPLATES = {
   `;
   },
 
-  expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[]) => {
+  expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[], authNoneAllowed: boolean) => {
     const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
@@ -395,9 +397,10 @@ const TEMPLATES = {
         </div>
         <div class="form-group">
           <label>${L("ui.label.auth")}</label>
+          ${authNoneAllowed ? "" : `<p style="color:#d73a49;font-size:12px;margin-bottom:4px;">${L("ui.expose.authRequired")}</p>`}
           <select name="auth" id="authType" class="form-control">
             <option value="auto">${L("ui.option.auto")}</option>
-            <option value="none">${L("ui.option.none")}</option>
+            ${authNoneAllowed ? `<option value="none">${L("ui.option.none")}</option>` : ""}
             ${authOrder.map((t) => {
               const meta = authMetas[t] || {};
               const badge = meta.kind === "oauth2-variant"
@@ -439,7 +442,9 @@ const TEMPLATES = {
         return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
       }
       function authInputHtml(s) {
-        const label = (s.label || s.key) + (s.required ? ' *' : '');
+        const fixed = s.fixed === true;
+        const fixedAttr = fixed ? ' disabled' : '';
+        const label = (s.label || s.key) + (s.required ? ' *' : '') + (fixed ? ' 🔒' : '');
         // 秘密字段（password）已由配置档携带：不回显明文（不写 value），
         // 显示「已设置」提示；留空提交 = 回落配置档值，填写 = 覆盖
         const secretSet = s.type === 'password' && s.secretSet;
@@ -449,17 +454,18 @@ const TEMPLATES = {
         const hint = secretNote + (s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
           (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || tr('ui.linkTitleDefault')) + '</a>' : '') + '</div>' : '');
         const ph = s.placeholder ? ' placeholder="' + escAttr(s.placeholder) + '"' : '';
-        const def = (!secretSet && s.default !== undefined) ? ' value="' + escAttr(s.default) + '"' : '';
+        const val = s.default ?? s.value;
+        const def = (!secretSet && val !== undefined) ? ' value="' + escAttr(String(val)) + '"' : '';
         let input;
         if (s.options && s.options.length) {
-          input = '<select name="' + escAttr(s.key) + '" class="form-control">' +
+          input = '<select name="' + escAttr(s.key) + '" class="form-control"' + fixedAttr + '>' +
             s.options.map((o) => '<option value="' + escAttr(o.value) + '">' + escAttr(o.label || o.value) + '</option>').join('') + '</select>';
         } else if (s.type === 'number') {
-          input = '<input type="number" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+          input = '<input type="number" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + fixedAttr + '>';
         } else if (s.type === 'password') {
-          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + ' autocomplete="new-password">';
+          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + ' autocomplete="new-password"' + fixedAttr + '>';
         } else {
-          input = '<input type="text" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + '>';
+          input = '<input type="text" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + fixedAttr + '>';
         }
         return '<div class="form-group"><label>' + escAttr(label) + '</label>' + input + hint + '</div>';
       }
@@ -845,7 +851,8 @@ function createHandler(ctx: UiContext): RequestListener {
         const authSchemas = await ctx.st.schemas.authProviders();
         const authMetas = ctx.st.schemas.authMetas();
         const authOrder = ctx.st.auth.providerOrder();
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder), ctx.csrfToken);
+        const authNoneAllowed = ctx.st.auth.noneAllowed();
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder, authNoneAllowed), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;

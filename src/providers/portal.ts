@@ -287,7 +287,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   /** 未认证跳转：portal 登录页（next 参数带回原路径）。 */
   loginRedirect(basePath: string, scheme: "http" | "https"): string {
-    return `${scheme}://$host${basePath}/login?next=$request_uri`;
+    return `${scheme}://$http_host${basePath}/login?next=$request_uri`;
   }
 
   async registerHost(host: string, policy?: AuthPolicy): Promise<void> {
@@ -376,8 +376,22 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   // —— TOTP 2FA management ——
 
-  /** Enroll TOTP for a user. Returns the base32 secret + otpauth URL. */
-  async totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }> {
+  /** 默认 TOTP 标识（authenticator 里显示的 account@issuer）：
+   *  `<name>-<auth>-<site>@<host>` —— 站点各自独立用户库，同用户名在不同
+   *  站点/auth 下必须能区分；user/auth/site 用 `-` 连接成一段 account，
+   *  host 前保留 `@`（也是 otpauth issuer 部分）。host = 该 portal 站点注册
+   *  的第一个 host（用户实际认证的虚拟主机，如 8905-pi-web.pi.example.com）；
+   *  尚无 host 时省略 @host 部分。调用方可在登记时覆盖（label）。 */
+  defaultTotpLabel(name: string): string {
+    const host = this.#hosts.keys().next().value;
+    const base = `${name}-${this.type}-${this.site}`;
+    return host ? `${base}@${host}` : base;
+  }
+
+  /** Enroll TOTP for a user. Returns the base32 secret + otpauth URL.
+   *  `label` 为 authenticator 显示的标识（account@issuer），缺省用
+   *  defaultTotpLabel()；纯展示用途（校验只认 secret），可任意自定义。 */
+  async totpEnroll(name: string, label?: string): Promise<{ secret: string; otpauthUrl: string; label: string }> {
     const rows = await this.#readDb();
     const rec = rows.get(name);
     if (!rec) throw new Error(`user ${name} not registered`);
@@ -387,11 +401,14 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     // of the management API cannot silently take over a user's 2FA.
     rec.totpPending = secret;
     await this.#writeDb(rows);
-    const label = encodeURIComponent(`${name}@service-tunnels`);
-    this.#ctx.log(`portal: TOTP enrolled for ${name}`);
+    const finalLabel = (label ?? "").trim() || this.defaultTotpLabel(name);
+    // issuer = host 部分（最后一个 @ 之后），authenticator 按 issuer 分组/展示
+    const issuer = finalLabel.includes("@") ? finalLabel.slice(finalLabel.lastIndexOf("@") + 1) : finalLabel;
+    this.#ctx.log(`portal: TOTP enrolled for ${name} (label ${finalLabel})`);
     return {
       secret,
-      otpauthUrl: `otpauth://totp/${label}?secret=${secret}&issuer=service-tunnels&algorithm=SHA1&digits=6&period=30`,
+      label: finalLabel,
+      otpauthUrl: `otpauth://totp/${encodeURIComponent(finalLabel)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`,
     };
   }
 
@@ -627,10 +644,12 @@ function totpPage(next, error, host) {
     + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
     + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
     + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err
-    + '<input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>'
+    + '<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\\d{6}" required autofocus>'
     + '<button type="submit">Verify</button></form>'
     + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Verifying…</p><p>Please wait</p></div></div>'
-    + '<script>var f=document.querySelector("form");if(f)f.addEventListener("submit",function(){var o=document.getElementById("busy");if(o)o.style.display="flex";var b=f.querySelector("button");if(b){b.disabled=true;b.textContent="Verifying…";}});</script>'
+    // 只收数字、满 6 位自动提交（submit 事件仍触发 spinner 过渡层；
+    // 按钮保留作为无 JS 兜底）。TOTP 固定 6 位纯数字（RFC 6238 默认）。
+    + '<script>var f=document.querySelector("form");if(f)f.addEventListener("submit",function(){var o=document.getElementById("busy");if(o)o.style.display="flex";var b=f.querySelector("button");if(b){b.disabled=true;b.textContent="Verifying…";}});var i=document.querySelector("input[name=code]");if(i)i.addEventListener("input",function(){this.value=[...this.value].filter(function(c){return c>="0"&&c<="9"}).join("").slice(0,6);if(this.value.length===6&&f)f.submit();});</script>'
     + '</body></html>';
 }
 

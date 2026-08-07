@@ -733,3 +733,31 @@ test("D4 labeled vhost not enrolled for its site → 403", { timeout: 20_000 }, 
   }
   await new Promise((r) => svc.close(r));
 });
+
+test("D4 open labeled binding keeps serviceBasePath: basePath app (/dev) pipe preserves full path", { timeout: 20_000 }, async () => {
+  const svc = await spawnInProcEcho();
+  const svcPort = svc.address().port;
+  // auth=none labeled binding (provider-less open) with serviceBasePath=/dev:
+  // resolveSite returns { serviceBasePath: "/dev" } — the pipe must NOT strip
+  // /dev (regression: it used to return {} and mapServicePath dropped the
+  // deploy prefix → rewrite to /api/... → Next 404 + trailing-slash loop).
+  const proxy = await startProxy({
+    basePath: "/dev",
+    resolveLabel: (label) => (label === "pi-web" ? "pi-web" : null),
+    resolveSite: async (port, site, label) => {
+      if (label !== "pi-web" || site !== "pi-web") return null;
+      return { serviceBasePath: "/dev" };
+    },
+  });
+  try {
+    const res = await rawGet(proxy.port, `${svcPort}-pi-web.st.localhost`, "/dev/api/services");
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(res.body).url, "/dev/api/services", "pipe preserves the /dev basePath");
+    // 根路径带部署前缀 → svc 路径(不带尾斜杠 → 不再触发 Next 308 死循环)
+    const root = await rawGet(proxy.port, `${svcPort}-pi-web.st.localhost`, "/dev");
+    assert.equal(JSON.parse(root.body).url, "/dev");
+  } finally {
+    await proxy.close();
+  }
+  await new Promise((r) => svc.close(r));
+});

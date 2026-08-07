@@ -18,7 +18,7 @@ import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
-import { readConfigFile, writeConfigFile, resolveBaseDomains } from "./config.ts";
+import { readConfigFile, writeConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
 import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
@@ -194,20 +194,33 @@ const methods = new Map<string, Handler>([
       metas: tunnelMetas(),
       authProviders: localizeSchemas(await authProviderSchemas(configDir), lang),
       authMetas: authProviderMetas(configDir),
+      // auth none ban status — clients hide the "none" option when false
+      authNoneAllowed: resolveAllowAuthNone(configDir),
     };
   }],
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
+  ["auth.none.allowed", () => resolveAllowAuthNone(configDir)],
 
   ["auth.totp.enroll", (params) => {
-    const p = params as { name?: string; provider?: string; site?: string };
+    const p = params as { name?: string; provider?: string; site?: string; label?: string };
     // username gate at the IPC boundary (also enforces the totp export
     // filename charset in the authelia provider)
     validateUserName(p?.name);
     const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
-      totpEnroll(name: string): Promise<{ secret: string; otpauthUrl: string }>;
+      totpEnroll(name: string, label?: string): Promise<{ secret: string; otpauthUrl: string; label: string }>;
+      defaultTotpLabel?(name: string): string;
     };
-    return mgr.totpEnroll(p.name ?? "");
+    return mgr.totpEnroll(p.name ?? "", p.label);
+  }],
+  ["auth.totp.default-label", (params) => {
+    const p = params as { name?: string; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as {
+      defaultTotpLabel?(name: string): string;
+    };
+    if (!mgr.defaultTotpLabel) throw new Error(`provider ${p.provider ?? "portal"} has no default TOTP label`);
+    return { label: mgr.defaultTotpLabel(p.name ?? "") };
   }],
   ["auth.totp.disable", (params) => {
     const p = params as { name?: string; provider?: string; site?: string };
@@ -285,6 +298,17 @@ const methods = new Map<string, Handler>([
       }
       if (o?.providerParams !== undefined && (typeof o.providerParams !== "object" || o.providerParams === null || Array.isArray(o.providerParams))) {
         throw new Error(`expose: providerParams must be an object`);
+      }
+      if (o?.allowAuthNone !== undefined && typeof o.allowAuthNone !== "boolean") {
+        throw new Error(`expose: allowAuthNone must be a boolean`);
+      }
+      // auth-none ban at the IPC boundary (defense in depth; exposeFlow
+      // re-checks): the effective auth is none and the daemon's resolution
+      // (env SERVICE_TUNNELS_ALLOW_AUTH_NONE / config file, sticky — a per-call
+      // true cannot re-enable) says banned → reject before anything starts.
+      const authNone = o?.auth === false || o?.auth === undefined || o?.auth === "none";
+      if (authNone && !resolveAllowAuthNone(configDir, o?.allowAuthNone as boolean | undefined)) {
+        throw new Error('expose: auth "none" is banned on this host (allow-auth-none=false) — pass --auth auto/<provider>');
       }
       // auxiliary ports (0 = auto/random) and the base domain (host[:port],
       // interpolated into generated vhost URLs) get the same boundary checks.

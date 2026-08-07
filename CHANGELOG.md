@@ -9,6 +9,27 @@
 
 ## [Unreleased]
 
+### Added
+- **TOTP 登记支持自定义标识（label）**：`auth totp enroll <name> [--label <l>]`
+  与 `st.auth.totpEnroll(name, provider, site, label)` 接受可选 label；缺省为
+  `<name>-<auth>-<site>@<host>`（user/auth/site 用 `-` 连接成 account，host
+  前保留 `@`；站点/认证各自独立管理用户库，authenticator 中需能区分）。新增
+  `auth totp default-label <name>` / `totpDefaultLabel()` 供 UI 登记前预填。
+  otpauth URL 的 issuer = label 中最后一个 `@` 之后的部分。
+
+### Added
+- **禁止无认证暴露（auth none 开关）**：通过任一入口设为 false 即禁止
+  `--auth none` / 开放 proxy 绑定 / tcp 暴露，且任何一层 false 生效
+  （安全开关，单次调用 true 不可覆盖）：
+  - API 参数：`createServiceTunnels({ allowAuthNone: false })` 或单次
+    `st.auth.expose(port, { allowAuthNone: false })`
+  - 环境变量：`SERVICE_TUNNELS_ALLOW_AUTH_NONE=0|false|off`
+  - 配置/CLI：`config set allow-auth-none false`；`expose` 新增
+    `--allow-auth-none <true|false>`
+  - 禁止后 `st.auth.providers()` / `auth providers list` 不再返回 `"none"`，
+    UI 隐藏 none 选项并提示必须认证，daemon `schemas` RPC 增加
+    `authNoneAllowed` 字段；daemon expose 边界 fail-closed 拒绝无认证请求。
+
 ## [0.3.28] - 2026-08-07
 
 ### Changed

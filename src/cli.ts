@@ -29,13 +29,13 @@ function usage(lang: Lang = "en"): void {
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--force]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
   config path | show
-  config get <key> | set <key> <value>   # key: allow-tool-download | prefer-mirrors
+  config get <key> | set <key> <value>   # key: allow-tool-download | prefer-mirrors | allow-auth-none
                                         #      | base-path | base-path-by-provider <prov:path>
                                         #      | base-domain <domain> | proxy-port <port>
                                         #      | tool-mirrors <tool:url>
@@ -98,6 +98,10 @@ interface CliArgs {
   bypassPaths?: string[];
   /** --allow-tool-download <true|false>: per-expose tool-download override. */
   allowToolDownload?: boolean;
+  /** --allow-auth-none <true|false>: per-expose auth-none ban override
+   *  (false = this expose must use an auth provider; an operator ban via
+   *  env/config can't be re-enabled here). */
+  allowAuthNone?: boolean;
   [k: string]: unknown;
 }
 
@@ -222,6 +226,11 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--allow-tool-download": {
         const raw = (argv[++i] ?? "true").toLowerCase();
         args.allowToolDownload = !(raw === "false" || raw === "0" || raw === "off" || raw === "no");
+        break;
+      }
+      case "--allow-auth-none": {
+        const raw = (argv[++i] ?? "true").toLowerCase();
+        args.allowAuthNone = !(raw === "false" || raw === "0" || raw === "off" || raw === "no");
         break;
       }
       case "--display-name":
@@ -362,6 +371,7 @@ function writeCliConfig(configDir: string, f: ServiceTunnelsConfigFile): void {
 /** kebab-case CLI key → config-file field name (allow-tool-download → allowToolDownload). */
 const CONFIG_KEYS: Record<string, keyof ServiceTunnelsConfigFile> = {
   "allow-tool-download": "allowToolDownload",
+  "allow-auth-none": "allowAuthNone",
   "prefer-mirrors": "preferMirrors",
   "base-path": "basePath",
   "base-path-by-provider": "basePathByProvider",
@@ -382,6 +392,7 @@ function parseCliConfigValue(key: keyof ServiceTunnelsConfigFile, value: string)
   switch (key) {
     case "allowToolDownload":
     case "preferMirrors":
+    case "allowAuthNone":
       return boolVal();
     case "basePath":
       return value.startsWith("/") ? value.replace(/\/+$/, "") : undefined;
@@ -750,7 +761,15 @@ async function main(): Promise<void> {
         providerParams,
         force: args.force,
         allowToolDownload: args.allowToolDownload,
+        allowAuthNone: args.allowAuthNone,
       }, 90_000);
+      if (res === null) {
+        // daemon threw at its boundary (e.g. auth-none banned via
+        // allow-auth-none false / SERVICE_TUNNELS_ALLOW_AUTH_NONE / config) or
+        // IPC failed — the daemon logs the exact reason.
+        console.error("expose rejected by daemon (auth-none banned or invalid request — check daemon logs)");
+        process.exit(1);
+      }
       jsonOut(res);
       break;
     }
@@ -791,10 +810,18 @@ async function main(): Promise<void> {
       } else if (op === "totp" && cmd[2] === "enroll") {
         const name = cmd[3];
         if (!name) {
-          console.error("auth totp enroll <name> [--provider portal] [--site <s>]");
+          console.error("auth totp enroll <name> [--provider portal] [--site <s>] [--label <标识>]");
           process.exit(2);
         }
-        jsonOut({ site, ...(await st.auth.totpEnroll(name, args.provider, site)) });
+        const label = (args.label as string | undefined) ?? undefined;
+        jsonOut({ site, ...(await st.auth.totpEnroll(name, args.provider, site, label)) });
+      } else if (op === "totp" && cmd[2] === "default-label") {
+        const name = cmd[3];
+        if (!name) {
+          console.error("auth totp default-label <name> [--provider portal] [--site <s>]");
+          process.exit(2);
+        }
+        jsonOut({ site, ...(await st.auth.totpDefaultLabel(name, args.provider, site)) });
       } else if (op === "totp" && cmd[2] === "disable") {
         await st.auth.totpDisable(cmd[3] ?? "", args.provider, site);
         jsonOut({ disabled: cmd[3], site });

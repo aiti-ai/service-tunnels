@@ -195,8 +195,8 @@ export class OAuth2ProxyProvider implements AuthProvider {
   loginRedirect(_basePath: string, scheme: "http" | "https"): string {
     const infoPath = this.setupConfig()?.infoPath;
     return infoPath
-      ? `${scheme}://$host${infoPath}?rd=$request_uri`
-      : `${scheme}://$host/oauth2/start?rd=$request_uri`;
+      ? `${scheme}://$http_host${infoPath}?rd=$request_uri`
+      : `${scheme}://$http_host/oauth2/start?rd=$request_uri`;
   }
 
   async prepare(): Promise<AuthProviderStatus> {
@@ -260,7 +260,7 @@ export class OAuth2ProxyProvider implements AuthProvider {
       validateOidcSecret(values.clientSecret ?? "", `${this.variant.id} clientSecret`);
       const cookieSecret = values.cookieSecret ?? randomSecret(32);
       validateOidcSecret(cookieSecret, `${this.variant.id} cookieSecret`);
-      const scope = this.variant.scope ?? values.scope ?? "";
+      const scope = values.scope ?? this.variant.scope ?? "";
       const lines = [
         `http_address = "127.0.0.1:${this.#port}"`,
         `upstreams = ["static://200"]`,
@@ -278,11 +278,19 @@ export class OAuth2ProxyProvider implements AuthProvider {
         // cookie_secure=true (default) would force https redirect URIs and the
         // Secure cookie attribute — breaking plain-http local testing.
         `cookie_secure = false`);
-      // 固定额外配置（变体定义）+ 表单 flag 字段（org → github_org 等；
-      // list:true 的键写 TOML 数组，值逗号分隔）。
-      for (const [k, v] of Object.entries(this.variant.flags ?? {})) lines.push(`${k} = "${t(v)}"`);
+      // 固定额外配置（变体定义,可覆盖）+ 表单 flag 字段（org → github_org 等；
+      // list:true 的键写 TOML 数组,值逗号分隔）。有表单字段覆盖的 flag
+      // （gitlabUrl→gitlab_url、azureTenant→azure_tenant）由这里统一写：
+      // 字段留空 → 回落变体常量；填写 → 用户值优先。无表单字段的 flag
+      // 同样支持显式 opts 覆盖。
+      for (const [k, v] of Object.entries(this.variant.flags ?? {})) {
+        const spec = this.variant.form.find((s) => s.flag === k);
+        const val = (spec ? values[spec.key] : values[k]) || v;
+        lines.push(`${k} = "${t(val)}"`);
+      }
       for (const spec of this.variant.form) {
         if (!spec.flag) continue; // issuerUrl/clientId/clientSecret 已单独处理
+        if (this.variant.flags && Object.keys(this.variant.flags).includes(spec.flag)) continue; // 已由 flags 循环写(含常量回落)
         const v = values[spec.key];
         if (!v) continue;
         lines.push(

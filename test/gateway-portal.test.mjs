@@ -84,6 +84,17 @@ test("nginx gateway + portal provider: 302→login→cookie→200 (real nginx)",
   assert.equal(unauth.status, 302);
   assert.match(String(unauth.headers["location"] || ""), /\/portal\/login/, "302 redirects to the login page");
 
+  // 1b) bore/ssh 等带随机端口的隧道:Host 带端口 → 302 必须保留端口
+  // (旧实现 $host 去端口 + 硬编码 https,浏览器跳到 https://host 直接报错)
+  const tunnelHost = await httpReq({
+    host: "127.0.0.1", port: gatewayPort,
+    path: "/dev", headers: { Host: "demo.local.test:34567" },
+  });
+  assert.equal(tunnelHost.status, 302);
+  const loc = String(tunnelHost.headers["location"] || "");
+  assert.match(loc, /\/portal\/login/, "302 redirects to the login page");
+  assert.ok(loc.includes("demo.local.test:34567"), "redirect preserves the tunnel port: " + loc);
+
   // 2) login through the nginx portal location → cookie
   const loginBody = new URLSearchParams({ username: "admin", password: "pw", next: "/" }).toString();
   const login = await httpReq({
@@ -114,4 +125,21 @@ test("nginx gateway + portal provider: 302→login→cookie→200 (real nginx)",
     await gateway.stop();
     await portal.stop();
   }
+});
+
+test("portal loginRedirect 跟随 scheme + $http_host 保留端口", async () => {
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const ctx = { configDir, cacheDir, resolveTool: async () => "", log: () => {} };
+  const portal = new PortalAuthProvider(ctx, { basePath: "/portal" });
+  // bore 裸 TCP 隧道 = http 协议:必须 http 重定向,否则浏览器跳 https 报错
+  assert.equal(
+    portal.loginRedirect("/portal", "http"),
+    "http://$http_host/portal/login?next=$request_uri",
+  );
+  // https 隧道(ngrok/cloudflared 等)保持 https
+  assert.equal(
+    portal.loginRedirect("/portal", "https"),
+    "https://$http_host/portal/login?next=$request_uri",
+  );
 });

@@ -206,7 +206,7 @@ export function generateHostNginx(
       # absolute https + PUBLIC host (no internal nginx port): nginx would
       # otherwise synthesize http://<host>:<listen-port>/... from the relative
       # path, which is unreachable behind the tunnel.
-      return 302 ${h.loginRedirect ?? (isOauth2 ? `https://$host/oauth2/start?rd=$request_uri` : `https://$host${basePath}/login?next=$request_uri`)};
+      return 302 ${h.loginRedirect ?? (isOauth2 ? `https://$http_host/oauth2/start?rd=$request_uri` : `https://$http_host${basePath}/login?next=$request_uri`)};
     }
 
 `;

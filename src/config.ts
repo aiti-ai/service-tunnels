@@ -41,6 +41,11 @@ export interface ServiceTunnelsConfigFile {
   /** Fallback for `allowToolDownload` when no explicit option is passed.
    *  Read-only fallback — the library/CLI never writes this file. */
   allowToolDownload?: boolean;
+  /** Fallback for auth-none exposes (`--auth none` / open proxy bindings /
+   *  raw tcp). false = unauthenticated exposes are banned on this host.
+   *  Read-only fallback — the library/CLI never writes this file; see
+   *  resolveAllowAuthNone for the precedence. */
+  allowAuthNone?: boolean;
   /** Auth 配置档（docs/oauth2-variants.md §3）：变体共享凭据 + 旧 oidc 字段。
    *  只读 fallback——表单/CLI --provider-set 的显式参数永远优先于它。 */
   auth?: {
@@ -108,6 +113,29 @@ export function writeConfigFile(configDir: string, file: ServiceTunnelsConfigFil
 
 const ENV_CONFIG = "SERVICE_TUNNELS_CONFIG";
 const ENV_CACHE = "SERVICE_TUNNELS_CACHE";
+const ENV_ALLOW_AUTH_NONE = "SERVICE_TUNNELS_ALLOW_AUTH_NONE";
+
+/**
+ * Resolve whether unauthenticated (auth none) exposes are allowed.
+ * Precedence: any FALSE at any layer wins (sticky ban) —
+ *   1. explicit per-call param (createServiceTunnels opts / expose opts / CLI)
+ *   2. env SERVICE_TUNNELS_ALLOW_AUTH_NONE ("0"/"false"/"off"/"no" → ban)
+ *   3. config file allow-auth-none
+ *   4. default true
+ * The ban is sticky by design (a security control): a per-call `true` can
+ * NEVER re-enable an operator ban set via env or config file; per-call
+ * `false` can still tighten a single call.
+ */
+export function resolveAllowAuthNone(configDir: string, explicit?: boolean): boolean {
+  // same env parse as SERVICE_TUNNELS_ALLOW_DOWNLOAD (0/false/off → ban)
+  const env = process.env[ENV_ALLOW_AUTH_NONE];
+  const envAllowed = env !== undefined
+    ? !(env === "0" || env.toLowerCase() === "false" || env.toLowerCase() === "off")
+    : true;
+  const cfgAllowed = readConfigFile(configDir).allowAuthNone ?? true;
+  if (explicit === false || !envAllowed || !cfgAllowed) return false;
+  return true;
+}
 
 export function defaultConfigDir(): string {
   if (process.platform === "win32") {

@@ -3,6 +3,9 @@ node_modules/
 dist/
 *.tgz
 
+# Playwright MCP 浏览器会话调试产物（页面快照/console 日志，含第三方会话数据）
+.playwright-mcp/
+
 # Authelia 用户数据导出（含 TOTP/WebAuthn 密钥等敏感凭据）禁止入库
 # 曾因 authelia.export.totp.yml 泄露真实 TOTP 密钥被提交（已 filter-repo 清除历史）
 authelia.export.*.yml

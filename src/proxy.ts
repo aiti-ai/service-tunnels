@@ -477,6 +477,7 @@ async function checkForwardAuthReq(
 
 function renderLoginRedirectReq(template: string, input: ServiceHostResolveInput): string {
   return template
+    .replaceAll("$http_host", input.host ?? "")
     .replaceAll("$host", input.host ?? "")
     .replaceAll("$request_uri", input.url ?? "/");
 }

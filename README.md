@@ -153,6 +153,7 @@ const st = createServiceTunnels({
   marker: "service-tunnels",              // 子进程环境标记
   // toolPaths: { ngrok: "/opt/ngrok" },   // 显式指定工具路径
   // preferMirrors: true,                  // 中国网络：镜像优先
+  // allowAuthNone: false,                 // 禁止无认证暴露（auth none）
 });
 
 const ports = st.discovery.getPorts();          // 发现服务端口（排除框架内部端口）
@@ -185,7 +186,7 @@ tools list | resolve <n> | download <n> | path <n>
 proxy start|stop|status [--port] [--suffix] [--base-path] [--password] [--foreground]  # 仅传输层管理
 tunnel list | add | start | stop | remove
 site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>] [--policy <p>] [--domain <d>] | remove <name>
-expose <port> [--mode tunnel|proxy|both] [--site <s>] [--tunnel <t>] [--proxy-port <p>] [--base-domain <d>] [--auth [auto|none|<provider>]] [--name <n>]
+expose <port> [--mode tunnel|proxy|both] [--site <s>] [--tunnel <t>] [--proxy-port <p>] [--base-domain <d>] [--auth [auto|none|<provider>]] [--name <n>] [--allow-auth-none <true|false>]
 auth provider list | register <host> | unregister <host>
 auth user list | add | set-password | remove [--site <s>] [--provider ...]   # 用户管理（按站点）
 auth totp enroll | disable | status <user> [--site <s>] [--provider ...]     # 2FA 管理
@@ -193,8 +194,27 @@ ui [--port <p>] [--no-browser]          # 网页管理界面（127.0.0.1，自�
 gateway start|stop|status
 status [--json]
 stop-all
-config path | show | get <key> | set <key> <value>   # base-domain / proxy-port / base-path / ...
+config path | show | get <key> | set <key> <value>   # base-domain / proxy-port / base-path / allow-auth-none / ...
 ```
+
+## 禁止无认证暴露（auth none 开关）
+
+默认允许 `--auth none`（无认证暴露）。安全要求严格的环境可一键禁止：
+任何一层设为 **false** 即生效（安全开关，单次调用的 true 无法覆盖）：
+
+1. **API 参数**：`createServiceTunnels({ allowAuthNone: false })`，或单次
+   `st.auth.expose(port, { allowAuthNone: false })`
+2. **环境变量**：`SERVICE_TUNNELS_ALLOW_AUTH_NONE=0|false|off`
+3. **配置文件**：`config set allow-auth-none false`
+
+禁止后：
+
+- `auth providers list` / `st.auth.providers()` 不再返回 `"none"`；UI 的认证
+  下拉框隐藏「none（无认证）」选项并提示必须认证；daemon `schemas` RPC 带
+  `authNoneAllowed` 字段供客户端判断。
+- 一切无认证暴露直接失败：`expose <port>`（不带 `--auth`）、`--auth none`、
+  `--mode proxy` 开放绑定、`protocol tcp`（tcp 本身无认证），错误信息提示
+  改用 `--auth auto/<provider>`。
 
 ## 设计文档
 

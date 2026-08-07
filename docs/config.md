@@ -27,6 +27,7 @@
     "ngrok": ["https://cdn.my-mirror.com/ngrok/{official}"]
   },
   "preferMirrors": false,                  // true=先镜像后官方（CN 网络）
+  "allowAuthNone": false,                  // false=禁止无认证暴露（--auth none/开放绑定/tcp 被拒；env SERVICE_TUNNELS_ALLOW_AUTH_NONE 同样生效）
   "auth": {
     "enabled": false,                      // 是否启用认证
     "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|oauth2-<变体>|插件名

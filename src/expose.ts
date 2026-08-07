@@ -1,7 +1,7 @@
 import { GatewayController, type GatewayAuthMode, detectProtocol } from "./gateway.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import { readSites, type SiteConfig } from "./sites.ts";
-import { readConfigFile, resolveBaseDomains } from "./config.ts";
+import { readConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
 import { RedisController } from "./redis.ts";
 import { validateBypassPaths } from "./auth-provider.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
@@ -96,6 +96,11 @@ export interface ExposeOptions {
   /** true = gateway auth (default provider), false = no auth, "auto" = pick
    *  the best available provider (authelia > portal > basic). */
   auth?: boolean | "auto" | string;
+  /** 禁止无认证暴露的安全开关：false = 本次 expose 的 auth 必须为真（auth
+   *  none/tcp/开放绑定被拒）。缺省按 createServiceTunnels opts > env
+   *  SERVICE_TUNNELS_ALLOW_AUTH_NONE > 配置档 allow-auth-none 解析（任一
+   *  层为 false 即禁止——安全开关不可被单次调用 true 覆盖）。 */
+  allowAuthNone?: boolean;
   provider?: string;
   tunnelName?: string;
   tunnelType?: string;
@@ -214,6 +219,20 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const mode = opts.mode ?? "tunnel";
   if (opts.protocol === "tcp" && mode !== "tunnel") {
     return { url: null, tunnel: "", protocol: "tcp", error: "protocol tcp requires --mode tunnel" };
+  }
+  // auth-none ban (security control): when the operator disallows
+  // unauthenticated exposure, reject ANY expose whose effective auth is
+  // "none" — bare expose / --auth none / open proxy bindings / raw tcp (tcp
+  // never carries auth). Checked BEFORE any infra/tunnel starts.
+  const allowAuthNone = resolveAllowAuthNone(ctx.configDir, opts.allowAuthNone);
+  const authNone = opts.auth === false || opts.auth === undefined || opts.auth === "none";
+  if (authNone && !allowAuthNone) {
+    return {
+      url: null,
+      tunnel: "",
+      mode,
+      error: 'auth "none" is banned on this host (allow-auth-none=false): every expose must use an auth provider — pass --auth auto/<provider> (or re-enable via SERVICE_TUNNELS_ALLOW_AUTH_NONE / config allow-auth-none)',
+    };
   }
   // Unified site resolution (P1): explicit --site > default. Resolved ONCE so
   // the proxy and tunnel branches share the SAME site instance (one provider
@@ -626,11 +645,14 @@ async function exposeTunnel(
     // provider-specific login redirect target —— provider 自描述（loginRedirect
     // 方法），缺省 portal 风格（插件等未实现时兜底）。
     const o2Setup = provider.setupConfig?.();
-    // 隧道边缘 TLS 终结 → 重定向用 https；provider 方法自行决定路径
-    const loginRedirect =
-      provider.loginRedirect?.(providerBasePath, "https")
-      ?? `https://$host${providerBasePath}/login?next=$request_uri`;
+    // 协议跟随转发协议：https 隧道（ngrok/cloudflared 等）边缘 TLS 终结；
+    // bore/ssh 等裸 TCP 隧道是 http。登录重定向必须用公网协议，否则浏览器
+    // 跳到错误 scheme 直接报错。
     const scheme = protocol === "https" ? "https" : "http";
+    // $http_host 保留端口（bore/ssh 等带随机端口的隧道；无端口时与 $host 等价）
+    const loginRedirect =
+      provider.loginRedirect?.(providerBasePath, scheme)
+      ?? `${scheme}://$http_host${providerBasePath}/login?next=$request_uri`;
     try {
       await gateway.registerHost(publicHost, port, {
         authPort,

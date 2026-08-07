@@ -210,7 +210,7 @@ export class AutheliaProvider implements AuthProvider {
 
   /** 未认证跳转：authelia 门户根（rd 参数），不是 /login（authelia 无此入口）。 */
   loginRedirect(basePath: string, scheme: "http" | "https"): string {
-    return `${scheme}://$host${basePath}/?rd=${scheme}://$host$request_uri`;
+    return `${scheme}://$http_host${basePath}/?rd=${scheme}://$http_host$request_uri`;
   }
 
   /** 默认 basePath：authelia server.address 只允许 [a-z0-9]（无横线）。 */
