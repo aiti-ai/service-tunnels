@@ -557,6 +557,29 @@ export function oauth2VariantParamSchemas(configDir: string): Record<string, OAu
         description: "固定配置（端点，可覆盖）",
       });
     }
+    // 原始 oauth2-proxy 参数补齐：clientId/clientSecret 已在 def.form；
+    // cookieSecret（会话加密密钥）所有变体都放——可选，留空自动生成，
+    // 配置档已携带时只标记 secretSet 不回显明文。issuerUrl 仅在需要它的
+    // 变体（keycloak/okta/generic，def.form 含 issuerUrl）出现；内置端点
+    // 变体（github/google/gitlab/microsoft）由 oauth2-proxy 自带端点，
+    // issuerUrl 不适用。
+    const carriedCookie = config.values.cookieSecret;
+    specs.push(
+      carriedCookie
+        ? {
+            key: "cookieSecret",
+            label: "Cookie Secret",
+            type: "password",
+            secretSet: true,
+            placeholder: "已由配置档提供；留空使用配置档值，填写则覆盖",
+          }
+        : {
+            key: "cookieSecret",
+            label: "Cookie Secret",
+            type: "password",
+            description: "会话加密密钥；留空自动生成（跨实例登录态失效时需固定）",
+          },
+    );
     specs.push(...def.form.map((spec): OAuth2VariantSchema => {
       const cfgKey = def.creds[spec.key];
       const carried = cfgKey ? config.values[cfgKey] : undefined;

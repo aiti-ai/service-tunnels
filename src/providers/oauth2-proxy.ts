@@ -242,7 +242,9 @@ export class OAuth2ProxyProvider implements AuthProvider {
           );
         }
         if (!this.variant.lines.some((l) => l.key === "cookie_secret")) {
-          lines.push(`cookie_secret = "${randomSecret(32)}"`);
+          const cookie = values.cookieSecret ?? randomSecret(32);
+          validateOidcSecret(cookie, `${this.variant.id} cookieSecret`);
+          lines.push(`cookie_secret = "${t(cookie)}"`);
         }
         if (!this.variant.lines.some((l) => l.key === "email_domains")) lines.push(`email_domains = ["*"]`);
         if (!this.variant.lines.some((l) => l.key === "set_xauthrequest")) lines.push(`set_xauthrequest = true`);
@@ -308,13 +310,21 @@ export class OAuth2ProxyProvider implements AuthProvider {
     // (a newline in clientSecret would inject TOML directives — same class as
     // the frpc INI injection). Values are additionally TOML-escaped below.
     validateOidcOptions(oidc);
+    // provider 名用户可写（默认通用 OIDC）——只允许字母/数字/连字符
+    // （oauth2-proxy provider 名的合法字符集），防 TOML 注入 + 非法值 fail-fast。
+    const provider = (this.#opts.provider as string | undefined) ?? "oidc";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(provider)) {
+      throw new Error(
+        `oauth2-proxy: invalid provider name ${JSON.stringify(provider)} (letters/digits/hyphens only)`,
+      );
+    }
     const cookieSecret = oidc.cookieSecret ?? randomSecret(32);
     writeFileSync(
       join(dir, "oauth2-proxy.conf"),
       [
         `http_address = "127.0.0.1:${this.#port}"`,
         `upstreams = ["static://200"]`,
-        `provider = "oidc"`,
+        `provider = "${t(provider)}"`,
         `oidc_issuer_url = "${t(oidc.issuerUrl)}"`,
         `client_id = "${t(oidc.clientId)}"`,
         `client_secret = "${t(oidc.clientSecret)}"`,

@@ -276,9 +276,9 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
     {
       key: "provider",
       label: "Provider",
-      value: "oidc",
-      fixed: true,
-      description: "oauth2-proxy provider 名（原始 oauth2-proxy = 通用 OIDC；其他 IdP 选对应变体）",
+      default: "oidc",
+      placeholder: "oidc",
+      description: "oauth2-proxy provider 名：oidc（通用 OIDC，默认）/ github / google / gitlab / azure / keycloak-oidc / facebook 等；常用 IdP 可直接选上方预设变体（自动带 scope/端点预设）",
     },
     {
       key: "oidc.issuerUrl",
