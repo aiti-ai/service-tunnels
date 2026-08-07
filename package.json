@@ -31,7 +31,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
     "prepack": "npm run build",
-    "test": "node --test --test-force-exit \"test/**/*.mjs\"",
+    "test": "node --test --test-force-exit \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

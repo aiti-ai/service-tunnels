@@ -9,3 +9,10 @@ dist/
 # Authelia 用户数据导出（含 TOTP/WebAuthn 密钥等敏感凭据）禁止入库
 # 曾因 authelia.export.totp.yml 泄露真实 TOTP 密钥被提交（已 filter-repo 清除历史）
 authelia.export.*.yml
+
+# test/perf 基准构建产物（不入库）
+test/perf/go-proxy-bench/benchgo
+test/perf/rust-proxy-bench/target/
+test/perf/cross-client/goclient
+test/perf/cross-client/goproxy-server
+test/perf/cross-client/gobare-server
