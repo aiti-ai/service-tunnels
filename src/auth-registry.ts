@@ -249,6 +249,13 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
   ],
   "oauth2-proxy": [
     {
+      key: "provider",
+      label: "Provider",
+      value: "oidc",
+      fixed: true,
+      description: "oauth2-proxy provider 名（原始 oauth2-proxy = 通用 OIDC；其他 IdP 选对应变体）",
+    },
+    {
       key: "oidc.issuerUrl",
       label: "OIDC Issuer URL",
       required: true,

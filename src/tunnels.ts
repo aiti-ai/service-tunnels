@@ -674,6 +674,10 @@ export interface ParamSpec {
   descriptionKey?: string;
   placeholderKey?: string;
   linkTitleKey?: string;
+  /** 预定义/固定参数（provider 名、端点等）：表单只读展示，不可编辑。 */
+  fixed?: boolean;
+  /** 固定参数的当前值（fixed 时展示；普通参数仍用 default 预填）。 */
+  value?: string;
 }
 
 /** Tunnel-type parameter schemas (data-driven forms; the only place a tunnel
