@@ -30,7 +30,7 @@
   "allowAuthNone": false,                  // false=禁止无认证暴露（--auth none/开放绑定/tcp 被拒；env SERVICE_TUNNELS_ALLOW_AUTH_NONE 同样生效）
   "auth": {
     "enabled": false,                      // 是否启用认证
-    "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|oauth2-<变体>|插件名
+    "provider": "authelia",                // 默认 provider：authelia|oauth2-proxy|ngrok-edge-oidc|basic|token|oauth2-<变体>|插件名
     "nginxPort": 4180,                     // nginx 网关端口（本地型 provider）
     // —— authelia provider 专用 ——
     "autheliaPort": 9091,                  // Authelia 监听端口（随机端口时留 0）

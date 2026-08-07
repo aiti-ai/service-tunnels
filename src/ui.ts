@@ -16,9 +16,10 @@ import { randomBytes, timingSafeEqual } from "crypto";
 import { platform } from "os";
 import { exec } from "child_process";
 import type { ServiceTunnels } from "./index.ts";
-import type { AuthUser } from "./auth-provider.ts";
+import type { AuthUser, AuthToken } from "./auth-provider.ts";
 import { translate, resolveLang, CATALOG, type Lang } from "./i18n.ts";
 import { validateTunnelConfig } from "./validation.ts";
+import { parseTokenExpiry } from "./providers/token.ts";
 
 export interface UiServerOptions {
   /** Port to listen on (default 4181). */
@@ -89,6 +90,7 @@ const TEMPLATES = {
         <a href="/" class="${content.includes("dashboard") ? "active" : ""}">${L("ui.nav.dashboard")}</a>
         <a href="/tunnels" class="${content.includes("tunnels") ? "active" : ""}">${L("ui.nav.tunnels")}</a>
         <a href="/users" class="${content.includes("users") ? "active" : ""}">${L("ui.nav.users")}</a>
+        <a href="/tokens" class="${content.includes("tokens") ? "active" : ""}">${L("ui.nav.tokens")}</a>
         <a href="/sites" class="${content.includes("sites") ? "active" : ""}">${L("ui.nav.sites")}</a>
         <a href="/config" class="${content.includes("config") ? "active" : ""}">${L("ui.nav.config")}</a>
         <a href="/expose" class="${content.includes("expose") ? "active" : ""}">${L("ui.nav.expose")}</a>
@@ -182,12 +184,32 @@ const TEMPLATES = {
       if (!password) return;
       httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
     }
+    // —— Bearer tokens（tunnel API 请求）——
+    function addToken(site) {
+      const description = prompt(tr('ui.promptTokenDescription')) || '';
+      const expires = prompt(tr('ui.promptTokenExpiry')) || 'never';
+      const body = { description, expiresAt: expires, ...(site ? { site } : {}) };
+      httpPost('/api/tokens/create', body).then(r => r.json()).then(d => {
+        if (d.error) { alert('❌ ' + d.error); return; }
+        const tok = d.tokens && d.tokens[0] && d.tokens[0].token ? d.tokens[0].token.token : '';
+        // 原始 token 只在创建时出现一次 —— prompt 内容可选中/复制
+        prompt(tr('ui.tokenCreatedTitle'), tok);
+        location.reload();
+      });
+    }
+    function revokeToken(id, site) {
+      if (!confirm(tr('ui.confirmRevokeToken', { id: id.slice(0, 8) + '…' }))) return;
+      const url = site
+        ? '/sites/' + encodeURIComponent(site) + '/tokens/' + encodeURIComponent(id) + '/revoke'
+        : '/tokens/' + encodeURIComponent(id) + '/revoke';
+      httpPost(url).then(() => location.reload());
+    }
   </script>
 </body>
 </html>`;
   },
 
-  dashboard: (lang: Lang, daemonRunning: boolean, tunnelCount: number, userCount: number) => {
+  dashboard: (lang: Lang, daemonRunning: boolean, tunnelCount: number, userCount: number, tokenCount: number) => {
     const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
     return `
     <div class="card">
@@ -195,6 +217,7 @@ const TEMPLATES = {
       <p>${L("ui.dash.daemon")} <span class="status ${daemonRunning ? "running" : "stopped"}">${daemonRunning ? L("ui.status.running") : L("ui.status.stopped")}</span></p>
       <p>${L("ui.dash.activeTunnels", { n: String(tunnelCount) })}</p>
       <p>${L("ui.dash.registeredUsers", { n: String(userCount) })}</p>
+      <p>${L("ui.dash.registeredTokens", { n: String(tokenCount) })}</p>
     </div>
     <div class="card">
       <h2>${L("ui.dash.quickActions")}</h2>
@@ -319,6 +342,7 @@ const TEMPLATES = {
               <td>${urls.length ? urls.join("<br>") : "-"}</td>
               <td>
                 <a class="btn btn-sm btn-primary" href="/sites/${s.name}/users">${L("ui.btn.users")}</a>
+                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/tokens">${L("ui.btn.tokens")}</a>
                 ${s.name !== "default" ? `<button class="btn btn-sm btn-danger" onclick="removeSite('${s.name}')">${L("ui.btn.delete")}</button>` : ""}
               </td>
             </tr>`;
@@ -375,6 +399,48 @@ const TEMPLATES = {
       </div>
     </div>
   `;
+  },
+
+  /** Bearer token 管理（默认站点）。site 参数 = 命名站点时渲染回链。 */
+  tokens: (lang: Lang, tokens: AuthToken[], site?: string) => {
+    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
+    const fmt = (t: number) => new Date(t).toLocaleString(lang.startsWith("zh") ? "zh-CN" : "en-US");
+    // description 是自由文本（token 说明）——服务端模板必须转义防 XSS
+    const esc = (v: string) => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    const siteArg = site ? `,'${esc(site)}'` : "";
+    return `
+    <div class="card">
+      <h2>${site ? L("ui.siteTokens.title", { name: esc(site) }) : L("ui.tokens.list")}</h2>
+      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.tokens.hint")}</p>
+      <table class="table">
+        <thead><tr>
+          <th>${L("ui.th.id")}</th>
+          <th>${L("ui.th.description")}</th>
+          <th>${L("ui.th.created")}</th>
+          <th>${L("ui.th.expires")}</th>
+          <th>${L("ui.th.actions")}</th>
+        </tr></thead>
+        <tbody>
+          ${tokens.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.tokens")}</td></tr>` : ""}
+          ${tokens.map((t: AuthToken) => `<tr>
+            <td><code title="${t.id}">${t.id.slice(0, 8)}…</code></td>
+            <td>${t.description ? esc(t.description) : "-"}</td>
+            <td>${fmt(t.createdAt)}</td>
+            <td>${t.expiresAt ? fmt(t.expiresAt) : `<span class="status stopped">${L("ui.status.never")}</span>`}</td>
+            <td><button class="btn btn-sm btn-danger" onclick="revokeToken('${t.id}'${siteArg})">${L("ui.btn.revoke")}</button></td>
+          </tr>`).join("")}
+        </tbody>
+      </table>
+      <div style="margin-top:15px;">
+        <button class="btn btn-primary" onclick="addToken(${site ? `'${esc(site)}'` : ""})">${L("ui.btn.addToken")}</button>
+        ${site ? `<a href="/sites" class="btn" style="background:#eee;color:#333;">${L("ui.btn.back")}</a>` : ""}
+      </div>
+    </div>
+  `;
+  },
+
+  siteTokens: (lang: Lang, site: any, tokens: AuthToken[]) => {
+    return TEMPLATES.tokens(lang, tokens, site.name);
   },
 
   expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[], authNoneAllowed: boolean) => {
@@ -689,7 +755,9 @@ function createHandler(ctx: UiContext): RequestListener {
         const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
         const users: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
         const userCount = users.reduce((n, x) => n + x.users.length, 0);
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount), ctx.csrfToken);
+        const tokenGroups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens();
+        const tokenCount = tokenGroups.reduce((n, x) => n + x.tokens.length, 0);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount, tokenCount), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -727,6 +795,16 @@ function createHandler(ctx: UiContext): RequestListener {
           }
         }
         const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.users"), TEMPLATES.users(lang, users, totpStatus), ctx.csrfToken);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
+
+      // Bearer tokens（默认站点）
+      if (path === "/tokens") {
+        const groups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens();
+        const tokens: AuthToken[] = groups.flatMap((g) => g.tokens);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.tokens"), TEMPLATES.tokens(lang, tokens), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
         return;
@@ -802,6 +880,33 @@ function createHandler(ctx: UiContext): RequestListener {
         const html = TEMPLATES.layout(lang, translate(lang, "ui.siteUsers.title", { name: site.name }), TEMPLATES.siteUsers(lang, site, users), ctx.csrfToken);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(html);
+        return;
+      }
+
+      // per-site tokens: page + revoke
+      const siteTokensPage = /^\/sites\/([^/]+)\/tokens$/.exec(path);
+      if (siteTokensPage && req.method === "GET") {
+        const name = decodeURIComponent(siteTokensPage[1]!);
+        const site = ctx.st.sites.get(name);
+        if (!site) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("site not found");
+          return;
+        }
+        const groups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens(undefined, name);
+        const tokens: AuthToken[] = groups.flatMap((g) => g.tokens);
+        const html = TEMPLATES.layout(lang, translate(lang, "ui.siteTokens.title", { name: site.name }), TEMPLATES.siteTokens(lang, site, tokens), ctx.csrfToken);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
+      const siteTokenRevoke = /^\/sites\/([^/]+)\/tokens\/([^/]+)\/revoke$/.exec(path);
+      if (siteTokenRevoke && req.method === "POST") {
+        const site = decodeURIComponent(siteTokenRevoke[1]!);
+        const id = decodeURIComponent(siteTokenRevoke[2]!);
+        await ctx.st.auth.revokeToken(id, "token", site);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ revoked: id }));
         return;
       }
       const siteUsersAdd = /^\/sites\/([^/]+)\/users\/add$/.exec(path);
@@ -934,6 +1039,38 @@ function createHandler(ctx: UiContext): RequestListener {
         await ctx.st.auth.addUser(body.name, body.password);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ added: body.name }));
+        return;
+      }
+
+      // API: Bearer tokens
+      if (path === "/api/tokens/create" && req.method === "POST") {
+        const body = await new Promise<any>((resolve) => {
+          let b = "";
+          req.on("data", (chunk) => b += chunk);
+          req.on("end", () => resolve(JSON.parse(b)));
+        });
+        try {
+          const expiresAt = parseTokenExpiry(body?.expiresAt as string | undefined);
+          const tokens = await ctx.st.auth.createToken({
+            description: body?.description as string | undefined,
+            expiresAt,
+            provider: body?.provider ?? "token",
+            site: (body?.site as string | undefined) ?? "default",
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ tokens }));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
+
+      if (/^\/tokens\/[^/]+\/revoke$/.test(path) && req.method === "POST") {
+        const id = path.split("/")[2] ?? "";
+        await ctx.st.auth.revokeToken(id, "token", "default");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ revoked: id }));
         return;
       }
 

@@ -140,8 +140,10 @@ export interface AuthProvider {
 
   /** 网关/门禁认证模式（nginx authMode + node proxy 探针协议）。缺省
    *  "forward-auth"（探针式）；"oauth2-proxy"（/oauth2/ 协议）；"basic"
-   *  （nginx auth_basic，无 basePath、无登录页）。 */
-  readonly gatewayMode?: "forward-auth" | "oauth2-proxy" | "basic";
+   *  （nginx auth_basic，无 basePath、无登录页）；"token"（Bearer token，
+   *  无 basePath、无登录页——决策 API 进程内校验，nginx 经 auth_request
+   *  探针）。 */
+  readonly gatewayMode?: "forward-auth" | "oauth2-proxy" | "basic" | "token";
   /** 认证探针路径（缺省 `${basePath}/api/authz/auth-request`）。oauth2-proxy
    *  用固定 `/oauth2/auth`。 */
   readonly authzPath?: string;
@@ -186,6 +188,40 @@ export interface UserManager {
 
 export function isUserManager(p: AuthProvider): p is AuthProvider & UserManager {
   return typeof (p as unknown as UserManager).listUsers === "function";
+}
+
+/**
+ * Optional capability: provider keeps a LOCAL token database (Bearer tokens
+ * for tunnel API 请求). Detect via `typeof provider.listTokens === "function"`
+ * — providers without it simply don't appear in token-management listings.
+ * 按 site 管理：token 存于该 provider 实例（= site）的存储目录，站点间互不
+ * 可见（与 user 一致）。
+ */
+export interface AuthToken {
+  /** 管理用 id（撤销/展示）；非 token 本体。 */
+  id: string;
+  /** 说明（用途备注，创建时填写）。 */
+  description: string;
+  /** 创建时间（epoch ms）。 */
+  createdAt: number;
+  /** 有效期截止（epoch ms）；null = 永不过期。 */
+  expiresAt: number | null;
+  /** 仅新建时返回一次的真实 token（st_ 前缀随机串）；列表/查询永不返回。 */
+  token?: string;
+}
+
+export interface TokenManager {
+  /** Registered tokens under THIS provider (no secrets). */
+  listTokens(): Promise<AuthToken[]>;
+  /** Create a token; returns the raw secret ONCE (this.token).
+   *  expiresAt: epoch ms; null = never expires. */
+  createToken(opts?: { description?: string; expiresAt?: number | null }): Promise<AuthToken>;
+  /** Remove a token by id. */
+  revokeToken(id: string): Promise<void>;
+}
+
+export function isTokenManager(p: AuthProvider): p is AuthProvider & TokenManager {
+  return typeof (p as unknown as TokenManager).listTokens === "function";
 }
 
 export const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";

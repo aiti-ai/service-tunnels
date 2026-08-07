@@ -1,10 +1,11 @@
 import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { pathToFileURL } from "url";
-import type { AuthProvider, AuthProviderFactory, ProviderContext, UserManager } from "./auth-provider.ts";
-import { isUserManager } from "./auth-provider.ts";
+import type { AuthProvider, AuthProviderFactory, ProviderContext, UserManager, TokenManager } from "./auth-provider.ts";
+import { isUserManager, isTokenManager } from "./auth-provider.ts";
 import { AutheliaProvider, type AutheliaProviderOptions } from "./authelia.ts";
 import { BasicAuthProvider, type BasicAuthProviderOptions } from "./providers/basic.ts";
+import { TokenAuthProvider, type TokenAuthProviderOptions } from "./providers/token.ts";
 import { OAuth2ProxyProvider, type OAuth2ProxyProviderOptions } from "./providers/oauth2-proxy.ts";
 import { PortalAuthProvider, type PortalAuthProviderOptions } from "./providers/portal.ts";
 import {
@@ -33,6 +34,7 @@ import { withSchemaI18nKeys } from "./i18n.ts";
 export type AnyProviderOptions =
   | AutheliaProviderOptions
   | BasicAuthProviderOptions
+  | TokenAuthProviderOptions
   | OAuth2ProxyProviderOptions
   | PortalAuthProviderOptions
   | Record<string, unknown>;
@@ -50,6 +52,7 @@ export class AuthRegistry {
     // built-ins
     this.#factories.set("authelia", (c, o) => new AutheliaProvider(c, (o ?? {}) as AutheliaProviderOptions));
     this.#factories.set("basic", (c, o) => new BasicAuthProvider(c, (o ?? {}) as BasicAuthProviderOptions));
+    this.#factories.set("token", (c, o) => new TokenAuthProvider(c, (o ?? {}) as TokenAuthProviderOptions));
     this.#factories.set("oauth2-proxy", (c, o) => new OAuth2ProxyProvider(c, (o ?? {}) as OAuth2ProxyProviderOptions));
     this.#factories.set("portal", (c, o) => new PortalAuthProvider(c, (o ?? {}) as PortalAuthProviderOptions));
     // oauth2 变体（声明式注册，docs/oauth2-variants.md）：内置表 + 环境变量
@@ -119,6 +122,27 @@ export class AuthRegistry {
     const cached = this.#instances.get(this.#key(type, site));
     const p = cached ?? this.#probeFactory(type, site);
     if (!isUserManager(p)) throw new Error(`provider ${type} does not support user management`);
+    return p;
+  }
+
+  /** Provider types that support local token management (TokenManager).
+   *  Probes WITHOUT caching (same rationale as userManagers). */
+  tokenManagers(): string[] {
+    return [...this.#factories.keys()].filter((t) => {
+      try {
+        return isTokenManager(this.#probeFactory(t));
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** Resolve a token-manager instance by type + site (errors for non-token
+   *  providers). Same cached/probe semantics as userManager(). */
+  tokenManager(type: string, site = "default"): TokenManager {
+    const cached = this.#instances.get(this.#key(type, site));
+    const p = cached ?? this.#probeFactory(type, site);
+    if (!isTokenManager(p)) throw new Error(`provider ${type} does not support token management`);
     return p;
   }
 
@@ -239,6 +263,7 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
     },
   ],
   basic: [],
+  token: [],
   portal: [
     {
       key: "basePath",

@@ -25,6 +25,7 @@ authzPath / providerPaths / setupConfig 等字段）。加一个新 provider =
 | `"forward-auth"`（缺省） | 探针式：nginx `auth_request → {basePath}/api/authz/auth-request`（authelia/portal 协议），2xx 放行、401/302 重定向登录 | portal、authelia | 最简单；Node proxy 侧同协议探针 |
 | `"oauth2-proxy"` | `/oauth2/` 协议：探 `/oauth2/auth`（202 放行）、登录/回调直达侧车 | oauth2-proxy | 自带 OIDC 舞步、回调白名单、域名验证文件 |
 | `"basic"` | nginx `auth_basic`（htpasswd） | basic | 无 basePath、无登录页、无探针 |
+| `"token"` | Bearer token：nginx `auth_request → /token-authz/auth`（探针服务校验 `Authorization: Bearer`）+ 决策 API 进程内校验 | token | 无 basePath、无登录页；适合 tunnel API 请求（机器客户端） |
 
 ## 2. 接口总览
 
@@ -75,8 +76,8 @@ interface AuthProviderCapabilities {
  *  缺省 = portal 风格 `${basePath}/login?next=$request_uri`。 */
 loginRedirect?(basePath: string, scheme: "http" | "https"): string;
 
-/** 网关/门禁模式：forward-auth（缺省）| oauth2-proxy | basic。 */
-readonly gatewayMode?: "forward-auth" | "oauth2-proxy" | "basic";
+/** 网关/门禁模式：forward-auth（缺省）| oauth2-proxy | basic | token。 */
+readonly gatewayMode?: "forward-auth" | "oauth2-proxy" | "basic" | "token";
 /** 认证探针路径（缺省 {basePath}/api/authz/auth-request；oauth2-proxy → /oauth2/auth）。 */
 readonly authzPath?: string;
 /** 直达 provider 的路径前缀（oauth2-proxy: ["/oauth2"]——登录/回调不经探针）。 */
@@ -93,10 +94,10 @@ setupConfig?(): ProviderSetup | undefined;
 
 | 字段 | 谁读 | 用于 |
 |---|---|---|
-| `gatewayMode` | expose（nginx authMode）、proxy-manager（basic 分支） | 选网关模板 / 门禁类型 |
+| `gatewayMode` | expose（nginx authMode）、proxy-manager（basic/token 分支） | 选网关模板 / 门禁类型 |
 | `loginRedirect` | expose（tunnel）、proxy-manager（proxy） | 未认证 302 目标（**单一真源**，两份拷贝已消除） |
 | `authzPath` / `providerPaths` | proxy-manager（fw 构造） | 探针路径 / 直达路径 |
-| `defaultBasePath` | expose（basePath 解析） | 默认命名（portal 随机趣味名 / authelia alnum / basic 空） |
+| `defaultBasePath` | expose（basePath 解析） | 默认命名（portal 随机趣味名 / authelia alnum / basic/token 空） |
 | `loginUrl` | expose（结果展示） | 登录页地址 |
 | `setupConfig` | expose + proxy-manager + gateway | 域名验证文件 + 设置页 |
 
@@ -131,6 +132,29 @@ interface UserManager {
 }
 // 检测：typeof provider.listUsers === "function" → 出现在用户管理列表
 ```
+
+### 2.7 可选 TokenManager（本地 token 库——tunnel API 请求）
+
+```ts
+interface AuthToken {
+  id: string;                 // 管理用 id（撤销/展示）
+  description: string;        // 用途说明
+  createdAt: number;          // epoch ms
+  expiresAt: number | null;   // epoch ms；null = 永不过期
+  token?: string;             // 仅 createToken 返回一次（原始秘密）
+}
+interface TokenManager {
+  listTokens(): Promise<AuthToken[]>;                     // 无秘密
+  createToken(opts?: { description?: string; expiresAt?: number | null }): Promise<AuthToken>;
+  revokeToken(id: string): Promise<void>;
+}
+// 检测：typeof provider.listTokens === "function" → 出现在 token 管理列表
+```
+
+内置 `token` provider：Bearer token 认证（gatewayMode `"token"`），请求带
+`Authorization: Bearer <token>` 即放行，无登录页/无 Cookie——适合 tunnel API
+请求（CI、脚本、机器客户端）。token 随机生成（`st_` + 192-bit），库内只存
+SHA-256 哈希，创建时唯一一次返回原文；按 site 隔离（与 user 一致）。
 
 ## 3. 最小实现示例
 
@@ -229,7 +253,7 @@ provider 用 `ctx.resolveTool(name)` 解析（PATH > 缓存 > 自动下载）：
 | provider | Windows | 说明 |
 |---|---|---|
 | authelia | ✗（无官方二进制） | 自动回退 portal；WSL2/Docker 可用 |
-| portal / basic / oauth2-proxy | ✓ | Node 实现或跨平台二进制 |
+| portal / basic / token / oauth2-proxy | ✓ | Node 实现或跨平台二进制 |
 
 ## 8. 测试建议
 

@@ -49,7 +49,7 @@ import { localizeSchemas, localizeSpecs, resolveLang } from "./i18n.ts";
 import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
 import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
-import type { AuthUser } from "./auth-provider.ts";
+import type { AuthUser, AuthToken } from "./auth-provider.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
@@ -79,7 +79,7 @@ export {
   CATALOG,
 } from "./i18n.ts";
 export type { Lang, Resources } from "./i18n.ts";
-export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities } from "./auth-provider.ts";
+export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities, AuthUser, AuthToken, UserManager, TokenManager } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
 export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
 export { ProxyManager } from "./proxy-manager.ts";
@@ -305,6 +305,28 @@ export interface ServiceTunnels {
     totpStatus(name: string, provider?: string, site?: string): Promise<{ enrolled: boolean; pending: boolean }>;
     /** Activate a pending TOTP enrollment with the user's first code. */
     totpActivate(name: string, code: string, provider?: string, site?: string): Promise<{ activated: boolean }>;
+    /** Provider types with local token stores (e.g. ["token"]). */
+    tokenManagers(): string[];
+    /**
+     * Provider-local tokens (no secrets). `provider` = "all" (default) →
+     * [{provider, tokens}] for every provider supporting token management.
+     * `site` scopes to an auth realm (default "default") — token 与 user
+     * 一样按 site 隔离。
+     */
+    tokens(provider?: string, site?: string): Promise<{ provider: string; tokens: AuthToken[] }[]>;
+    /**
+     * Create a token (description + optional expiry). The raw secret is
+     * returned ONCE (token.token) — list/revoke never show it again.
+     */
+    createToken(opts?: {
+      description?: string;
+      /** epoch ms；null = 永不过期。 */
+      expiresAt?: number | null;
+      provider?: string;
+      site?: string;
+    }): Promise<{ provider: string; token: AuthToken }[]>;
+    /** Revoke a token by id across `provider` (default "all"). */
+    revokeToken(id: string, provider?: string | string[], site?: string): Promise<string[]>;
   };
   /** Auth realms (sites): independent provider instances + user dbs. */
   sites: {
@@ -336,12 +358,15 @@ export interface ServiceTunnels {
 function resolveUserTargets(
   registry: AuthRegistry,
   provider?: string | string[],
+  /** 能力探测器：缺省 = 用户管理；传 tokenManagers 即按 token 能力解析。 */
+  capable: (r: AuthRegistry) => string[] = (r) => r.userManagers(),
+  what = "user management",
 ): string[] {
-  const all = registry.userManagers();
+  const all = capable(registry);
   if (!provider || provider === "all") return all;
   const targets = Array.isArray(provider) ? provider : [provider];
   for (const t of targets) {
-    if (!all.includes(t)) throw new Error(`provider ${t} does not support user management (available: ${all.join(", ")})`);
+    if (!all.includes(t)) throw new Error(`provider ${t} does not support ${what} (available: ${all.join(", ")})`);
   }
   return targets;
 }
@@ -651,6 +676,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           return r;
         },
         userManagers: () => registry.userManagers(),
+        tokenManagers: () => registry.tokenManagers(),
         totpProviders: () => registry.totpProviders(),
         totpEnroll: async (name: string, provider?: string, site?: string, label?: string) => {
           const mgr = registry.userManager(provider ?? "portal", site) as unknown as {
@@ -684,7 +710,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           return mgr.totpActivate(name, code);
         },
         providerOrder: () => {
-          const KNOWN = ["authelia", "portal", "basic", "oauth2-proxy"];
+          const KNOWN = ["authelia", "portal", "basic", "token", "oauth2-proxy"];
           const list = registry.list();
           const metas = authProviderMetas(dirs.configDir);
           // oauth2 变体：已配置（凭据已由配置档携带）优先，未配置按注册顺序
@@ -695,7 +721,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           return [...KNOWN.filter((p) => list.includes(p)), ...variants, ...rest];
         },
         defaultProvider: () => {
-          const order = ["authelia", "portal", "basic", "oauth2-proxy"].filter((p) => registry.list().includes(p));
+          const order = ["authelia", "portal", "basic", "token", "oauth2-proxy"].filter((p) => registry.list().includes(p));
           for (const p of order) {
             // authelia ships no Windows binary and needs the tool present
             if (p === "authelia" && (platform() === "win32" || !resolveToolPath("authelia", toolOpts))) continue;
@@ -722,6 +748,24 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         removeUser: async (name: string, provider?: string | string[], site?: string) => {
           const targets = resolveUserTargets(registry, provider);
           for (const t of targets) await registry.userManager(t, site).removeUser(name);
+          return targets;
+        },
+        // —— token 管理（与 user 同构：按 site 隔离，见 TokenManager）——
+        tokens: async (provider = "all", site = "default") => {
+          const targets = resolveUserTargets(registry, provider, (r) => r.tokenManagers(), "token management");
+          const out: { provider: string; tokens: AuthToken[] }[] = [];
+          for (const t of targets) out.push({ provider: t, tokens: await registry.tokenManager(t, site).listTokens() });
+          return out;
+        },
+        createToken: async (opts: { description?: string; expiresAt?: number | null; provider?: string; site?: string } = {}) => {
+          const targets = resolveUserTargets(registry, opts.provider, (r) => r.tokenManagers(), "token management");
+          const out: { provider: string; token: AuthToken }[] = [];
+          for (const t of targets) out.push({ provider: t, token: await registry.tokenManager(t, opts.site ?? "default").createToken({ description: opts.description, expiresAt: opts.expiresAt }) });
+          return out;
+        },
+        revokeToken: async (id: string, provider?: string | string[], site?: string) => {
+          const targets = resolveUserTargets(registry, provider, (r) => r.tokenManagers(), "token management");
+          for (const t of targets) await registry.tokenManager(t, site).revokeToken(id);
           return targets;
         },
       };

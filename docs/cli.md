@@ -200,6 +200,22 @@ service-tunnels auth totp disable alice           # 禁用 2FA
 service-tunnels auth totp status alice            # 查询 2FA 启用状态
 ```
 
+## auth token — Bearer token 管理（tunnel API 请求）
+
+```bash
+service-tunnels auth token list [--provider token|all] [--site <s>]               # 列出各站点 token（不含秘密）
+service-tunnels auth token create [--description "ci api"] [--expires +7d] [--site <s>]
+#   --expires 支持 ISO 日期（2030-01-01）、相对时长（+2h/+30d/+1y）、epoch ms；
+#   缺省/never = 永不过期。返回的 token（st_ 开头）只在创建时显示一次。
+service-tunnels auth token revoke <id> [--site <s>]                               # 立即失效
+```
+
+- 客户端请求：`curl -H "Authorization: Bearer <token>" https://<tunnel>/...`——
+  无登录页、无 Cookie，401 直返（`WWW-Authenticate: Bearer`）。
+- token 与 user 一样按 site 隔离：`--site services` 的 token 只对
+  `services` 站点的虚拟主机有效。
+- 库内只存 SHA-256 哈希，`list` 永不返回秘密；过期 token 自动失效并惰性清除。
+
 ## ui — 网页管理界面
 
 ```bash

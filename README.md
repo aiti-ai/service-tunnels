@@ -31,6 +31,8 @@ service-tunnels expose 5173 --mode proxy --auth auto --site services   # 子进�
 
 service-tunnels auth user list | add | set-password | remove [--site <s>]   # 用户管理（按站点）
 service-tunnels auth totp enroll|disable|status <user> [--site <s>]         # 2FA 管理
+service-tunnels auth token list | create [--description <d>] [--expires <ISO|+2h|never>] | revoke <id> [--site <s>]  # Bearer token（tunnel API 请求）
+curl -H "Authorization: Bearer st_xxx..." https://<tunnel-url>/api/...   # 机器客户端只传 header 即可
 service-tunnels ui                    # 网页管理界面（127.0.0.1，自动弹浏览器；含站点管理页）
 service-tunnels stop-all              # 停止守护 + 清理全部子进程
 ```
@@ -219,6 +221,7 @@ config path | show | get <key> | set <key> <value>   # base-domain / proxy-port 
 ## 设计文档
 
 - [`docs/sites-design.md`](docs/sites-design.md) — **站点（认证域）隔离 + proxy 暴露模式**（site / enrollment / hostsubfix / baseDomain）
+- [`docs/token-auth-design.md`](docs/token-auth-design.md) — **Bearer token 认证方案**（tunnel API 请求；生成/说明/有效期/按 site 管理 + 双通道校验）
 - [`docs/auth-provider.md`](docs/auth-provider.md) — **编写 AuthProvider 指南**（接口 / 自描述协议字段 / 最小示例 / 注册 / 检查清单）
 - [`docs/design.md`](docs/design.md) — 架构 / 模块 / 认证 provider 模型 / 平台矩阵
 - [`docs/input-validation-security.md`](docs/input-validation-security.md) — **隧道参数输入安全**（审计 + 加固方案与实现）

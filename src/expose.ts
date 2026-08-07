@@ -650,9 +650,13 @@ async function exposeTunnel(
     // 跳到错误 scheme 直接报错。
     const scheme = protocol === "https" ? "https" : "http";
     // $http_host 保留端口（bore/ssh 等带随机端口的隧道；无端口时与 $host 等价）
+    // token/basic 无登录页：不生成 302 跳转（gateway 的 token 模式无
+    // @auth_redirect，401 直返；basic 模式本就不引用 loginRedirect）
     const loginRedirect =
-      provider.loginRedirect?.(providerBasePath, scheme)
-      ?? `${scheme}://$http_host${providerBasePath}/login?next=$request_uri`;
+      authMode === "token" || authMode === "basic"
+        ? ""
+        : (provider.loginRedirect?.(providerBasePath, scheme)
+          ?? `${scheme}://$http_host${providerBasePath}/login?next=$request_uri`);
     try {
       await gateway.registerHost(publicHost, port, {
         authPort,

@@ -285,6 +285,25 @@ const methods = new Map<string, Handler>([
         .then(() => ({ ok: true, providers: targets }));
     },
   ],
+  ["auth.token.managers", () => authRegistry.tokenManagers()],
+  ["auth.token.list", (params) => {
+    const p = (params as { provider?: string; site?: string } | undefined) ?? {};
+    const targets = resolveDaemonTokenTargets(authRegistry, p.provider);
+    return Promise.all(targets.map(async (t) => ({ provider: t, tokens: await authRegistry.tokenManager(t, p.site).listTokens() })));
+  }],
+  ["auth.token.create", (params) => {
+    const p = params as { description?: string; expiresAt?: number; provider?: string; site?: string };
+    const targets = resolveDaemonTokenTargets(authRegistry, p.provider);
+    return Promise.all(targets.map((t) => authRegistry.tokenManager(t, p.site).createToken({ description: p.description, expiresAt: p.expiresAt })))
+      .then((tokens) => ({ ok: true, providers: targets, tokens }));
+  }],
+  ["auth.token.revoke", (params) => {
+    const p = params as { id?: string; provider?: string; site?: string };
+    if (!p?.id) throw new Error("auth token revoke: id is required");
+    const targets = resolveDaemonTokenTargets(authRegistry, p.provider);
+    return Promise.all(targets.map((t) => authRegistry.tokenManager(t, p.site).revokeToken(p.id!)))
+      .then(() => ({ ok: true, providers: targets }));
+  }],
   [
     "expose",
     (params) => {
@@ -521,6 +540,17 @@ function resolveDaemonUserTargets(registry: AuthRegistry, provider?: string | st
   const targets = Array.isArray(provider) ? provider : [provider];
   for (const t of targets) {
     if (!all.includes(t)) throw new Error(`provider ${t} does not support user management`);
+  }
+  return targets;
+}
+
+/** 与 user 目标解析同理——token 管理目标（缺省全部支持 token 的 provider）。 */
+function resolveDaemonTokenTargets(registry: AuthRegistry, provider?: string | string[]): string[] {
+  const all = registry.tokenManagers();
+  if (!provider || provider === "all") return all;
+  const targets = Array.isArray(provider) ? provider : [provider];
+  for (const t of targets) {
+    if (!all.includes(t)) throw new Error(`provider ${t} does not support token management`);
   }
   return targets;
 }

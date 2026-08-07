@@ -30,7 +30,7 @@ function usage(lang: Lang = "en"): void {
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
   expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
-  auth providers list | auth user list|add|set-password|remove [--site <s>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
+  auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
@@ -88,6 +88,10 @@ interface CliArgs {
   site?: string;
   /** --secret <b32> (auth totp code): 直接用给定 base32 secret 生成验证码。 */
   secret?: string;
+  /** --description <d> (auth token create): token 用途说明。 */
+  description?: string;
+  /** --expires <ISO|+2h|never|epoch> (auth token create): 有效期。 */
+  expires?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
   policy?: string;
   /** --proxy-port <p>: proxy transport port (mode proxy/both). */
@@ -213,6 +217,12 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--secret":
         args.secret = argv[++i]!;
+        break;
+      case "--description":
+        args.description = argv[++i]!;
+        break;
+      case "--expires":
+        args.expires = argv[++i]!;
         break;
       case "--proxy-port":
         args.proxyPort = Number(argv[++i]!);
@@ -854,8 +864,28 @@ async function main(): Promise<void> {
           process.exit(2);
         }
         jsonOut({ name: name || "<raw>", site, provider, secret: args.secret ? undefined : secret, code, next, expiresIn: Math.ceil((30_000 - (Date.now() % 30_000)) / 1000) });
+      } else if (op === "token" && cmd[2] === "list") {
+        jsonOut(await st.auth.tokens(args.provider, site));
+      } else if (op === "token" && cmd[2] === "create") {
+        const { parseTokenExpiry } = await import("./providers/token.ts");
+        const expiresAt = parseTokenExpiry(args.expires as string | undefined);
+        const out = await st.auth.createToken({
+          description: args.description as string | undefined,
+          expiresAt,
+          provider: args.provider,
+          site,
+        });
+        jsonOut({ site, tokens: out });
+      } else if (op === "token" && cmd[2] === "revoke") {
+        const id = cmd[3] ?? "";
+        if (!id) {
+          console.error("auth token revoke <id> [--provider token] [--site <s>]");
+          process.exit(2);
+        }
+        const providers = await st.auth.revokeToken(id, args.provider, site);
+        jsonOut({ revoked: id, site, providers });
       } else {
-        console.error("auth providers list | auth user list|add|set-password|remove | auth totp enroll|disable|status|code [--site <s>] [--provider ...] [--secret <b32>]");
+        console.error("auth providers list | auth user list|add|set-password|remove | auth token list|create|revoke | auth totp enroll|disable|status|code [--site <s>] [--provider ...] [--secret <b32>]");
         process.exit(2);
       }
       break;

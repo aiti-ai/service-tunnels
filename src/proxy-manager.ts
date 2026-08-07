@@ -411,6 +411,18 @@ export class ProxyManager {
         }
         return { basicGatewayPort: gw.port, htpasswdFile: htpasswd, serviceBasePath: binding.serviceBasePath };
       }
+      // token：provider 自描述（nginx auth_request → Bearer 探针；决策 API
+      // 进程内校验，见 proxy.ts gateBackend）
+      if ((provider.gatewayMode ?? "forward-auth") === "token") {
+        const gw = await this.#ensureGateway();
+        const authPort = (provider as unknown as { port?: number }).port ?? 0;
+        const tokensFile = (provider as unknown as { tokensFile?: string }).tokensFile;
+        if (!this.#registered.has(key)) {
+          await gw.registerHost(vhost, binding.port, { authMode: "token", authPort, scheme: "http", site: binding.site });
+          this.#registered.add(key);
+        }
+        return { tokenFile: tokensFile, serviceBasePath: binding.serviceBasePath };
+      }
       if (!this.#registered.has(key)) {
         await provider.registerHost(vhost, binding.policy);
         this.#registered.add(key);

@@ -27,8 +27,9 @@ export interface GatewayHost {
   authPort?: number;
   /** Provider base path (e.g. /authelia) for forward-auth mode. */
   basePath?: string;
-  /** "forward-auth" (auth_request → provider), "basic" (auth_basic), or
-   *  "none" (plain proxy, no auth but still logged). */
+  /** "forward-auth" (auth_request → provider), "basic" (auth_basic),
+   *  "token" (auth_request → Bearer probe), or "none" (plain proxy, no
+   *  auth but still logged). */
   authMode?: GatewayAuthMode;
   /** htpasswd file for basic mode (per-host). */
   htpasswdFile?: string;
@@ -53,7 +54,7 @@ export interface GatewayHost {
   bypassPaths?: string[];
 }
 
-export type GatewayAuthMode = "forward-auth" | "oauth2-proxy" | "basic" | "none";
+export type GatewayAuthMode = "forward-auth" | "oauth2-proxy" | "basic" | "token" | "none";
 
 export interface GatewayConfig {
   nginxPort: number;
@@ -135,17 +136,22 @@ export function generateHostNginx(
   // {basePath}/api/authz/auth-request).
   const authzPath = authMode === "oauth2-proxy"
     ? "oauth2/auth"
-    : `${basePath}/api/authz/auth-request`.replace(/^\//, "");
+    : authMode === "token"
+      ? "token-authz/auth"
+      : `${basePath}/api/authz/auth-request`.replace(/^\//, "");
   const isFwd = authMode === "forward-auth";
   const isOauth2 = authMode === "oauth2-proxy";
+  const isToken = authMode === "token";
   const authLine =
     authMode === "basic"
       ? `      auth_basic "service-tunnels${h.site ? " " + h.site : ""}";\n      auth_basic_user_file ${htpasswdFile};`
-      : isFwd || isOauth2
-        ? `      auth_request /${authzPath};\n      error_page 401 @auth_redirect;`
-        : ""; // "none" — plain proxy, no auth (but still logged)
+      : isToken
+        ? `      auth_request /${authzPath};\n      # Bearer token 无登录页:401 直返客户端(不 error_page 跳转)\n      add_header WWW-Authenticate 'Bearer realm="service-tunnels"' always;`
+        : isFwd || isOauth2
+          ? `      auth_request /${authzPath};\n      error_page 401 @auth_redirect;`
+          : ""; // "none" — plain proxy, no auth (but still logged)
   const authzBlock =
-    !isFwd && !isOauth2
+    !isFwd && !isOauth2 && !isToken
       ? ""
       : `    location = /${authzPath} {
       internal;
@@ -155,7 +161,9 @@ export function generateHostNginx(
       # auth_request 子请求默认不转发 Cookie → 会话永远到不了 portal(auth-request
       # 恒 401 → 302 登录);显式转发后 deny/two_factor 策略才能按会话判断。
       proxy_set_header Cookie $http_cookie;
-      ${isOauth2 ? "" : `# the tunnel edge terminates TLS; authelia refuses http target URLs
+      # nginx auth_request 子请求默认也剥离 Authorization —— token 探针必须
+      # 显式转发才拿得到 Bearer 头。
+      ${isToken ? "      proxy_set_header Authorization $http_authorization;\n" : ""}      ${isOauth2 ? "" : `# the tunnel edge terminates TLS; authelia refuses http target URLs
       proxy_set_header X-Original-URL https://$host$request_uri;`}
       proxy_set_header X-Original-Method $request_method;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -199,7 +207,7 @@ export function generateHostNginx(
 
 `;
   const authFailBlock =
-    !isFwd && !isOauth2
+    (!isFwd && !isOauth2) || isToken
       ? ""
       : `    location @auth_redirect {
       internal;

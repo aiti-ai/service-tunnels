@@ -10,6 +10,20 @@
 ## [Unreleased]
 
 ### Added
+- **Bearer token 认证（tunnel API 请求）**：新 provider `token`（gatewayMode
+  `"token"`）——请求只需带 `Authorization: Bearer <token>` 即放行，无登录页/无
+  Cookie，适合机器客户端（CI、脚本、API 调用）。token 按 site 管理（与 user
+  一致）：随机生成（`st_` + 192-bit），库内仅存 SHA-256 哈希，创建时唯一一次
+  返回原文；带说明（description）与可选有效期（expiresAt，null = 永不过期），
+  过期自动失效并惰性清除。
+  - CLI：`auth token list | create [--description <d>] [--expires <ISO|+2h|never>] | revoke <id> [--site <s>]`
+  - 库 API：`st.auth.tokenManagers()` / `tokens()` / `createToken()` / `revokeToken()`
+  - daemon RPC：`auth.token.managers|list|create|revoke`
+  - 校验双通道：决策 API 进程内（嵌入方 rewrite 保留不了 vhost Host，与 basic
+    同理）+ nginx `auth_request → /token-authz/auth` 探针（子请求显式转发
+    Authorization，401 直返带 `WWW-Authenticate: Bearer`，无 302 登录跳转）。
+
+### Added
 - **TOTP 登记支持自定义标识（label）**：`auth totp enroll <name> [--label <l>]`
   与 `st.auth.totpEnroll(name, provider, site, label)` 接受可选 label；缺省为
   `<name>-<auth>-<site>@<host>`（user/auth/site 用 `-` 连接成 account，host

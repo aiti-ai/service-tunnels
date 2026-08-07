@@ -617,7 +617,7 @@ export function authProviderMetas(configDir: string): Record<string, AuthProvide
     };
   }
   // 内置类型元数据（label = type；非变体不算「已配置」）
-  for (const t of ["authelia", "portal", "basic", "oauth2-proxy"]) {
+  for (const t of ["authelia", "portal", "basic", "token", "oauth2-proxy"]) {
     out[t] = { label: t, kind: "builtin", configured: true, needsInput: [] };
   }
   return out;

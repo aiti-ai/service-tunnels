@@ -151,6 +151,8 @@ export interface ProxySiteBackend {
   basicGatewayPort?: number;
   /** per-site htpasswd file for the basic gate (decision-API verification). */
   htpasswdFile?: string;
+  /** per-site tokens file for the token gate (decision-API verification). */
+  tokenFile?: string;
   /** 该 vhost 真实服务的 base path(per-binding 覆盖全局 serviceBasePath)。 */
   serviceBasePath?: string;
 }
@@ -377,6 +379,17 @@ async function gateBackend(
     const { verifyHtpasswd } = await import("./providers/basic.ts");
     if (!backend.htpasswdFile || !verifyHtpasswd(input.authorization, backend.htpasswdFile)) {
       return { kind: "deny-auth", status: 401, wwwAuthenticate: 'Basic realm="service-tunnels", charset="UTF-8"' };
+    }
+    return null;
+  }
+  if (backend.tokenFile) {
+    // token 认证同样在决策 API 进程内校验(与 basic 同一理由:嵌入方 rewrite
+    // 无法保留 vhost Host,nginx auth_request 会被默认 server 绕过)。
+    // Bearer token 通过 → 直接 pipe 到服务;缺失/无效/过期 → 401(WWW-Authenticate:
+    // Bearer,无登录页可跳)。
+    const { verifyBearerToken } = await import("./providers/token.ts");
+    if (!verifyBearerToken(input.authorization, backend.tokenFile)) {
+      return { kind: "deny-auth", status: 401, wwwAuthenticate: 'Bearer realm="service-tunnels"' };
     }
     return null;
   }
