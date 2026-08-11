@@ -48,12 +48,6 @@
 | ngrok | https://gitee.com/justdb-mirrors/downloads | 3.19.1 (实际动态) | 6 |
 | bore | https://gitee.com/justdb-mirrors/downloads | 0.6.0 | 6 |
 
-### 私有项目镜像
-
-| 项目 | 仓库 |
-|---|---|
-| service-tunnels | 内部仓库（公开后迁至公开镜像） |
-
 ## 默认配置示例
 
 ```json
