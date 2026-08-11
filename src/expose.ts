@@ -645,18 +645,21 @@ async function exposeTunnel(
     // provider-specific login redirect target —— provider 自描述（loginRedirect
     // 方法），缺省 portal 风格（插件等未实现时兜底）。
     const o2Setup = provider.setupConfig?.();
-    // 协议跟随转发协议：https 隧道（ngrok/cloudflared 等）边缘 TLS 终结；
-    // bore/ssh 等裸 TCP 隧道是 http。登录重定向必须用公网协议，否则浏览器
-    // 跳到错误 scheme 直接报错。
+    // 本地后端协议（nginx proxy_pass 用，探测本地端口）：https 应用 → 上游 https。
     const scheme = protocol === "https" ? "https" : "http";
+    // 登录重定向必须用公网协议：https 隧道（localtunnel/ngrok/cloudflared 等）
+    // 边缘 TLS 终结，公网 URL 是 https；bore/ssh 等裸 TCP 隧道是 http。
+    // 不能按本地端口协议判断——pi-web 本地 http + localtunnel 公网 https，
+    // 用本地协议会把登录页跳成 http → 浏览器混合内容拦截。
+    const publicScheme = /^https:\/\//i.test(url ?? "") ? "https" : "http";
     // $http_host 保留端口（bore/ssh 等带随机端口的隧道；无端口时与 $host 等价）
     // token/basic 无登录页：不生成 302 跳转（gateway 的 token 模式无
     // @auth_redirect，401 直返；basic 模式本就不引用 loginRedirect）
     const loginRedirect =
       authMode === "token" || authMode === "basic"
         ? ""
-        : (provider.loginRedirect?.(providerBasePath, scheme)
-          ?? `${scheme}://$http_host${providerBasePath}/login?next=$request_uri`);
+        : (provider.loginRedirect?.(providerBasePath, publicScheme)
+          ?? `${publicScheme}://$http_host${providerBasePath}/login?next=$request_uri`);
     try {
       await gateway.registerHost(publicHost, port, {
         authPort,

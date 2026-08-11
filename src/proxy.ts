@@ -504,10 +504,17 @@ async function checkForwardAuthReq(
 }
 
 function renderLoginRedirectReq(template: string, input: ServiceHostResolveInput): string {
-  return template
+  const rendered = template
     .replaceAll("$http_host", input.host ?? "")
     .replaceAll("$host", input.host ?? "")
     .replaceAll("$request_uri", input.url ?? "/");
+  // 混合内容防护：登录跳转 scheme 跟随浏览器实际协议。模板注册时不知道公网
+  // 协议（本地 http / 反代 TLS），这里按请求协议（forwardedProto）把 http 模板
+  // 升级为 https——否则 https 页面上登录跳转被浏览器混合内容拦截。
+  if ((input.forwardedProto ?? "http") === "https" && rendered.startsWith("http://")) {
+    return `https://${rendered.slice("http://".length)}`;
+  }
+  return rendered;
 }
 
 /** 解析 transformResponse 结果：string → head 模式；{html, position} 按 position */
