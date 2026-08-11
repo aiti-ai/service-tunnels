@@ -290,8 +290,8 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const { label } = await provider2.totpEnroll("alice");
   assert.equal(label, "alice-portal-default");
   assert.equal(provider2.defaultTotpLabel("alice"), "alice-portal-default");
-  await provider2.registerHost("8905-pi-web.pi.example.com");
-  assert.equal(provider2.defaultTotpLabel("alice"), "alice-portal-default@8905-pi-web.pi.example.com");
+  await provider2.registerHost("5173-app.example.com");
+  assert.equal(provider2.defaultTotpLabel("alice"), "alice-portal-default@5173-app.example.com");
   const custom = await provider2.totpEnroll("alice", "alice@my.host");
   assert.equal(custom.label, "alice@my.host");
   assert.ok(custom.otpauthUrl.includes("issuer=my.host"), "issuer = label 的 host 部分");

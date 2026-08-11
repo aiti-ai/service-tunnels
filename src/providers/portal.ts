@@ -381,7 +381,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
    *  `<name>-<auth>-<site>@<host>` —— 站点各自独立用户库，同用户名在不同
    *  站点/auth 下必须能区分；user/auth/site 用 `-` 连接成一段 account，
    *  host 前保留 `@`（也是 otpauth issuer 部分）。host = 该 portal 站点注册
-   *  的第一个 host（用户实际认证的虚拟主机，如 8905-pi-web.pi.example.com）；
+   *  的第一个 host（用户实际认证的虚拟主机，如 5173-app.example.com）；
    *  尚无 host 时省略 @host 部分。调用方可在登记时覆盖（label）。 */
   defaultTotpLabel(name: string): string {
     const host = this.#hosts.keys().next().value;

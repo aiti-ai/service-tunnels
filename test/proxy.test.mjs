@@ -743,18 +743,18 @@ test("D4 open labeled binding keeps serviceBasePath: basePath app (/dev) pipe pr
   // deploy prefix → rewrite to /api/... → Next 404 + trailing-slash loop).
   const proxy = await startProxy({
     basePath: "/dev",
-    resolveLabel: (label) => (label === "pi-web" ? "pi-web" : null),
+    resolveLabel: (label) => (label === "app" ? "app" : null),
     resolveSite: async (port, site, label) => {
-      if (label !== "pi-web" || site !== "pi-web") return null;
+      if (label !== "app" || site !== "app") return null;
       return { serviceBasePath: "/dev" };
     },
   });
   try {
-    const res = await rawGet(proxy.port, `${svcPort}-pi-web.st.localhost`, "/dev/api/services");
+    const res = await rawGet(proxy.port, `${svcPort}-app.st.localhost`, "/dev/api/services");
     assert.equal(res.status, 200);
     assert.equal(JSON.parse(res.body).url, "/dev/api/services", "pipe preserves the /dev basePath");
     // 根路径带部署前缀 → svc 路径(不带尾斜杠 → 不再触发 Next 308 死循环)
-    const root = await rawGet(proxy.port, `${svcPort}-pi-web.st.localhost`, "/dev");
+    const root = await rawGet(proxy.port, `${svcPort}-app.st.localhost`, "/dev");
     assert.equal(JSON.parse(root.body).url, "/dev");
   } finally {
     await proxy.close();
