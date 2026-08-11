@@ -156,6 +156,7 @@ const st = createServiceTunnels({
   // toolPaths: { ngrok: "/opt/ngrok" },   // 显式指定工具路径
   // preferMirrors: true,                  // 中国网络：镜像优先
   // allowAuthNone: false,                 // 禁止无认证暴露（auth none）
+  // inject: `<script src="https://x.dev/launcher.js"></script>`, // 隧道注入（见下）
 });
 
 const ports = st.discovery.getPorts();          // 发现服务端口（排除框架内部端口）
@@ -167,6 +168,28 @@ st.sites.add("host", { provider: "portal", domain: "web.example.com" });
 st.sites.add("services", { provider: "basic" });
 await st.auth.addUser("alice", "pw", { site: "services" });       // 子进程用户
 await st.auth.expose(5173, { mode: "proxy", site: "services" });  // → http://5173-services.st.localhost:4180
+```
+
+## 响应注入（两路径）
+
+- **node proxy 路径**（mode proxy/both，浏览器 → node proxy → 应用）：
+  `createServiceTunnels({ transformResponse })` 回调按请求决定注入
+  （`{ port, url, method }` → `string` | `{ html, position }` | `null`）。
+  head = `</head>` 前；prepend = 响应开头（流式不缓冲）。
+- **tunnel nginx 路径**（浏览器 → 隧道边缘 → nginx 网关 → 应用，不经过 node
+  proxy）：`createServiceTunnels({ inject })` / `st.expose(port, { inject })` /
+  CLI `--inject-html <fragment> [--inject-position head|prepend]`。nginx 配置是
+  静态的，传固定 HTML 片段：head = `sub_filter`；prepend = `add_before_body`
+  （需 nginx addition 模块）。
+
+  两种模式都**只注入主页面导航的 text/html**：Sec-Fetch-Mode navigate / 老客户端
+  无该头 → 注入；XHR/fetch/子资源（cors/no-cors/same-origin）与老式
+  `X-Requested-With` → 不注入——避免把用户后加载的模板片段、JS/JSON 文件注坏。
+
+```ts
+await st.auth.expose(5173, { auth: "none", inject: `<script src="https://x.dev/launcher.js"></script>` });
+// 或 prepend 模式（最早执行）：
+await st.auth.expose(5173, { auth: "none", inject: { html: `<script>init()</script>`, position: "prepend" } });
 ```
 
 ## 工具解析（所有命令统一）

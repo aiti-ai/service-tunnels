@@ -1,4 +1,4 @@
-import { GatewayController, type GatewayAuthMode, detectProtocol } from "./gateway.ts";
+import { GatewayController, type GatewayAuthMode, type GatewayInject, detectProtocol } from "./gateway.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import { readSites, type SiteConfig } from "./sites.ts";
 import { readConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
@@ -87,6 +87,15 @@ export interface ExposeOptions {
   /** 认证放行白名单（URL 路径前缀）：这些路径跳过认证直接转发应用
    *  （/health、/metrics 等公开端点）。proxy/nginx 双路径生效。 */
   bypassPaths?: string[];
+  /**
+   * 静态响应注入（tunnel nginx 路径——浏览器 → 隧道边缘 → nginx 网关 → 应用，
+   * 不经过 node proxy，proxy 的 transformResponse 够不着；nginx 配置是静态的，
+   * 所以传固定 HTML 片段而非回调）。string → head 模式；{ html, position } 指定
+   * 模式。只作用于 text/html 且仅主页面导航（Sec-Fetch-Mode: navigate / 老客户端
+   * 无该头；XHR/fetch/子资源不注入）——避免把用户后加载的模板片段/文件注坏。
+   * 注：edge-auth 隧道（ngrok edge-oidc 等跳过本地网关）与 tcp/ssh 裸隧道不适用。
+   */
+  inject?: string | GatewayInject;
   /**
    * User's wildcard-DNS base domain (e.g. "example.com") — overrides
    * config service-tunnels.json `baseDomain`. expose also returns a PORTLESS
@@ -516,7 +525,7 @@ async function exposeTunnel(
       const host = new URL(url).host;
       const scheme = protocol === "https" ? "https" : "http";
       try {
-        await gateway.registerHost(host, port, { authMode: "none", scheme });
+        await gateway.registerHost(host, port, { authMode: "none", scheme, ...(opts.inject ? { inject: opts.inject } : {}) });
       } catch (err) {
         // unsafe host (injection attempt / non-domain) — roll the tunnel back
         await ctx.tunnels.stop(name).catch(() => {});
@@ -675,6 +684,8 @@ async function exposeTunnel(
           : {}),
         // 认证放行白名单：这些 location 不带 auth_request
         ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
+        // 静态响应注入（仅主页面导航的 text/html；XHR/fetch/子资源不注入）
+        ...(opts.inject ? { inject: opts.inject } : {}),
       });
     } catch (err) {
       // unsafe host — tear down the tunnel so nothing is left half-registered

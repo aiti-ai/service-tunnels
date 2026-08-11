@@ -29,7 +29,7 @@ function usage(lang: Lang = "en"): void {
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
@@ -100,6 +100,12 @@ interface CliArgs {
   baseDomain?: string;
   /** --bypass-path /health --bypass-path /metrics：认证放行白名单（可重复）。 */
   bypassPaths?: string[];
+  /** --inject-html <fragment>：静态响应注入（tunnel nginx 路径，主页面导航
+   *  的 text/html；XHR/fetch/子资源不注入）。与 --inject-position 组合。 */
+  injectHtml?: string;
+  /** --inject-position head|prepend：注入模式（默认 head = </head> 前插入；
+   *  prepend = 响应开头直接写，需 nginx addition 模块）。 */
+  injectPosition?: string;
   /** --allow-tool-download <true|false>: per-expose tool-download override. */
   allowToolDownload?: boolean;
   /** --allow-auth-none <true|false>: per-expose auth-none ban override
@@ -232,6 +238,12 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--bypass-path":
         (args.bypassPaths ??= []).push(argv[++i]!);
+        break;
+      case "--inject-html":
+        args.injectHtml = argv[++i]!;
+        break;
+      case "--inject-position":
+        args.injectPosition = argv[++i]!;
         break;
       case "--allow-tool-download": {
         const raw = (argv[++i] ?? "true").toLowerCase();
@@ -760,6 +772,9 @@ async function main(): Promise<void> {
         proxyPort: args.proxyPort != null ? Number(args.proxyPort) : undefined,
         baseDomain: args.baseDomain,
         bypassPaths: args.bypassPaths,
+        ...(args.injectHtml
+          ? { inject: { html: args.injectHtml, position: args.injectPosition === "prepend" ? "prepend" as const : "head" as const } }
+          : {}),
         tunnelType: args.tunnel,
         tunnelName: args.name,
         // `--tunnel command` runs a raw shell command — this CLI invocation is

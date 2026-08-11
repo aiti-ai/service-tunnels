@@ -1,4 +1,5 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
+import { createHash } from "crypto";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
@@ -52,6 +53,51 @@ export interface GatewayHost {
   /** 认证放行白名单（URL 路径前缀）：这些 location 不带 auth_request，直接
    *  转发应用（/health、/metrics 等公开端点）。 */
   bypassPaths?: string[];
+  /**
+   * 静态响应注入（tunnel nginx 路径，类似 proxy 的 transformResponse——但
+   * nginx 配置是静态的，无法按请求回调，所以这里传固定 HTML 片段）。
+   * 两种模式都**只作用于 text/html 且仅主页面导航**（Sec-Fetch-Mode:
+   * navigate/nested-navigate 或老客户端无该头；XHR/fetch/子资源请求不注入）
+   * ——避免把用户后加载的模板片段/文件注坏。
+   * - `position: "head"`（默认）：sub_filter 在 `</head>` 前插入；
+   * - `position: "prepend"`：add_before_body 在响应开头直接写（需 nginx
+   *   addition 模块，缺失时 registerHost 报错）。
+   */
+  inject?: string | GatewayInject;
+}
+
+/** 静态响应注入（nginx sub_filter / add_before_body 实现）。 */
+export interface GatewayInject {
+  html: string;
+  /** "head" = `</head>` 前插入（默认）；"prepend" = 响应开头直接写。 */
+  position?: "head" | "prepend";
+}
+
+/** 归一化注入参数：string → head 模式；{html, position} 按 position。 */
+export function normalizeInject(raw: string | GatewayInject | null | undefined): GatewayInject | null {
+  if (!raw) return null;
+  if (typeof raw === "string") return { html: raw, position: "head" };
+  return { html: raw.html, position: raw.position === "prepend" ? "prepend" : "head" };
+}
+
+/** nginx 双引号字符串字面量：非打印/非 ASCII 字节 \xHH 转义、\" 与 \\ 转义——
+ *  注入 HTML 含任意引号/JS 也能安全进入 sub_filter 替换串（nginx 单引号串
+ *  无法转义单引号，故统一用双引号 + 字节转义）。 */
+export function nginxQuote(s: string): string {
+  const bytes = Buffer.from(s, "utf8");
+  let out = '"';
+  for (const b of bytes) {
+    if (b === 0x22 || b === 0x5c) out += `\\${String.fromCharCode(b)}`;
+    else if (b < 0x20 || b > 0x7e) out += `\\x${b.toString(16).padStart(2, "0")}`;
+    else out += String.fromCharCode(b);
+  }
+  return out + '"';
+}
+
+/** 每 host 全局唯一 nginx 变量名（host 含点/连字符，不能直接作变量名；
+ *  sha256 前缀防多 host 碰撞——nginx 变量全局唯一，重名会报错）。 */
+export function injectVarName(host: string, suffix: string): string {
+  return `st_inj${suffix}_${createHash("sha256").update(host).digest("hex").slice(0, 16)}`;
 }
 
 export type GatewayAuthMode = "forward-auth" | "oauth2-proxy" | "basic" | "token" | "none";
@@ -250,8 +296,77 @@ export function generateHostNginx(
 `;
             })()
           : "");
+  // ── 静态响应注入（tunnel nginx 路径，类似 proxy 的 transformResponse）──
+  // 只作用于 text/html 且仅主页面导航（Sec-Fetch-Mode: navigate /
+  // nested-navigate 或老客户端无该头；XHR/fetch/子资源请求不注入）——避免
+  // 把用户后加载的模板片段/文件注坏。head 用 sub_filter（替换串是 map 变量：
+  // 非导航请求 → 恒等 </head> 不注入）；prepend 用 add_before_body + 内部
+  // location 按请求切到空响应（return 200 ''）。
+  // 注入指令放在 location / 与 bypass 白名单 location（nginx location /
+  // 是前缀匹配——/target.html、/a/b/c 等所有直接导航页面都会命中并注入；
+  // provider 登录页/authz/setup 不注入）。
+  const inject = normalizeInject(h.inject);
+  let injectMap = ""; // http 级（conf.d 文件是 http include，map 可放）
+  let injectServer = ""; // server 级（prepend 的内部 location）
+  let injectLoc = ""; // location / 级（sub_filter / add_before_body）
+  if (inject?.position === "prepend") {
+    const v = injectVarName(h.host, "p");
+    const uri = `/__st_inj_${h.host}.html`;
+    const emptyUri = `/__st_empty_${h.host}.html`;
+    // 拼接键：Sec-Fetch-Mode + X-Requested-With 一次判完（精确键优先，
+    // 正则键兜底老式 XHR；无头请求 → default 0 = 注入，兼容 curl/老浏览器）
+    injectMap = `map $http_sec_fetch_mode$http_x_requested_with $${v} {
+  default 0;
+  cors 1;
+  no-cors 1;
+  same-origin 1;
+  '~XMLHttpRequest' 1;
+}
+
+`;
+    injectServer = `    # 响应注入（prepend：仅主页面导航的 text/html；XHR/fetch/子资源不注入）
+    location = ${uri} {
+      internal;
+      default_type text/html;
+      root ${nginxRoot}/inject;
+      if ($${v} = "1") { rewrite ^ ${emptyUri} last; }
+    }
+    location = ${emptyUri} {
+      internal;
+      default_type text/html;
+      return 200 '';
+    }
+
+`;
+    injectLoc = `      # 上游压缩会破坏注入的流式语义，统一要未压缩响应
+      add_before_body ${uri};
+      proxy_set_header Accept-Encoding "";
+`;
+  } else if (inject) {
+    const v = injectVarName(h.host, "h");
+    // default（含 navigate/无头 curl/老浏览器）→ 注入；cors/no-cors/same-origin
+    // 与老式 XHR（正则键）→ 恒等 </head>（不注入）。
+    injectMap = `map $http_sec_fetch_mode$http_x_requested_with $${v} {
+  default ${nginxQuote(inject.html + "</head>")};
+  cors '</head>';
+  no-cors '</head>';
+  same-origin '</head>';
+  '~XMLHttpRequest' '</head>';
+}
+
+`;
+    injectLoc = `      # 响应注入（head：仅主页面导航的 text/html 在 </head> 前插入；
+      # XHR/fetch/子资源不注入——map 恒等 </head>）
+      sub_filter '</head>' '$${v}';
+      sub_filter_once on;
+      sub_filter_types text/html;
+      # sub_filter 无法匹配 gzip 内容——统一要未压缩响应
+      proxy_set_header Accept-Encoding "";
+`;
+  }
   // 认证放行白名单：不带 auth_request 的 location，直接转发应用（前缀匹配，
-  // nginx 最长前缀优先 → 覆盖 location / 的 auth_request）。
+  // nginx 最长前缀优先 → 覆盖 location / 的 auth_request）。同样带注入（
+  // 白名单路径的 HTML 页面也是直接请求的页面）。
   const bypassBlock = (h.bypassPaths ?? [])
     .map((p) => {
       return `    location ${p} {
@@ -264,20 +379,20 @@ export function generateHostNginx(
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-    }
+${injectLoc}    }
 
 `;
     })
     .join("");
-  return `  server {
+  return `${injectMap}  server {
     listen 127.0.0.1:${nginxPort};
     server_name ${escaped};
     access_log ${nginxRoot}/logs/${h.host}.access.log;
     error_log ${nginxRoot}/logs/${h.host}.error.log warn;
 
-${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
+${injectServer}${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
 ${authLine}
-      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};${h.scheme === "https" ? `
+${injectLoc}      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};${h.scheme === "https" ? `
       proxy_ssl_verify off;
       proxy_ssl_server_name off;` : ""}
       proxy_set_header Host $host;
@@ -417,6 +532,8 @@ export class GatewayController {
   /** Default auth mode/basePath/htpasswd (per-host values win). */
   #authMode: GatewayAuthMode = "forward-auth";
   #htpasswdFile = "";
+  /** 注入能力探测缓存（sub_filter / add_before_body 是否可用）。 */
+  #injectCaps: { sub: boolean; addition: boolean } | null = null;
 
   constructor(opts: GatewayControllerOptions) {
     this.#opts = opts;
@@ -502,6 +619,51 @@ export class GatewayController {
     execFileSync(bin, ["-t", "-c", confPath], { stdio: "ignore" });
   }
 
+  /** 探测 nginx 二进制的注入模块能力（一次性，缓存）：用含目标指令的临时
+   *  配置跑 `nginx -t`。缺模块时报错在 registerHost 时立刻暴露（而非
+   *  writeConfig 时炸掉整个网关）。sub_filter 是标准构建默认模块；
+   *  add_before_body 需要 --with-http_addition_module（精简构建可能缺）。 */
+  async #probeInjectCaps(): Promise<{ sub: boolean; addition: boolean }> {
+    if (this.#injectCaps) return this.#injectCaps;
+    const bin = await this.resolveNginx();
+    const root = join(this.#nginxRoot, "inject-probe");
+    mkdirSync(root, { recursive: true });
+    // nginx -t 会真实 bind listen 端口：用空闲高位端口（特权端口 <1024
+    // 非 root 直接 EACCES，占用的高位端口会误报 EADDRINUSE）。
+    const listenPort = await pickFreePort();
+    const probe = (body: string): boolean => {
+      const conf = [
+        "worker_processes 1;",
+        `pid ${root}/nginx.pid;`,
+        `error_log ${root}/error.log crit;`,
+        "events {}",
+        "http {",
+        "  access_log off;", // 默认 /var/log/nginx/access.log 非 root 不可写 → -t 失败
+        "  server {",
+        `    listen 127.0.0.1:${listenPort};`,
+        body,
+        "    location / { return 200 ok; }",
+        "  }",
+        "}",
+        "",
+      ].join("\n");
+      const p = join(root, "probe.conf");
+      writeFileSync(p, conf, "utf8");
+      try {
+        execFileSync(bin, ["-t", "-c", p], { stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const sub = probe("    sub_filter '</head>' '<i></head>';");
+    const addition = probe(
+      "    add_before_body /__p;\n    location = /__p { internal; default_type text/html; return 200 '<i>'; }",
+    );
+    this.#injectCaps = { sub, addition };
+    return this.#injectCaps;
+  }
+
   /** Write/refresh one host's conf.d/<host>.conf (its own server block + its
    *  own access/error logs under logs/<host>.*). */
   #writeHostFile(h: GatewayHost): void {
@@ -515,6 +677,13 @@ export class GatewayController {
       htpasswdFile: h.htpasswdFile,
     });
     writeFileSync(join(this.#nginxRoot, "conf.d", `${h.host}.conf`), body, "utf8");
+    // prepend 模式：把注入 HTML 写入 nginx 静态文件（add_before_body 子请求
+    // 读取；host 已 sanitize，文件名安全）。
+    const inj = normalizeInject(h.inject);
+    if (inj?.position === "prepend") {
+      mkdirSync(join(this.#nginxRoot, "inject"), { recursive: true });
+      writeFileSync(join(this.#nginxRoot, "inject", `__st_inj_${h.host}.html`), inj.html, "utf8");
+    }
   }
 
   /** Validate a public host BEFORE it reaches any file path or nginx config.
@@ -541,9 +710,26 @@ export class GatewayController {
   async registerHost(
     host: string,
     port: number,
-    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string },
+    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string; inject?: string | GatewayInject },
   ): Promise<void> {
     const safe = this.#sanitizeHost(host);
+    const inject = normalizeInject(auth?.inject);
+    if (inject) {
+      // 能力探测（一次性，缓存）：缺模块时在 registerHost 立刻报错，而不是
+      // 让 writeConfig/nginx -t 炸掉整个网关。head 需要 sub_filter（标准构建
+      // 默认有）；prepend 需要 addition 模块（--with-http_addition_module，
+      // 部分精简构建/nginx-core 缺失）。
+      const caps = await this.#probeInjectCaps();
+      if (inject.position === "prepend") {
+        if (!caps.addition) {
+          throw new Error(
+            `inject prepend on host ${safe}: nginx 缺 addition 模块（add_before_body，需 --with-http_addition_module）——改用 head 模式（position: "head"）或安装完整 nginx`,
+          );
+        }
+      } else if (!caps.sub) {
+        throw new Error(`inject on host ${safe}: nginx 缺 sub_filter 模块（ngx_http_sub_filter_module）——无法注入，请安装完整 nginx`);
+      }
+    }
     this.#hosts.set(safe, {
       host: safe,
       port,
@@ -556,6 +742,7 @@ export class GatewayController {
       setup: auth?.setup,
       bypassPaths: auth?.bypassPaths,
       site: auth?.site,
+      inject: inject ?? undefined,
     });
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     this.#writeHostFile(this.#hosts.get(safe)!);
@@ -566,6 +753,8 @@ export class GatewayController {
     const safe = this.#sanitizeHost(host);
     this.#hosts.delete(safe);
     rmSync(join(this.#nginxRoot, "conf.d", `${safe}.conf`), { force: true });
+    // 清理该 host 的注入文件（prepend 模式落盘的静态文件）
+    rmSync(join(this.#nginxRoot, "inject", `__st_inj_${safe}.html`), { force: true });
     await this.#restart();
   }
 

@@ -321,6 +321,22 @@ const methods = new Map<string, Handler>([
       if (o?.allowAuthNone !== undefined && typeof o.allowAuthNone !== "boolean") {
         throw new Error(`expose: allowAuthNone must be a boolean`);
       }
+      // inject 进 nginx 配置（sub_filter 替换串 / add_before_body 文件）——
+      // 形状与大小做边界校验（内容本身经 nginxQuote 转义/落盘，不会注入配置；
+      // 上限防超长字符串撑爆配置与内存）。
+      if (o?.inject !== undefined && o?.inject !== "") {
+        const inj = o.inject as string | { html: string; position?: string };
+        const html = typeof inj === "string" ? inj : inj?.html;
+        if (typeof html !== "string" || html.length === 0 || html.length > 64 * 1024) {
+          throw new Error("expose: inject must be a non-empty string or { html, position } (html ≤ 64KB)");
+        }
+        if (typeof inj === "object") {
+          const pos = inj?.position;
+          if (pos !== undefined && pos !== "head" && pos !== "prepend") {
+            throw new Error(`expose: inject.position must be "head" or "prepend", got ${JSON.stringify(pos)}`);
+          }
+        }
+      }
       // auth-none ban at the IPC boundary (defense in depth; exposeFlow
       // re-checks): the effective auth is none and the daemon's resolution
       // (env SERVICE_TUNNELS_ALLOW_AUTH_NONE / config file, sticky — a per-call
