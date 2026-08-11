@@ -302,46 +302,62 @@ test("UI: CSRF/same-origin protection on mutating requests", { timeout: 30_000 }
     const token = m[1];
 
     // POST without the CSRF token → 403
-    const noToken = await fetch(`http://127.0.0.1:${port}/tunnels/x/toggle`, { method: "POST" });
+    const noToken = await fetch(`http://127.0.0.1:${port}/api/settings`, { method: "POST" });
     assert.equal(noToken.status, 403, "missing token rejected");
 
     // POST with a wrong token → 403
-    const wrongToken = await fetch(`http://127.0.0.1:${port}/tunnels/x/toggle`, {
+    const wrongToken = await fetch(`http://127.0.0.1:${port}/api/settings`, {
       method: "POST",
       headers: { "X-CSRF-Token": "0".repeat(64) },
     });
     assert.equal(wrongToken.status, 403, "wrong token rejected");
 
     // cross-origin POST (evil.com) with the correct token → 403 (origin gate)
-    const evilOrigin = await fetch(`http://127.0.0.1:${port}/tunnels/x/toggle`, {
+    const evilOrigin = await fetch(`http://127.0.0.1:${port}/api/settings`, {
       method: "POST",
       headers: { "X-CSRF-Token": token, Origin: "http://evil.example.com" },
     });
     assert.equal(evilOrigin.status, 403, "cross-origin rejected even with token");
 
-    // legit same-origin POST with the token → 200
-    const ok = await fetch(`http://127.0.0.1:${port}/tunnels/x/toggle`, {
-      method: "POST",
-      headers: { "X-CSRF-Token": token, Origin: `http://127.0.0.1:${port}` },
+    // non-loopback Host → 403 (DNS-rebinding defense, design D2). undici
+    // forbids a custom Host header, so use raw http.request.
+    const { request } = await import("node:http");
+    const badHostStatus = await new Promise((resolve) => {
+      const r = request(
+        { host: "127.0.0.1", port, path: "/api/settings", method: "POST", headers: { "X-CSRF-Token": token, Host: "evil.example.com" } },
+        (res) => { res.resume(); resolve(res.statusCode ?? 0); },
+      );
+      r.on("error", () => resolve(0));
+      r.end();
     });
-    assert.equal(ok.status, 200, "same-origin + token accepted");
+    assert.equal(badHostStatus, 403, "non-loopback host rejected");
 
-    // invalid tunnel config via the UI add endpoint → 400 with the exact reason
-    // (client-side validation surfaces it before the daemon round-trip)
-    const badAdd = await fetch(`http://127.0.0.1:${port}/api/tunnels/add`, {
+    // legit same-origin POST with the token → 200
+    const ok = await fetch(`http://127.0.0.1:${port}/api/settings`, {
       method: "POST",
       headers: { "X-CSRF-Token": token, Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "ssh1", type: "ssh", target: 3000 }),
+      body: JSON.stringify({ allowToolDownload: true }),
     });
-    assert.equal(badAdd.status, 400, "ssh without host rejected at the UI boundary");
-    assert.match(await badAdd.text(), /requires host/, "operator sees the reason");
+    assert.equal(ok.status, 200, "same-origin + token accepted");
+    assert.equal((await ok.json()).allowToolDownload, true, "toggle applied");
+    await fetch(`http://127.0.0.1:${port}/api/settings`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": token, Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ allowToolDownload: false }),
+    });
 
-    // the add-tunnel page embeds the schema-driven form (type select + params)
-    const addPage = await fetch(`http://127.0.0.1:${port}/tunnels/add`);
-    assert.equal(addPage.status, 200);
-    const addHtml = await addPage.text();
-    assert.match(addHtml, /SCHEMAS/, "schema JSON embedded");
-    assert.match(addHtml, /tunnelType/, "type selector present");
+    // command tunnels are fail-closed through the UI expose API → 400
+    const badExpose = await fetch(`http://127.0.0.1:${port}/api/expose`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": token, Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ port: 59999, tunnel: "command" }),
+    });
+    assert.equal(badExpose.status, 400, "command tunnel rejected at the UI boundary");
+
+    // the SPA shell embeds the CSRF meta + i18n dictionary + client modules
+    assert.match(html, /UI_MSG/, "i18n dictionary embedded");
+    assert.match(html, /\/ui\/main\.js/, "client module reference present (TODO-6 split)");
+    assert.match(html, /\/ui\/ports\.js/, "ports module reference present");
   } finally {
     ui.close();
     rmSync(base, { recursive: true, force: true });

@@ -171,6 +171,8 @@ export interface AuthUser {
   name: string;
   displayName: string;
   email?: string;
+  /** 2FA enrolled（UI 装配时填充）。 */
+  totp?: boolean;
 }
 
 /**

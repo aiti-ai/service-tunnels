@@ -1,25 +1,28 @@
 /**
- * UI server — simple web management interface for service-tunnels.
+ * UI server — zero-dependency SPA control console for service-tunnels.
  *
- * Runs on 127.0.0.1:<port> (default 4181) and provides:
- *   - Tunnel management (list/add/start/stop/remove)
- *   - User management (add/remove/set-password/totp)
- *   - Auth provider management
- *   - Configuration editing
+ * 模块化结构（TODO-6 拆分）：
+ *   src/ui/client/*.js — 前端模块（core/ports/exposes/users/tokens/sites/tools/config/main），
+ *                         浏览器原生 <script> 多文件（零 bundler），服务端按 /ui/*.js 提供。
+ *   src/ui-helpers.ts   — 后端公共函数（daemonOrLocal/findExpose/maskParams/…）。
+ *   src/ui-api.ts       — JSON API 路由（createApiHandler）。
+ *   src/ui.ts           — startUi + createHandler（静态 client + API 分发 + SPA shell）。
  *
- * No external dependencies — uses Node's built-in http module and in-memory
- * templates. Opens a browser automatically on startup.
+ * Security: binds 127.0.0.1, per-session CSRF on every POST (meta token +
+ * X-CSRF-Token), Origin check, and a Host whitelist (127.0.0.1 / localhost /
+ * [::1]) as DNS-rebinding defense.
  */
 
-import { createServer, IncomingMessage, ServerResponse, type RequestListener } from "http";
+import { createServer, type RequestListener } from "http";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { platform } from "os";
 import { exec } from "child_process";
+import { join, basename, dirname } from "path";
+import { readFileSync } from "fs";
 import type { ServiceTunnels } from "./index.ts";
-import type { AuthUser, AuthToken } from "./auth-provider.ts";
-import { translate, resolveLang, CATALOG, type Lang } from "./i18n.ts";
-import { validateTunnelConfig } from "./validation.ts";
-import { parseTokenExpiry } from "./providers/token.ts";
+import { translate, CATALOG, resolveLang, type Lang } from "./i18n.ts";
+import { isLoopbackHost, json, type UiContext } from "./ui-helpers.ts";
+import { createApiHandler } from "./ui-api.ts";
 
 export interface UiServerOptions {
   /** Port to listen on (default 4181). */
@@ -27,667 +30,6 @@ export interface UiServerOptions {
   /** Open browser automatically (default true). */
   openBrowser?: boolean;
 }
-
-interface UiContext {
-  st: ServiceTunnels;
-  port: number;
-  /** Per-server random CSRF token (injected into every page; required on
-   *  every POST — same-origin scripts can read it, cross-origin pages can't). */
-  csrfToken: string;
-}
-
-/** Simple HTML templates (no template engine dependency). */
-const TEMPLATES = {
-  layout: (lang: Lang, title: string, content: string, csrf: string) => {
-    const L = (k: string, params?: Record<string, string>) => translate(lang, k, params);
-    return `<!DOCTYPE html>
-<html lang="${lang === "zh" ? "zh-CN" : "en"}">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="csrf-token" content="${csrf}">
-  <title>${title} - service-tunnels</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f5; color: #333; }
-    .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-    .header h1 { font-size: 24px; margin-bottom: 10px; }
-    .nav { display: flex; gap: 10px; margin-top: 15px; }
-    .nav a { color: white; text-decoration: none; padding: 8px 16px; border-radius: 4px; background: rgba(255,255,255,0.2); transition: background 0.2s; }
-    .nav a:hover, .nav a.active { background: rgba(255,255,255,0.3); }
-    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    .card h2 { font-size: 18px; margin-bottom: 15px; color: #667eea; }
-    .table { width: 100%; border-collapse: collapse; }
-    .table th, .table td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
-    .table th { font-weight: 600; color: #555; }
-    .status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
-    .status.running { background: #e6ffed; color: #22863a; }
-    .status.stopped { background: #ffeef0; color: #cb2431; }
-    .btn { display: inline-block; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; transition: all 0.2s; }
-    .btn-primary { background: #667eea; color: white; }
-    .btn-primary:hover { background: #5568d3; }
-    .btn-danger { background: #f56565; color: white; }
-    .btn-danger:hover { background: #e53e3e; }
-    .btn-sm { padding: 4px 8px; font-size: 12px; }
-    .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
-    .form-control { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
-    .form-control:focus { outline: none; border-color: #667eea; }
-    .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; background: #e2e8f0; }
-    .badge.favorite { background: #faf5ff; color: #805ad5; }
-    pre { background: #f7f7f7; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 13px; }
-    .alert { padding: 12px; border-radius: 4px; margin-bottom: 15px; }
-    .alert-success { background: #e6ffed; color: #22863a; }
-    .alert-error { background: #ffeef0; color: #cb2431; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <h1>🚀 ${L("ui.title")}</h1>
-      <div class="nav">
-        <a href="/" class="${content.includes("dashboard") ? "active" : ""}">${L("ui.nav.dashboard")}</a>
-        <a href="/tunnels" class="${content.includes("tunnels") ? "active" : ""}">${L("ui.nav.tunnels")}</a>
-        <a href="/users" class="${content.includes("users") ? "active" : ""}">${L("ui.nav.users")}</a>
-        <a href="/tokens" class="${content.includes("tokens") ? "active" : ""}">${L("ui.nav.tokens")}</a>
-        <a href="/sites" class="${content.includes("sites") ? "active" : ""}">${L("ui.nav.sites")}</a>
-        <a href="/config" class="${content.includes("config") ? "active" : ""}">${L("ui.nav.config")}</a>
-        <a href="/expose" class="${content.includes("expose") ? "active" : ""}">${L("ui.nav.expose")}</a>
-      </div>
-    </div>
-    ${content}
-  </div>
-  <script>
-    // 注入当前语言的 UI 文案字典(浏览器端 prompt/confirm/alert 用)
-    const UI_MSG = ${JSON.stringify(CATALOG[lang])};
-    function tr(k, p) { let m = UI_MSG[k] || k; if (p) { for (const [kk, vv] of Object.entries(p)) m = m.split('{' + kk + '}').join(vv); } return m; }
-    function csrfToken() { return document.querySelector('meta[name="csrf-token"]')?.content || ''; }
-    function httpPost(url, data) {
-      return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() }, body: JSON.stringify(data) });
-    }
-    function toggleTunnel(name) {
-      httpPost('/tunnels/' + encodeURIComponent(name) + '/toggle').then(() => location.reload());
-    }
-    function removeTunnel(name) {
-      if (confirm(tr('ui.confirmDeleteTunnel', { name }))) {
-        httpPost('/tunnels/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
-      }
-    }
-    function addUser() {
-      const name = prompt(tr('ui.promptUsername'));
-      if (!name) return;
-      const password = prompt(tr('ui.promptPassword'));
-      if (!password) return;
-      httpPost('/users/add', { name, password }).then(() => location.reload());
-    }
-    function removeUser(name) {
-      if (confirm(tr('ui.confirmDeleteUser', { name }))) {
-        httpPost('/users/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
-      }
-    }
-    function setPassword(name) {
-      const password = prompt(tr('ui.promptNewPassword'));
-      if (!password) return;
-      httpPost('/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
-    }
-    function enrollTotp(name) {
-      httpPost('/users/' + encodeURIComponent(name) + '/totp-enroll').then(r => r.json()).then(data => {
-        const otpauth = data.otpauthUrl || '';
-        const secret = data.secret || '';
-        const show = tr('ui.totpEnrollTitle', { name, otpauth, secretHint: secret ? tr('ui.totpEnrollSecretHint', { secret }) : '' }) + '\n' + tr('ui.totpEnrollEnterCode');
-        const code = prompt(show);
-        if (code) {
-          // TOTP 固定 6 位纯数字 —— 本地即校验，避免无谓的服务器往返
-          if (!/^\d{6}$/.test(code)) { alert(tr('ui.totpCodeWrong')); return; }
-          httpPost('/users/' + encodeURIComponent(name) + '/totp-activate', { code }).then(r => r.json()).then(d => {
-            alert(d.activated ? tr('ui.totpActivated') : tr('ui.totpCodeWrong'));
-            location.reload();
-          });
-        }
-      });
-    }
-    function disableTotp(name) {
-      if (confirm(tr('ui.confirmDisableTotp'))) {
-        httpPost('/users/' + encodeURIComponent(name) + '/totp-disable').then(() => location.reload());
-      }
-    }
-    function addSite() {
-      const name = prompt(tr('ui.promptSiteName'));
-      if (!name) return;
-      const provider = prompt(tr('ui.promptSiteProvider')) || '';
-      const domain = prompt(tr('ui.promptSiteDomain')) || '';
-      const body = { name, provider, domain };
-      httpPost('/api/sites/add', body).then(r => r.json()).then(d => {
-        if (d.error) { alert('❌ ' + d.error); } else { location.reload(); }
-      });
-    }
-    function removeSite(name) {
-      if (confirm(tr('ui.confirmDeleteSite', { name }))) {
-        httpPost('/sites/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
-      }
-    }
-    function siteAddUser(site) {
-      const name = prompt(tr('ui.promptUsername'));
-      if (!name) return;
-      const password = prompt(tr('ui.promptPassword'));
-      if (!password) return;
-      httpPost('/sites/' + encodeURIComponent(site) + '/users/add', { name, password }).then(() => location.reload());
-    }
-    function siteRemoveUser(site, name) {
-      if (confirm(tr('ui.confirmDeleteSiteUser', { site, name }))) {
-        httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/remove').then(() => location.reload());
-      }
-    }
-    function siteSetPassword(site, name) {
-      const password = prompt(tr('ui.promptNewPassword'));
-      if (!password) return;
-      httpPost('/sites/' + encodeURIComponent(site) + '/users/' + encodeURIComponent(name) + '/password', { password }).then(() => location.reload());
-    }
-    // —— Bearer tokens（tunnel API 请求）——
-    function addToken(site) {
-      const description = prompt(tr('ui.promptTokenDescription')) || '';
-      const expires = prompt(tr('ui.promptTokenExpiry')) || 'never';
-      const body = { description, expiresAt: expires, ...(site ? { site } : {}) };
-      httpPost('/api/tokens/create', body).then(r => r.json()).then(d => {
-        if (d.error) { alert('❌ ' + d.error); return; }
-        const tok = d.tokens && d.tokens[0] && d.tokens[0].token ? d.tokens[0].token.token : '';
-        // 原始 token 只在创建时出现一次 —— prompt 内容可选中/复制
-        prompt(tr('ui.tokenCreatedTitle'), tok);
-        location.reload();
-      });
-    }
-    function revokeToken(id, site) {
-      if (!confirm(tr('ui.confirmRevokeToken', { id: id.slice(0, 8) + '…' }))) return;
-      const url = site
-        ? '/sites/' + encodeURIComponent(site) + '/tokens/' + encodeURIComponent(id) + '/revoke'
-        : '/tokens/' + encodeURIComponent(id) + '/revoke';
-      httpPost(url).then(() => location.reload());
-    }
-  </script>
-</body>
-</html>`;
-  },
-
-  dashboard: (lang: Lang, daemonRunning: boolean, tunnelCount: number, userCount: number, tokenCount: number) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.dash.systemStatus")}</h2>
-      <p>${L("ui.dash.daemon")} <span class="status ${daemonRunning ? "running" : "stopped"}">${daemonRunning ? L("ui.status.running") : L("ui.status.stopped")}</span></p>
-      <p>${L("ui.dash.activeTunnels", { n: String(tunnelCount) })}</p>
-      <p>${L("ui.dash.registeredUsers", { n: String(userCount) })}</p>
-      <p>${L("ui.dash.registeredTokens", { n: String(tokenCount) })}</p>
-    </div>
-    <div class="card">
-      <h2>${L("ui.dash.quickActions")}</h2>
-      <button class="btn btn-primary" onclick="location.href='/expose'">${L("ui.dash.exposePort")}</button>
-      <button class="btn btn-primary" onclick="location.href='/tunnels'">${L("ui.dash.manageTunnels")}</button>
-      <button class="btn btn-primary" onclick="location.href='/users'">${L("ui.dash.manageUsers")}</button>
-    </div>
-  `;
-  },
-
-  tunnels: (lang: Lang, tunnels: any[]) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.tunnels.list")}</h2>
-      <table class="table">
-        <thead>
-          <tr>
-            <th>${L("ui.th.name")}</th>
-            <th>${L("ui.th.type")}</th>
-            <th>${L("ui.th.status")}</th>
-            <th>URL</th>
-            <th>${L("ui.th.actions")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${tunnels.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.tunnels")}</td></tr>` : ""}
-          ${tunnels.map((t: any) => `
-            <tr>
-              <td>${t.name}</td>
-              <td>${t.type}${t.favorite ? ` <span class="badge favorite">${L("ui.badge.favorite")}</span>` : ''}</td>
-              <td><span class="status ${t.running ? 'running' : 'stopped'}">${t.running ? L("ui.status.running") : L("ui.status.stopped")}</span></td>
-              <td>${t.url || '-'}</td>
-              <td>
-                <button class="btn btn-sm btn-primary" onclick="toggleTunnel('${t.name}')">${t.running ? L("ui.btn.stop") : L("ui.btn.start")}</button>
-                <button class="btn btn-sm btn-danger" onclick="removeTunnel('${t.name}')">${L("ui.btn.delete")}</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-      <div style="margin-top: 15px;">
-        <a href="/tunnels/add" class="btn btn-primary">${L("ui.btn.addTunnel")}</a>
-      </div>
-    </div>
-  `;
-  },
-
-  users: (lang: Lang, users: AuthUser[], totpStatus: Record<string, boolean>) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.users.list")}</h2>
-      <table class="table">
-        <thead>
-          <tr>
-            <th>${L("ui.th.username")}</th>
-            <th>${L("ui.th.displayName")}</th>
-            <th>2FA</th>
-            <th>${L("ui.th.actions")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${users.length === 0 ? `<tr><td colspan="4" style="text-align:center;color:#999;">${L("ui.empty.users")}</td></tr>` : ""}
-          ${users.map((u: AuthUser) => `
-            <tr>
-              <td>${u.name}</td>
-              <td>${u.displayName || u.name}</td>
-              <td>${totpStatus[u.name] ? `<span class="status running">${L("ui.status.enabled")}</span>` : `<span class="status stopped">${L("ui.status.disabled")}</span>`}</td>
-              <td>
-                <button class="btn btn-sm btn-primary" onclick="setPassword('${u.name}')">${L("ui.btn.setPassword")}</button>
-                ${totpStatus[u.name]
-                  ? `<button class="btn btn-sm btn-danger" onclick="disableTotp('${u.name}')">${L("ui.btn.disableTotp")}</button>`
-                  : `<button class="btn btn-sm btn-primary" onclick="enrollTotp('${u.name}')">${L("ui.btn.enableTotp")}</button>`
-                }
-                <button class="btn btn-sm btn-danger" onclick="removeUser('${u.name}')">${L("ui.btn.delete")}</button>
-              </td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-      <div style="margin-top: 15px;">
-        <button class="btn btn-primary" onclick="addUser()">${L("ui.btn.addUser")}</button>
-      </div>
-    </div>
-  `;
-  },
-
-  config: (lang: Lang, config: any) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.config.title")}</h2>
-      <pre>${JSON.stringify(config, null, 2)}</pre>
-    </div>
-  `;
-  },
-
-  sites: (lang: Lang, sites: any[], exposes: any[]) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.sites.title")}</h2>
-      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.sites.hint")}</p>
-      <table class="table">
-        <thead>
-          <tr><th>${L("ui.th.site")}</th><th>provider</th><th>${L("ui.th.auth")}</th><th>${L("ui.th.domain")}</th><th>${L("ui.th.status")}</th><th>${L("ui.th.addr")}</th><th>${L("ui.th.actions")}</th></tr>
-        </thead>
-        <tbody>
-          ${sites.map((s: any) => {
-            const urls = [
-              s.localUrl && `<code>${s.localUrl}</code>`,
-              s.baseUrl && `<code>${s.baseUrl}</code>`,
-              s.domainUrl && `<code>${s.domainUrl}</code>`,
-            ].filter(Boolean);
-            return `<tr>
-              <td><strong>${s.name}</strong>${s.name === "default" ? ` <span class="badge">${L("ui.badge.default")}</span>` : ""}</td>
-              <td>${s.provider || "auto"}</td>
-              <td>${s.auth === false ? L("ui.auth.open") : s.policy ? `${L("ui.auth.yes")}(${s.policy})` : L("ui.auth.yes")}</td>
-              <td>${s.domain || "-"}</td>
-              <td><span class="status ${s.running ? "running" : "stopped"}">${s.running ? L("ui.status.running") : L("ui.status.notStarted")}</span></td>
-              <td>${urls.length ? urls.join("<br>") : "-"}</td>
-              <td>
-                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/users">${L("ui.btn.users")}</a>
-                <a class="btn btn-sm btn-primary" href="/sites/${s.name}/tokens">${L("ui.btn.tokens")}</a>
-                ${s.name !== "default" ? `<button class="btn btn-sm btn-danger" onclick="removeSite('${s.name}')">${L("ui.btn.delete")}</button>` : ""}
-              </td>
-            </tr>`;
-          }).join("")}
-        </tbody>
-      </table>
-      <div style="margin-top:15px;">
-        <button class="btn btn-primary" onclick="addSite()">${L("ui.btn.addSite")}</button>
-        <span style="color:#999;font-size:12px;margin-left:8px;">${L("ui.sites.example")} <code>site add host --provider portal --domain web.example.com</code></span>
-      </div>
-    </div>
-    <div class="card">
-      <h2>${L("ui.sites.localExposes")}</h2>
-      <table class="table">
-        <thead><tr><th>${L("ui.th.port")}</th><th>${L("ui.th.site")}</th><th>provider</th><th>${L("ui.th.localAddr")}</th><th>${L("ui.th.baseDomain")}</th></tr></thead>
-        <tbody>
-          ${exposes.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.exposes")}</td></tr>` : ""}
-          ${exposes.map((e: any) => `<tr>
-            <td>${e.port}</td>
-            <td>${e.site || "-"}</td>
-            <td>${e.provider || L("ui.auth.open")}</td>
-            <td><code>${e.localUrl || "-"}</code></td>
-            <td><code>${e.baseUrl || e.domainUrl || "-"}</code></td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-  },
-
-  siteUsers: (lang: Lang, site: any, users: AuthUser[]) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.siteUsers.title", { name: site.name })}</h2>
-      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.siteUsers.hint", { provider: site.provider || "auto" })}</p>
-      <table class="table">
-        <thead><tr><th>${L("ui.th.username")}</th><th>${L("ui.th.displayName")}</th><th>${L("ui.th.actions")}</th></tr></thead>
-        <tbody>
-          ${users.length === 0 ? `<tr><td colspan="3" style="text-align:center;color:#999;">${L("ui.empty.users")}</td></tr>` : ""}
-          ${users.map((u: AuthUser) => `<tr>
-            <td>${u.name}</td>
-            <td>${u.displayName || u.name}</td>
-            <td>
-              <button class="btn btn-sm btn-primary" onclick="siteSetPassword('${site.name}','${u.name}')">${L("ui.btn.setPassword")}</button>
-              <button class="btn btn-sm btn-danger" onclick="siteRemoveUser('${site.name}','${u.name}')">${L("ui.btn.delete")}</button>
-            </td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-      <div style="margin-top:15px;">
-        <button class="btn btn-primary" onclick="siteAddUser('${site.name}')">${L("ui.btn.addUser")}</button>
-        <a href="/sites" class="btn" style="background:#eee;color:#333;">${L("ui.btn.back")}</a>
-      </div>
-    </div>
-  `;
-  },
-
-  /** Bearer token 管理（默认站点）。site 参数 = 命名站点时渲染回链。 */
-  tokens: (lang: Lang, tokens: AuthToken[], site?: string) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    const fmt = (t: number) => new Date(t).toLocaleString(lang.startsWith("zh") ? "zh-CN" : "en-US");
-    // description 是自由文本（token 说明）——服务端模板必须转义防 XSS
-    const esc = (v: string) => String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-    const siteArg = site ? `,'${esc(site)}'` : "";
-    return `
-    <div class="card">
-      <h2>${site ? L("ui.siteTokens.title", { name: esc(site) }) : L("ui.tokens.list")}</h2>
-      <p style="color:#666;font-size:13px;margin-bottom:12px;">${L("ui.tokens.hint")}</p>
-      <table class="table">
-        <thead><tr>
-          <th>${L("ui.th.id")}</th>
-          <th>${L("ui.th.description")}</th>
-          <th>${L("ui.th.created")}</th>
-          <th>${L("ui.th.expires")}</th>
-          <th>${L("ui.th.actions")}</th>
-        </tr></thead>
-        <tbody>
-          ${tokens.length === 0 ? `<tr><td colspan="5" style="text-align:center;color:#999;">${L("ui.empty.tokens")}</td></tr>` : ""}
-          ${tokens.map((t: AuthToken) => `<tr>
-            <td><code title="${t.id}">${t.id.slice(0, 8)}…</code></td>
-            <td>${t.description ? esc(t.description) : "-"}</td>
-            <td>${fmt(t.createdAt)}</td>
-            <td>${t.expiresAt ? fmt(t.expiresAt) : `<span class="status stopped">${L("ui.status.never")}</span>`}</td>
-            <td><button class="btn btn-sm btn-danger" onclick="revokeToken('${t.id}'${siteArg})">${L("ui.btn.revoke")}</button></td>
-          </tr>`).join("")}
-        </tbody>
-      </table>
-      <div style="margin-top:15px;">
-        <button class="btn btn-primary" onclick="addToken(${site ? `'${esc(site)}'` : ""})">${L("ui.btn.addToken")}</button>
-        ${site ? `<a href="/sites" class="btn" style="background:#eee;color:#333;">${L("ui.btn.back")}</a>` : ""}
-      </div>
-    </div>
-  `;
-  },
-
-  siteTokens: (lang: Lang, site: any, tokens: AuthToken[]) => {
-    return TEMPLATES.tokens(lang, tokens, site.name);
-  },
-
-  expose: (lang: Lang, sites: string[], authSchemas: Record<string, any[]>, authMetas: Record<string, any>, authOrder: string[], authNoneAllowed: boolean) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.expose.title")}</h2>
-      <form id="exposeForm" style="max-width: 400px;">
-        <div class="form-group">
-          <label>${L("ui.label.localPort")}</label>
-          <input type="number" name="port" class="form-control" required placeholder="${L("ui.placeholder.port")}">
-        </div>
-        <div class="form-group">
-          <label>${L("ui.label.mode")}</label>
-          <select name="mode" class="form-control">
-            <option value="tunnel">${L("ui.option.tunnel")}</option>
-            <option value="proxy">${L("ui.option.proxy")}</option>
-            <option value="both">${L("ui.option.both")}</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>${L("ui.label.auth")}</label>
-          ${authNoneAllowed ? "" : `<p style="color:#d73a49;font-size:12px;margin-bottom:4px;">${L("ui.expose.authRequired")}</p>`}
-          <select name="auth" id="authType" class="form-control">
-            <option value="auto">${L("ui.option.auto")}</option>
-            ${authNoneAllowed ? `<option value="none">${L("ui.option.none")}</option>` : ""}
-            ${authOrder.map((t) => {
-              const meta = authMetas[t] || {};
-              const badge = meta.kind === "oauth2-variant"
-                ? (meta.configured ? ` ${L("ui.meta.configured")}` : (meta.needsInput?.length ? ` (${L("ui.meta.needsInput")} ` + meta.needsInput.join("/") + ")" : ""))
-                : "";
-              return `<option value="${t}">${meta.label || t}${badge}</option>`;
-            }).join("")}
-          </select>
-        </div>
-        <div id="authParamFields"></div>
-        <div class="form-group">
-          <label>${L("ui.label.site")}</label>
-          <select name="site" class="form-control">
-            <option value="">${L("ui.option.default")}</option>
-            ${sites.map((s: string) => `<option value="${s}">${s}</option>`).join("")}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>${L("ui.label.tunnelType")}</label>
-          <select name="tunnel" class="form-control">
-            <option value="ngrok">ngrok</option>
-            <option value="cloudflared">${L("ui.option.cloudflared")}</option>
-            <option value="serveo">serveo</option>
-            <option value="localtunnel">localtunnel</option>
-            <option value="bore">bore</option>
-            <option value="natapp">natapp</option>
-          </select>
-        </div>
-        <button type="submit" class="btn btn-primary">${L("ui.btn.expose")}</button>
-      </form>
-      <div id="result" style="margin-top: 15px;"></div>
-    </div>
-    <script>
-      // 预填值（含 clientSecret）会进页面 —— JSON 转义 < 防 </script> 逃逸；
-      // 属性值 HTML 转义防引号逃逸（配置档/环境变量是操作者输入，仍纵深防御）
-      const AUTH_SCHEMAS = ${JSON.stringify(authSchemas).replace(/</g, '\\u003c')};
-      const AUTH_METAS = ${JSON.stringify(authMetas).replace(/</g, '\\u003c')};
-      function escAttr(v) {
-        return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-      }
-      function authInputHtml(s) {
-        const fixed = s.fixed === true;
-        const fixedAttr = fixed ? ' disabled' : '';
-        const label = (s.label || s.key) + (s.required ? ' *' : '') + (fixed ? ' 🔒' : '');
-        // 秘密字段（password）已由配置档携带：不回显明文（不写 value），
-        // 显示「已设置」提示；留空提交 = 回落配置档值，填写 = 覆盖
-        const secretSet = s.type === 'password' && s.secretSet;
-        const secretNote = secretSet
-          ? '<div style="color:#2da44e;font-size:12px;margin-top:4px;">' + tr('ui.secretProvided') + '</div>'
-          : '';
-        const hint = secretNote + (s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
-          (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || tr('ui.linkTitleDefault')) + '</a>' : '') + '</div>' : '');
-        const ph = s.placeholder ? ' placeholder="' + escAttr(s.placeholder) + '"' : '';
-        const val = s.default ?? s.value;
-        const def = (!secretSet && val !== undefined) ? ' value="' + escAttr(String(val)) + '"' : '';
-        let input;
-        if (s.options && s.options.length) {
-          input = '<select name="' + escAttr(s.key) + '" class="form-control"' + fixedAttr + '>' +
-            s.options.map((o) => '<option value="' + escAttr(o.value) + '">' + escAttr(o.label || o.value) + '</option>').join('') + '</select>';
-        } else if (s.type === 'number') {
-          input = '<input type="number" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + fixedAttr + '>';
-        } else if (s.type === 'password') {
-          input = '<input type="password" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + ' autocomplete="new-password"' + fixedAttr + '>';
-        } else {
-          input = '<input type="text" name="' + escAttr(s.key) + '" class="form-control"' + ph + def + fixedAttr + '>';
-        }
-        return '<div class="form-group"><label>' + escAttr(label) + '</label>' + input + hint + '</div>';
-      }
-      function renderAuthParams(type) {
-        const wrap = document.getElementById('authParamFields');
-        const specs = AUTH_SCHEMAS[type] || [];
-        const meta = AUTH_METAS[type] || {};
-        const hint = meta.kind === 'oauth2-variant'
-          ? (meta.configured
-              ? '<p style="color:#2da44e;font-size:12px;margin-bottom:4px;">' + tr('ui.secretProvidedHint') + '</p>'
-              : '<p style="color:#999;font-size:12px;margin-bottom:4px;">' + tr('ui.fieldsHint') + '</p>')
-          : '';
-        wrap.innerHTML = hint + (specs.map(authInputHtml).join('') || '');
-      }
-      const authSel = document.getElementById('authType');
-      authSel.addEventListener('change', (e) => renderAuthParams(e.target.value));
-      renderAuthParams(authSel.value);
-      document.getElementById('exposeForm').onsubmit = async (e) => {
-        e.preventDefault();
-        const fd = new FormData(e.target);
-        const port = fd.get('port');
-        const auth = fd.get('auth');
-        const tunnel = fd.get('tunnel');
-        const mode = fd.get('mode');
-        const site = fd.get('site');
-        // 认证参数：变体/原始 oauth2-proxy 的待填字段（凭证未携带时才有）
-        const providerParams = {};
-        for (const s of AUTH_SCHEMAS[auth] || []) {
-          const raw = fd.get(s.key);
-          if (raw === undefined || raw === null || raw === '') continue;
-          providerParams[s.key] = raw;
-        }
-        const result = document.getElementById('result');
-        result.innerHTML = '<p>' + tr('ui.expose.progress') + '</p>';
-        try {
-          const r = await fetch('/api/expose', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
-            body: JSON.stringify({
-              port: Number(port),
-              auth: auth === 'none' ? false : auth,
-              tunnel, mode,
-              site: site || undefined,
-              providerParams: Object.keys(providerParams).length ? providerParams : undefined
-            })
-          });
-          const data = await r.json();
-          if (data.url || data.localUrl) {
-            const urls = [data.url, data.localUrl, data.baseUrl, data.domainUrl].filter(Boolean);
-            result.innerHTML = '<div class="alert alert-success">' + tr('ui.expose.success') + urls.map(u => '<strong>URL:</strong> <a href="' + u + '" target="_blank">' + u + '</a><br>').join('') + '</div>';
-          } else {
-            result.innerHTML = '<div class="alert alert-error">' + tr('ui.expose.failed') + (data.error || tr('ui.unknownError')) + '</div>';
-          }
-        } catch (err) {
-          result.innerHTML = '<div class="alert alert-error">' + tr('ui.requestFailed') + err + '</div>';
-        }
-      };
-    </script>
-  `;
-  },
-
-  tunnelsAdd: (lang: Lang, schemas: Record<string, any[]>, metas: Record<string, any>) => {
-    const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
-    return `
-    <div class="card">
-      <h2>${L("ui.tunnelsAdd.title")}</h2>
-      <form id="tunnelForm">
-        <div class="form-group">
-          <label>${L("ui.label.name")}</label>
-          <input type="text" name="name" class="form-control" required placeholder="${L("ui.placeholder.name")}">
-        </div>
-        <div class="form-group">
-          <label>${L("ui.th.type")}</label>
-          <select name="type" id="tunnelType" class="form-control" required>
-            ${Object.keys(schemas).map((t) => {
-              const dangerous = metas[t]?.dangerous;
-              return `<option value="${t}">${t}${dangerous ? ` ⚠️ ${L("ui.dangerous")}` : ""}</option>`;
-            }).join("")}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>${L("ui.label.target")}</label>
-          <input type="number" name="target" class="form-control" placeholder="${L("ui.placeholder.target")}">
-        </div>
-        <div id="paramFields"></div>
-        <button type="submit" class="btn btn-primary">${L("ui.btn.add")}</button>
-      </form>
-      <div id="result" style="margin-top: 15px;"></div>
-    </div>
-    <script>
-      const SCHEMAS = ${JSON.stringify(schemas)};
-      const METAS = ${JSON.stringify(metas)};
-      function renderParams(type) {
-        const wrap = document.getElementById('paramFields');
-        const specs = SCHEMAS[type] || [];
-        wrap.innerHTML = specs.map((s) => {
-          const label = (s.label || s.key) + (s.required ? ' *' : '');
-          const hint = s.description ? '<div style="color:#999;font-size:12px;margin-top:4px;">' + s.description +
-            (s.link ? ' <a href="' + s.link + '" target="_blank" rel="noopener">' + (s.linkTitle || tr('ui.linkTitleDefault')) + '</a>' : '') + '</div>' : '';
-          const ph = s.placeholder ? ' placeholder="' + s.placeholder + '"' : '';
-          const def = s.default !== undefined ? ' value="' + s.default + '"' : '';
-          let input;
-          if (s.options && s.options.length) {
-            input = '<select name="' + s.key + '" class="form-control">' +
-              s.options.map((o) => '<option value="' + o.value + '">' + (o.label || o.value) + '</option>').join('') + '</select>';
-          } else if (s.type === 'number') {
-            input = '<input type="number" name="' + s.key + '" class="form-control"' + ph + def + '>';
-          } else if (s.type === 'password') {
-            input = '<input type="password" name="' + s.key + '" class="form-control"' + ph + def + '>';
-          } else {
-            input = '<input type="text" name="' + s.key + '" class="form-control"' + ph + def + '>';
-          }
-          return '<div class="form-group"><label>' + label + '</label>' + input + hint + '</div>';
-        }).join('');
-      }
-      const typeSel = document.getElementById('tunnelType');
-      typeSel.addEventListener('change', (e) => renderParams(e.target.value));
-      renderParams(typeSel.value);
-      document.getElementById('tunnelForm').onsubmit = async (e) => {
-        e.preventDefault();
-        const fd = new FormData(e.target);
-        const data = Object.fromEntries(fd.entries());
-        data.target = Number(data.target) || undefined;
-        for (const s of SCHEMAS[data.type] || []) {
-          const raw = data[s.key];
-          if (raw === undefined || raw === '') { delete data[s.key]; continue; }
-          if (s.type === 'number') data[s.key] = Number(raw);
-        }
-        if (data.type === 'command') {
-          // command 类型直接执行 shell 命令 —— 显式确认后才提交（daemon 侧同样要求 dangerous: true）
-          if (!confirm(tr('ui.confirmCommand'))) return;
-          data.dangerous = true;
-        }
-        const result = document.getElementById('result');
-        result.innerHTML = '<p>' + tr('ui.expose.progress') + '</p>';
-        try {
-          const r = await fetch('/api/tunnels/add', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
-            body: JSON.stringify(data)
-          });
-          const d = await r.json();
-          if (d.added) {
-            result.innerHTML = '<div class="alert alert-success">' + tr('ui.add.success') + '</div>';
-            setTimeout(() => location.href = '/tunnels', 1000);
-          } else {
-            result.innerHTML = '<div class="alert alert-error">' + tr('ui.add.failed') + (d.error || tr('ui.unknownError')) + '</div>';
-          }
-        } catch (err) {
-          result.innerHTML = '<div class="alert alert-error">' + tr('ui.requestFailed') + err + '</div>';
-        }
-      };
-    </script>
-  `;
-  },
-};
 
 /** Open the default browser. */
 function openBrowser(url: string): void {
@@ -701,422 +43,185 @@ function openBrowser(url: string): void {
   });
 }
 
-/** Parse URL-encoded body. */
-function parseBody(req: IncomingMessage): Promise<Record<string, string>> {
-  return new Promise((resolve) => {
-    let body = "";
-    req.on("data", (chunk) => body += chunk);
-    req.on("end", () => {
-      const out: Record<string, string> = {};
-      for (const pair of body.split("&")) {
-        const [k, v] = pair.split("=").map(decodeURIComponent);
-        if (k) out[k] = v ?? "";
-      }
-      resolve(out);
-    });
-  });
+/** 客户端静态文件目录：包根/src/ui/client（src 与 dist 部署均指向同一份）。 */
+function clientDir(): string {
+  return join(dirname(import.meta.dirname), "src", "ui", "client");
 }
 
-/** Create the request handler. */
+const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.js", "sites.js", "tools.js", "config.js", "main.js"];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPA shell — HTML + CSS only; 前端 JS 全部外置到 /ui/*.js（模块化）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CSS = `
+<style>
+:root{--bg:#f5f5f5;--panel:#fff;--border:#ddd;--text:#333;--dim:#777;--accent:#667eea;--danger:#f87171;--ok:#16a34a}
+@media (prefers-color-scheme: dark){:root{--bg:#17181c;--panel:#202127;--border:#33353d;--text:#e6e6e6;--dim:#9a9aa3;--accent:#8b9cf7}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:13px}
+.wrap{max-width:1180px;margin:0 auto;padding:16px}
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:14px 18px;border:1px solid var(--border);border-radius:10px;background:var(--panel);margin-bottom:14px}
+header h1{font-size:16px;font-weight:700;color:var(--accent)}
+.dstat{font-size:11px;color:var(--dim)}
+.dstat .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+.dot.on{background:var(--ok)} .dot.off{background:var(--danger)}
+.spacer{flex:1}
+button{font:inherit;cursor:pointer}
+.btn{padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text)}
+.btn:disabled{opacity:.5;cursor:default}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn-danger{color:var(--danger)}
+.btn-sm{padding:2px 8px;font-size:11px}
+.icon-btn{background:none;border:none;color:var(--dim);padding:4px}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:12px;flex-wrap:wrap}
+.tab{padding:7px 16px;background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);font-size:13px}
+.tab.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.card{border:1px solid var(--border);border-radius:8px;background:var(--panel);margin-bottom:10px;overflow:hidden}
+.row{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer}
+.row:hover{background:rgba(128,128,128,.06)}
+.port{font-family:ui-monospace,monospace;font-size:14px;font-weight:700;color:var(--accent);min-width:56px}
+.mono{font-family:ui-monospace,monospace}
+.dim{color:var(--dim)} .ok{color:var(--ok)} .bad{color:var(--danger)}
+.badge{display:inline-block;padding:1px 7px;border-radius:4px;background:rgba(128,128,128,.14);color:var(--dim);font-size:10px;white-space:nowrap}
+.badge.authnone{background:rgba(248,113,113,.15);border:1px solid rgba(248,113,113,.45);color:var(--danger);font-weight:700}
+.badge.ssh{background:rgba(124,58,237,.15);color:#7c3aed}
+.badge.token{background:rgba(8,145,178,.15);color:#0891b2}
+.expand{border-top:1px solid var(--border);padding:12px;background:var(--panel)}
+.section-label{font-size:11px;font-weight:700;color:var(--dim);margin:8px 0 6px;text-transform:uppercase}
+.url-row{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:6px;background:var(--bg)}
+.url-row a{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent);text-decoration:none;font-family:ui-monospace,monospace;font-size:12px}
+.url-row .lbl{font-size:10px;color:var(--dim);min-width:70px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--border);font-size:12px}
+th{color:var(--dim);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.matrix-cell{border:1px solid var(--border);border-radius:6px;padding:10px;text-align:center;cursor:pointer;background:var(--panel)}
+.matrix-cell:hover{border-color:var(--accent)}
+.matrix-cell b{font-size:18px;display:block}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+label{display:block;font-size:11px;color:var(--dim);margin-bottom:3px}
+input,select{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px;font-family:inherit}
+textarea{width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px;font-family:ui-monospace,monospace}
+.hint{font-size:10px;color:var(--dim);margin-top:2px}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:8px;background:var(--panel);border:1px solid var(--border);box-shadow:0 4px 16px rgba(0,0,0,.2);font-size:12px;z-index:1200;max-width:80vw;word-break:break-all}
+.toast.err{border-color:var(--danger);color:var(--danger)}
+.modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1100}
+.modal{width:min(520px,92vw);max-height:84vh;overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+.modal h3{font-size:14px;margin-bottom:10px}
+.modal .kv{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px}
+.modal .kv .k{flex-shrink:0;width:70px;color:var(--dim)}
+.modal .kv .v{flex:1;min-width:0;word-break:break-all}
+pre.log{max-height:140px;overflow:auto;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:10px;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,monospace}
+.muted{color:var(--dim);font-size:12px}
+.spin{animation:spin 1s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{padding:28px;text-align:center;color:var(--dim)}
+.actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+</style>
+`;
+
+const SHELL = (lang: Lang, csrf: string) => {
+  const L = (k: string, p?: Record<string, string>) => translate(lang, k, p);
+  return `<!DOCTYPE html>
+<html lang="${lang === "zh" ? "zh-CN" : "en"}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="${csrf}">
+<title>service-tunnels</title>
+<style>
+${CSS}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🚀 ${L("ui.title")}</h1>
+    <span class="dstat"><span class="dot off" id="daemonDot"></span><span id="daemonTxt">…</span></span>
+    <span class="dstat" id="modeTxt"></span>
+    <div class="spacer"></div>
+    <span class="dstat" id="pollTxt"></span>
+    <button class="btn btn-sm" id="refreshBtn">⟳</button>
+    <button class="btn btn-sm" id="langBtn">${lang === "zh" ? "EN" : "中文"}</button>
+  </header>
+  <div class="tabs" id="tabs"></div>
+  <main id="content"></main>
+</div>
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+<script>
+window.UI_MSG = ${JSON.stringify(CATALOG[lang])};
+window.UI_CSRF = '${csrf}';
+</script>
+<script src="/ui/core.js"></script>
+<script src="/ui/ports.js"></script>
+<script src="/ui/exposes.js"></script>
+<script src="/ui/users.js"></script>
+<script src="/ui/tokens.js"></script>
+<script src="/ui/sites.js"></script>
+<script src="/ui/tools.js"></script>
+<script src="/ui/config.js"></script>
+<script src="/ui/main.js"></script>
+</body>
+</html>`;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request handler — CSRF/Host gate + static client + JSON API + SPA shell.
+// ─────────────────────────────────────────────────────────────────────────────
+
 function createHandler(ctx: UiContext): RequestListener {
   return async (req, res) => {
     const url = new URL(req.url ?? "", `http://${req.headers.host}`);
-    // 多语:?lang= 显式 > Accept-Language header(默认英文,中文环境出中文)
     const acceptLang = String(req.headers["accept-language"] ?? "");
     const lang: Lang = resolveLang(url.searchParams.get("lang") ?? undefined, { LANG: acceptLang.split(",")[0] ?? "" });
     const path = url.pathname;
 
-    // ── CSRF / same-origin enforcement ─────────────────────────────────────
-    // The UI binds 127.0.0.1 only, but ANY local web page can POST to it
-    // (browsers send simple requests without preflight). Every mutating
-    // request must (1) come from the page's own origin and (2) carry the
-    // per-session CSRF token — readable only by same-origin scripts (no
-    // Access-Control-Allow-Origin is ever set).
+    // ── CSRF / same-origin / loopback-host gate ─────────────────────────
     if (req.method === "POST") {
+      if (!isLoopbackHost(req.headers.host)) {
+        json(res, 403, { error: "non-loopback host rejected" });
+        return;
+      }
       const origin = req.headers.origin;
       if (origin !== undefined && origin !== `http://127.0.0.1:${ctx.port}` && origin !== `http://localhost:${ctx.port}`) {
-        res.writeHead(403, { "Content-Type": "text/plain" });
-        res.end("cross-origin request rejected");
+        json(res, 403, { error: "cross-origin request rejected" });
         return;
       }
       const sent = Buffer.from(String(req.headers["x-csrf-token"] ?? ""));
       const expected = Buffer.from(ctx.csrfToken);
       if (sent.length !== expected.length || !timingSafeEqual(sent, expected)) {
-        res.writeHead(403, { "Content-Type": "text/plain" });
-        res.end("missing or invalid CSRF token");
+        json(res, 403, { error: "missing or invalid CSRF token" });
         return;
       }
     }
 
     try {
-      // Dashboard
-      if (path === "/" || path === "/dashboard") {
-        const dstat = ctx.st.daemon.status();
-        const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
-        const users: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
-        const userCount = users.reduce((n, x) => n + x.users.length, 0);
-        const tokenGroups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens();
-        const tokenCount = tokenGroups.reduce((n, x) => n + x.tokens.length, 0);
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.dashboard"), TEMPLATES.dashboard(lang, dstat.running, tunnels.length, userCount, tokenCount), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // Tunnels
-      if (path === "/tunnels") {
-        const tunnels = (await ctx.st.daemon.request<any[]>("tunnel.list")) ?? [];
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.tunnels"), TEMPLATES.tunnels(lang, tunnels), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      if (path === "/tunnels/add") {
-        const schemas = ctx.st.schemas.tunnels();
-        const metas = ctx.st.schemas.metas();
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.tunnelsAdd.title"), TEMPLATES.tunnelsAdd(lang, schemas, metas), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // Users
-      if (path === "/users") {
-        const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users();
-        const users: AuthUser[] = groups.flatMap((g) => g.users);
-        const totpStatus: Record<string, boolean> = {};
-        for (const u of users) {
-          try {
-            const s = await ctx.st.auth.totpStatus(u.name);
-            totpStatus[u.name] = s?.enrolled ?? false;
-          } catch {
-            totpStatus[u.name] = false; // 未注册/不可查 → 视为未启用
-          }
-        }
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.users"), TEMPLATES.users(lang, users, totpStatus), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // Bearer tokens（默认站点）
-      if (path === "/tokens") {
-        const groups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens();
-        const tokens: AuthToken[] = groups.flatMap((g) => g.tokens);
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.tokens"), TEMPLATES.tokens(lang, tokens), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // Sites (认证域)
-      if (path === "/sites") {
-        const sites = ctx.st.sites.list();
-        // merge running exposes' URLs onto each site (proxy mode)
-        const exposes = ctx.st.exposes().filter((e) => e.localUrl);
-        const withUrls = sites.map((s) => {
-          const ex = exposes.filter((e) => (e.site || "default") === s.name);
-          return {
-            ...s,
-            localUrl: ex.map((e) => e.localUrl).find(Boolean),
-            baseUrl: ex.map((e) => e.baseUrl).find(Boolean),
-            domainUrl: ex.map((e) => e.domainUrl).find(Boolean),
-          };
-        });
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.sites"), TEMPLATES.sites(lang, withUrls, exposes), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      if (path === "/api/sites/add" && req.method === "POST") {
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        try {
-          ctx.st.sites.add(body.name, {
-            provider: body.provider || undefined,
-            domain: body.domain || undefined,
-            basePath: body.basePath || undefined,
-            policy: body.policy || undefined,
-          });
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ added: body.name }));
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
-      }
-
-      if (path.startsWith("/sites/") && req.method === "POST" && path.endsWith("/remove")) {
-        const name = path.split("/")[2] ?? "";
-        try {
-          ctx.st.sites.remove(name);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ removed: name }));
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
-      }
-
-      // per-site users: page + add + per-user actions
-      const siteUsersPage = /^\/sites\/([^/]+)\/users$/.exec(path);
-      if (siteUsersPage && req.method === "GET") {
-        const name = decodeURIComponent(siteUsersPage[1]!);
-        const site = ctx.st.sites.get(name);
-        if (!site) {
-          res.writeHead(404, { "Content-Type": "text/plain" });
-          res.end("site not found");
+      // 前端模块静态文件（/ui/*.js）
+      if (path.startsWith("/ui/")) {
+        const name = basename(path.slice(4));
+        if (!CLIENT_FILES.includes(name)) {
+          json(res, 404, { error: "unknown client file" });
           return;
         }
-        const groups: { provider: string; users: AuthUser[] }[] = await ctx.st.auth.users(undefined, name);
-        const users: AuthUser[] = groups.flatMap((g) => g.users);
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.siteUsers.title", { name: site.name }), TEMPLATES.siteUsers(lang, site, users), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
+        res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(readFileSync(join(clientDir(), name), "utf8"));
         return;
       }
 
-      // per-site tokens: page + revoke
-      const siteTokensPage = /^\/sites\/([^/]+)\/tokens$/.exec(path);
-      if (siteTokensPage && req.method === "GET") {
-        const name = decodeURIComponent(siteTokensPage[1]!);
-        const site = ctx.st.sites.get(name);
-        if (!site) {
-          res.writeHead(404, { "Content-Type": "text/plain" });
-          res.end("site not found");
-          return;
-        }
-        const groups: { provider: string; tokens: AuthToken[] }[] = await ctx.st.auth.tokens(undefined, name);
-        const tokens: AuthToken[] = groups.flatMap((g) => g.tokens);
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.siteTokens.title", { name: site.name }), TEMPLATES.siteTokens(lang, site, tokens), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-      const siteTokenRevoke = /^\/sites\/([^/]+)\/tokens\/([^/]+)\/revoke$/.exec(path);
-      if (siteTokenRevoke && req.method === "POST") {
-        const site = decodeURIComponent(siteTokenRevoke[1]!);
-        const id = decodeURIComponent(siteTokenRevoke[2]!);
-        await ctx.st.auth.revokeToken(id, "token", site);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ revoked: id }));
-        return;
-      }
-      const siteUsersAdd = /^\/sites\/([^/]+)\/users\/add$/.exec(path);
-      if (siteUsersAdd && req.method === "POST") {
-        const site = decodeURIComponent(siteUsersAdd[1]!);
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        await ctx.st.auth.addUser(body.name, body.password, { site });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ added: body.name }));
-        return;
-      }
-      const siteUserAction = /^\/sites\/([^/]+)\/users\/([^/]+)\/([^/]+)$/.exec(path);
-      if (siteUserAction && req.method === "POST") {
-        const site = decodeURIComponent(siteUserAction[1]!);
-        const user = decodeURIComponent(siteUserAction[2]!);
-        const action = siteUserAction[3]!;
-        if (action === "remove") {
-          await ctx.st.auth.removeUser(user, undefined, site);
-        } else if (action === "password") {
-          const body = await new Promise<any>((resolve) => {
-            let b = "";
-            req.on("data", (chunk) => b += chunk);
-            req.on("end", () => resolve(JSON.parse(b)));
-          });
-          await ctx.st.auth.setUserPassword(user, body.password, undefined, site);
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        return;
+      // JSON API
+      if (path.startsWith("/api/")) {
+        if (await createApiHandler(ctx, req, res, path, url, lang)) return;
+        return; // createApiHandler 已回 404
       }
 
-      // Config
-      if (path === "/config") {
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.config"), TEMPLATES.config(lang, ctx.st.dirs), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // Expose
-      if (path === "/expose") {
-        const sites = ctx.st.sites.list().filter((s) => s.name !== "default").map((s) => s.name);
-        const authSchemas = await ctx.st.schemas.authProviders();
-        const authMetas = ctx.st.schemas.authMetas();
-        const authOrder = ctx.st.auth.providerOrder();
-        const authNoneAllowed = ctx.st.auth.noneAllowed();
-        const html = TEMPLATES.layout(lang, translate(lang, "ui.nav.expose"), TEMPLATES.expose(lang, sites, authSchemas, authMetas, authOrder, authNoneAllowed), ctx.csrfToken);
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(html);
-        return;
-      }
-
-      // API: Expose
-      if (path === "/api/expose" && req.method === "POST") {
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        const result = await ctx.st.daemon.request("expose", {
-          port: body.port,
-          auth: body.auth,
-          mode: body.mode,
-          site: body.site,
-          tunnelType: body.tunnel,
-          allowToolDownload: true,
-        }, 90_000);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result));
-        return;
-      }
-
-      // API: Tunnels
-      if (path.startsWith("/tunnels/") && req.method === "POST") {
-        const parts = path.split("/");
-        const name = parts[2];
-        const action = parts[3];
-        if (action === "toggle") {
-          const info = (await ctx.st.daemon.request("tunnel.get", name)) as { running?: boolean } | null;
-          if (info?.running) {
-            await ctx.st.daemon.request("tunnel.stop", name);
-          } else {
-            await ctx.st.daemon.request("tunnel.start", name);
-          }
-        } else if (action === "remove") {
-          await ctx.st.daemon.request("tunnel.remove", name);
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        return;
-      }
-
-      if (path === "/api/tunnels/add" && req.method === "POST") {
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        // Validate here so the operator sees the exact reason (the daemon
-        // validates again at its boundary — defense in depth).
-        try {
-          validateTunnelConfig(body, body?.name);
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-          return;
-        }
-        const result = await ctx.st.daemon.request<{ ok: boolean }>("tunnel.add", body);
-        if (!result?.ok) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "tunnel.add rejected by daemon (invalid config or daemon unavailable)" }));
-          return;
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ added: body.name }));
-        return;
-      }
-
-      // API: Users
-      if (path === "/users/add" && req.method === "POST") {
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        await ctx.st.auth.addUser(body.name, body.password);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ added: body.name }));
-        return;
-      }
-
-      // API: Bearer tokens
-      if (path === "/api/tokens/create" && req.method === "POST") {
-        const body = await new Promise<any>((resolve) => {
-          let b = "";
-          req.on("data", (chunk) => b += chunk);
-          req.on("end", () => resolve(JSON.parse(b)));
-        });
-        try {
-          const expiresAt = parseTokenExpiry(body?.expiresAt as string | undefined);
-          const tokens = await ctx.st.auth.createToken({
-            description: body?.description as string | undefined,
-            expiresAt,
-            provider: body?.provider ?? "token",
-            site: (body?.site as string | undefined) ?? "default",
-          });
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ tokens }));
-        } catch (err) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
-      }
-
-      if (/^\/tokens\/[^/]+\/revoke$/.test(path) && req.method === "POST") {
-        const id = path.split("/")[2] ?? "";
-        await ctx.st.auth.revokeToken(id, "token", "default");
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ revoked: id }));
-        return;
-      }
-
-      if (path.startsWith("/users/") && req.method === "POST") {
-        const parts = path.split("/");
-        const name = parts[2] ?? "";
-        const action = parts[3];
-        if (action === "remove") {
-          await ctx.st.auth.removeUser(name);
-        } else if (action === "password") {
-          const body = await new Promise<any>((resolve) => {
-            let b = "";
-            req.on("data", (chunk) => b += chunk);
-            req.on("end", () => resolve(JSON.parse(b)));
-          });
-          await ctx.st.auth.setUserPassword(name, body.password);
-        } else if (action === "totp-enroll") {
-          const result = await ctx.st.auth.totpEnroll(name);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(result));
-          return;
-        } else if (action === "totp-activate") {
-          const body = await new Promise<any>((resolve) => {
-            let b = "";
-            req.on("data", (chunk) => b += chunk);
-            req.on("end", () => resolve(JSON.parse(b)));
-          });
-          const result = await ctx.st.auth.totpActivate(name, body.code);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(result));
-          return;
-        } else if (action === "totp-disable") {
-          await ctx.st.auth.totpDisable(name);
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
-        return;
-      }
-
-      // 404
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("Not Found");
+      // SPA shell（任何其他 GET）
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(SHELL(lang, ctx.csrfToken));
     } catch (err) {
       console.error("UI error:", err);
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end(String(err));
+      json(res, 500, { error: err instanceof Error ? err.message : String(err) });
     }
   };
 }
@@ -1127,7 +232,6 @@ export interface UiServer {
   port: number;
 }
 
-/** Start the UI server. */
 /** Start the UI server. Resolves once the listener is up (with the actual
  *  port, which is random when port: 0). The CSRF origin gate needs the REAL
  *  bound port, so the listener binds first and the handler is attached after. */
