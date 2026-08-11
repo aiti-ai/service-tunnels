@@ -31,6 +31,7 @@ import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
 import { localizeSchemas, resolveLang } from "./i18n.ts";
+import { listPresets, getPreset, savePreset, removePreset, loadPresetsKey, type PresetKind } from "./presets.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
 import type { AutheliaProvider } from "./authelia.ts";
@@ -145,6 +146,33 @@ const methods = new Map<string, Handler>([
     const name = String(params);
     validateTunnelName(name);
     return tunnels.stop(name).then(() => ({ ok: true }));
+  // ── Presets (TODO-2): 参数变体 —— 隧道/认证参数的命名常用 ────────────────
+  ["preset.list", (params) => {
+    const p = (params ?? {}) as { kind?: string; type?: string };
+    const kind: PresetKind = p.kind === "auth" ? "auth" : "tunnel";
+    return listPresets(readConfigFile(configDir), kind, p.type, loadPresetsKey(cacheDir));
+  }],
+  ["preset.get", (params) => {
+    const p = (params ?? {}) as { kind?: string; type?: string; name?: string };
+    const kind: PresetKind = p.kind === "auth" ? "auth" : "tunnel";
+    return getPreset(readConfigFile(configDir), kind, String(p.type ?? ""), String(p.name ?? ""), loadPresetsKey(cacheDir)) ?? null;
+  }],
+  ["preset.save", (params) => {
+    const p = (params ?? {}) as { kind?: string; type?: string; name?: string; params?: Record<string, unknown> };
+    const kind: PresetKind = p.kind === "auth" ? "auth" : "tunnel";
+    if (!p.type || !p.name) throw new Error("type and name required");
+    const f = readConfigFile(configDir);
+    savePreset(f, kind, String(p.type), String(p.name), (p.params ?? {}) as Record<string, string>, loadPresetsKey(cacheDir));
+    writeConfigFile(configDir, f);
+    return { ok: true, name: p.name };
+  }],
+  ["preset.remove", (params) => {
+    const p = (params ?? {}) as { kind?: string; type?: string; name?: string };
+    const kind: PresetKind = p.kind === "auth" ? "auth" : "tunnel";
+    const f = readConfigFile(configDir);
+    const removed = removePreset(f, kind, String(p.type ?? ""), String(p.name ?? ""));
+    if (removed) writeConfigFile(configDir, f);
+    return { removed };
   }],
   ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
   ["config.allow-download", () => ({ allowToolDownload: toolAllowDownload })],
