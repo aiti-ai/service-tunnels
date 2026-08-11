@@ -44,7 +44,7 @@ import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, 
 import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
-import { GatewayController } from "./gateway.ts";
+import { GatewayController, type GatewayInject } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
@@ -85,7 +85,7 @@ export {
 export type { Lang, Resources } from "./i18n.ts";
 export type { AuthProvider, ProviderContext, AuthPolicy, AuthProviderCapabilities, AuthUser, AuthToken, UserManager, TokenManager } from "./auth-provider.ts";
 export { AutheliaProvider } from "./authelia.ts";
-export { GatewayController, generateGatewayNginx, detectProtocol } from "./gateway.ts";
+export { GatewayController, generateGatewayNginx, detectProtocol, normalizeInject, nginxQuote, type GatewayInject } from "./gateway.ts";
 export { ProxyManager } from "./proxy-manager.ts";
 export type { ProxyBinding, ProxyManagerStatus, ProxyManagerOptions } from "./proxy-manager.ts";
 export { RedisController } from "./redis.ts";
@@ -110,6 +110,15 @@ export interface ServiceTunnelsOptions extends DirOptions {
   marker?: string;
   /** Response transform hook（透传 proxy）：text/html 响应 </head> 前注入 HTML 片段（通用注入） */
   transformResponse?: (info: { port: number; url: string; method: string }) => string | { html: string; position?: "head" | "prepend" } | null;
+  /**
+   * 静态响应注入（tunnel nginx 路径）：浏览器 → 隧道边缘 → nginx 网关 → 应用
+   * 的流量不经过 node proxy，transformResponse 够不着——此选项在 nginx 网关
+   * 配置里注入（sub_filter / add_before_body）。string → head 模式；
+   * { html, position } 指定模式。只作用于 text/html 且仅主页面导航
+   * （Sec-Fetch-Mode: navigate / 老客户端无该头；XHR/fetch/子资源不注入）——
+   * 避免把用户后加载的模板片段/文件注坏。单次 st.expose 的 inject 参数覆盖此全局值。
+   */
+  inject?: string | GatewayInject;
   /** Auth provider plugins (M4+). */
   authPlugins?: unknown[];
   /** Explicit tool paths: { ngrok: "/opt/ngrok" }. Beats PATH and cache. */
@@ -539,7 +548,9 @@ const authExposeFn = async (port: number, o: Omit<ExposeOptions, "port"> = {}) =
 // per-call false tightens; per-call true can't loosen the instance/
 // env/config ban (sticky) — exposeFlow re-resolves with env+config
 const effAllowNone = o.allowAuthNone === false ? false : allowAuthNone;
-const r = await exposeFlow(port, { ...o, allowAuthNone: effAllowNone, port }, {
+// 全局静态注入（tunnel nginx 路径）——单次 expose 的 inject 参数优先
+const effInject = o.inject ?? opts.inject;
+const r = await exposeFlow(port, { ...o, inject: effInject, allowAuthNone: effAllowNone, port }, {
   configDir: dirs.configDir,
   cacheDir: dirs.cacheDir,
   resolveTool: async (name: string) =>

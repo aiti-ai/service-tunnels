@@ -19,6 +19,19 @@
 > （如 0.2.38–0.2.41）若未出现在 registry 发布列表中，其功能统一计入下一个
 > 实际发布版本。
 
+## [Unreleased]
+
+### Added
+- **tunnel 静态响应注入（nginx 网关路径）**：`createServiceTunnels({ inject })` /
+  `st.expose(port, { inject })` / CLI `--inject-html <fragment>` [--inject-position
+  head|prepend]。浏览器 → 隧道边缘 → nginx 网关 → 应用的流量不经过 node proxy，
+  transformResponse 够不着——此选项在网关配置里注入：head 模式 `sub_filter` 在
+  `</head>` 前插入；prepend 模式 `add_before_body` 在响应开头直接写（需 nginx
+  addition 模块，缺失时 registerHost 报错）。**只作用于 text/html 且仅主页面导航**
+  （Sec-Fetch-Mode: navigate / 老客户端无该头；XHR/fetch/子资源不注入，
+  X-Requested-With 老式 XHR 同样跳过）——避免把用户后加载的模板片段/文件注坏。
+  注入内容经 nginx 双引号串字节转义（任意引号/JS 安全）与静态落盘，不会注入配置。
+
 ## [0.3.33] - 2026-08-10
 
 ### Fixed
