@@ -10,6 +10,9 @@ import {
   type ServiceTunnelsDirs,
 } from "./config.ts";
 import { InternalRegistry } from "./internal.ts";
+import { SshManager, type SshDomainConfig, type SshDomainInfo, type SshKeyInfo, type GeneratedKeyPair } from "./ssh/manager.ts";
+import { listPresets, getPreset, savePreset, removePreset, loadPresetsKey, presetSummary, type Preset, type PresetKind } from "./presets.ts";
+import { parseExposeEnv, exposeSelf as exposeSelfFlow, maybeExposeSelf as maybeExposeSelfFlow, createSelfGate, type SelfExposeOptions } from "./expose-self.ts";
 import {
   discoverServicePorts,
   getServicePorts,
@@ -37,14 +40,14 @@ import { platform } from "os";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths, type ToolRegistryOptions } from "./tools.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAULT_SUFFIXES, type ProxyOptions } from "./proxy.ts";
-import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta } from "./tunnels.ts";
+import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta , TUNNEL_SCHEMAS_VERSION } from "./tunnels.ts";
 import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { GatewayController } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
-import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
+import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
 import { localizeSchemas, localizeSpecs, resolveLang } from "./i18n.ts";
 import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
 import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
@@ -53,12 +56,13 @@ import type { AuthUser, AuthToken } from "./auth-provider.ts";
 
 export type { ServicePortInfo, DiscoveryOptions } from "./discovery.ts";
 export type { ServiceTunnelsDirs, DirOptions } from "./config.ts";
+export { listPresets, getPreset, savePreset, removePreset, loadPresetsKey, presetSummary, isSensitiveKey, maskSecret, type Preset, type PresetKind, type PresetFileRow } from "./presets.ts";
 export type { DaemonStatus } from "./daemon.ts";
 export type { ToolDef, ToolRegistryOptions } from "./tools.ts";
 export type { TunnelConfig, TunnelInfo, TunnelType, ParamSpec, TunnelMeta } from "./tunnels.ts";
-export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets } from "./tunnels.ts";
+export { extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, TUNNEL_META, coerceParam, applyParamSets, TUNNEL_SCHEMAS_VERSION } from "./tunnels.ts";
 export { CUSTOM_TUNNEL_ENV_PREFIX, customTunnelTemplates, customTunnelTemplate, isCustomTunnelType } from "./tunnels-custom.ts";
-export { authProviderSchemas, authProviderMetas, AUTH_PARAM_SCHEMAS } from "./auth-registry.ts";
+export { authProviderSchemas, authProviderMetas, AUTH_PARAM_SCHEMAS, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
 // 多语:零依赖自实现,i18next 风格接口(t/changeLanguage/getFixedT/…)
 //   t(key, params) — 默认实例,语言由 setLang/changeLanguage 管理
 //   translate(lang, key, params) — 显式语言版本
@@ -104,6 +108,8 @@ export { InternalRegistry } from "./internal.ts";
 export interface ServiceTunnelsOptions extends DirOptions {
   /** Child-process env marker prefix (default "service-tunnels"). */
   marker?: string;
+  /** Response transform hook（透传 proxy）：text/html 响应 </head> 前注入 HTML 片段（通用注入） */
+  transformResponse?: (info: { port: number; url: string; method: string }) => string | null;
   /** Auth provider plugins (M4+). */
   authPlugins?: unknown[];
   /** Explicit tool paths: { ngrok: "/opt/ngrok" }. Beats PATH and cache. */
@@ -119,6 +125,14 @@ export interface ServiceTunnelsOptions extends DirOptions {
   /** Spawn a parent-death guardian (default true): if this process exits
    *  without cleanup, a detached guardian kills our framework helpers. */
   guardian?: boolean;
+  /**
+   * Explicit node runtime path for spawning node scripts (daemon / guardian /
+   * portal / token). Default: process.execPath. In Electron hosts (VS Code
+   * extension host) process.execPath is the app binary, not node — spawns
+   * automatically run with ELECTRON_RUN_AS_NODE=1 so the script runs on the
+   * embedded Node runtime. Override when a dedicated node binary is desired.
+   */
+  nodePath?: string;
   /**
    * User's wildcard-DNS base domain (e.g. "example.com"): expose --mode
    * proxy also returns a PORTLESS base URL (`<port>[-<label>].<baseDomain>`)
@@ -235,6 +249,8 @@ export interface ServiceTunnels {
     /** Provider 页面元数据（label/已配置/待填）——picker 与「✓已配置」徽标。 */
     authMetas(): Record<string, import("./providers/oauth2-variants.ts").AuthProviderMeta>;
     metas(): Record<string, TunnelMeta>;
+    /** Schema 契约版本（冻结承诺，adaptation-kit §5）：只增不减，破坏性变更才 bump。 */
+    versions(): { tunnel: number; auth: number };
   };
   auth: {
     /** Built-in + plugin providers ("none" included when auth-none exposes
@@ -338,6 +354,44 @@ export interface ServiceTunnels {
     /** Remove a site (default and reserved names rejected). */
     remove(name: string): void;
   };
+  /** Site-scoped ssh public-key auth (M0b-ssh): domain = site, port auto-
+   *  allocated. The caller only ever deals with site + keys. */
+  ssh: {
+    list(): SshDomainInfo[];
+    get(domain: string): SshDomainInfo | undefined;
+    ensure(cfg: SshDomainConfig): Promise<SshDomainInfo>;
+    create(cfg: SshDomainConfig): Promise<SshDomainInfo>;
+    remove(domain: string): Promise<{ ok: true }>;
+    start(domain: string): Promise<SshDomainInfo>;
+    stop(domain: string): Promise<{ ok: true }>;
+    keys: {
+      list(domain: string): SshKeyInfo[];
+      add(domain: string, publicKey: string): Promise<{ fingerprint: string }>;
+      generate(domain: string, opts?: { type?: "ed25519" | "rsa" | "ecdsa"; bits?: number; comment?: string; count?: number }): Promise<GeneratedKeyPair[]>;
+      remove(domain: string, fingerprint: string): Promise<{ removed: boolean }>;
+    };
+  };
+  /** 参数变体（Presets, TODO-2）：隧道/认证参数的命名常用。list 返回掩码
+   *  敏感字段（UI 展示）；get 返回明文（暴露合并用）；save 加密敏感字段落盘。 */
+  presets: {
+    list(kind: PresetKind, type?: string): Preset[];
+    get(kind: PresetKind, type: string, name: string): Preset | undefined;
+    save(kind: PresetKind, type: string, name: string, params: Record<string, string | number | boolean | undefined>): Preset;
+    remove(kind: PresetKind, type: string, name: string): boolean;
+    summary(params: Record<string, string>): string;
+  };
+  /** self-expose（TODO-5）：宿主暴露自身端口 + allowlocal/allowHost 直连门控。 */
+  self: {
+    exposeSelf(opts: SelfExposeOptions): Promise<{ url: string | null; localUrl?: string; baseUrl?: string; domainUrl?: string; error?: string; name?: string }>;
+    maybeExposeSelf(env?: string): Promise<{ exposed: boolean; error?: string }>;
+    allowLocal(): boolean;
+    setAllowLocalTemporary(v: boolean, ttlMs: number): void;
+    confirmAllowLocal(v: boolean): void;
+    getAllowLocalPending(): { pending: boolean; expiresAt: number };
+    allowHosts(): string[];
+    setAllowHosts(hosts: string[]): void;
+    isDirectAccessAllowed(host: string | undefined): boolean;
+  };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
   /** Stop everything: all tunnels + the shared nginx gateway + redis.
@@ -345,8 +399,9 @@ export interface ServiceTunnels {
    *  (the guardian only covers crash/SIGKILL). */
   shutdown(): Promise<void>;
   /** Exposes made in this process lifecycle with their metadata (port, tunnel
-   *  type, auth provider, url, running, pid). For display; not persisted. */
-  exposes(): Array<{ name: string; port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; url: string | null; running: boolean; pid: number | null; accessLog: string | null; errorLog: string | null; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string }>;
+   *  type, auth provider, url, running, pid, startedAt). For display; not
+   *  persisted (the daemon persists its own registry for the UI). */
+  exposes(): Array<{ name: string; port: number; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; url: string | null; running: boolean; pid: number | null; accessLog: string | null; errorLog: string | null; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; startedAt?: number | null }>;
 }
 
 /**
@@ -383,7 +438,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   // Scoped per parent pid so multiple owners never share a file.
   const registerPid = (role: string, pid: number) => registerPidToFile(dirs.cacheDir, process.pid, role, pid);
   if (opts.guardian !== false) {
-    spawnGuardian(process.pid, { registrationFile: registrationFilePath(dirs.cacheDir, process.pid), cacheDir: dirs.cacheDir });
+    spawnGuardian(process.pid, { registrationFile: registrationFilePath(dirs.cacheDir, process.pid), cacheDir: dirs.cacheDir, nodePath: opts.nodePath });
   }
   const internal = new InternalRegistry();
   // auth-none ban (sticky): explicit createServiceTunnels opt > env
@@ -441,10 +496,15 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       unregisterInternal: (role) => internal.unregister(role),
       registerPid,
       pickPort,
+      nodePath: opts.nodePath,
       log: () => {},
     },
     [...(opts.authPlugins as AuthProviderFactory[]) ?? []],
   );
+  // M0b-ssh: in-process ssh manager — site-scoped public-key auth for exposes
+  // (provider "ssh", any protocol). The ssh gateway port is registered as
+  // internal so discovery excludes it from candidate services.
+  const ssh = new SshManager({ cacheDir: dirs.cacheDir });
   void loadProviderPlugins(dirs.configDir).then((plugins) => {
     for (const f of plugins) authRegistry.register(f);
   });
@@ -470,13 +530,78 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       s.bindings = proxy.persisted();
     }),
     isPortAllowed: () => true,
+    transformResponse: opts.transformResponse,
     registerInternal: (role, p) => internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     log: () => {},
   });
-  // In-memory record of exposes made in THIS process lifecycle (port + tunnel
-  // type + auth provider + url), so callers (host) can display active exposes
-  // with their metadata. Not persisted across restarts.
-  const exposes = new Map<string, { port: number; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string }>();
+  // In-memory record of exposes made in THIS process lifecycle
+const authExposeFn = async (port: number, o: Omit<ExposeOptions, "port"> = {}) => {
+// per-call false tightens; per-call true can't loosen the instance/
+// env/config ban (sticky) — exposeFlow re-resolves with env+config
+const effAllowNone = o.allowAuthNone === false ? false : allowAuthNone;
+const r = await exposeFlow(port, { ...o, allowAuthNone: effAllowNone, port }, {
+  configDir: dirs.configDir,
+  cacheDir: dirs.cacheDir,
+  resolveTool: async (name: string) =>
+    // per-expose param beats the shared toolOpts (env > config fallback)
+    o.allowToolDownload !== undefined
+      ? st_tools_ensure(name, { ...toolOpts, allowToolDownload: o.allowToolDownload })
+      : st_tools_ensure(name, toolOpts),
+  internal,
+  tunnels: tm,
+  auth: authRegistry,
+  gateway,
+  proxy,
+  redis,
+  registerPid,
+  onTunnelStop: unregisterExposeHost,
+  log: () => {},
+  // M0b-ssh: site-scoped public-key auth — auto-provision the site's
+  // backing ssh domain (port auto-allocated) and resolve its port.
+  sshEnsureDomain: async (site, forwardPort) => {
+    const domain = site === "default" ? "default" : site;
+    const existing = ssh.get(domain);
+    try {
+      const info = existing ?? (await ssh.ensure({ domain, site, forwardPort, sshPort: 0 }));
+      return { port: info.port, created: !existing };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`ssh auth: cannot provision site "${site}": ${msg}`);
+    }
+  },
+  sshRemoveDomain: async (site) => {
+    const domain = site === "default" ? "default" : site;
+    try {
+      if (ssh.get(domain)) await ssh.remove(domain);
+    } catch { /* best effort */ }
+  },
+  sshGatewayPort: (domain) => ssh.get(domain)?.port,
+});
+// record this expose's metadata for the lifecycle display (proxy-mode
+// records have no tunnel → synthetic key `proxy:port:label`)
+exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
+  port,
+  tunnelName: r.tunnel || undefined,
+  tunnelType: o.tunnelType,
+  // ssh provider: the raw tcp tunnel records no provider on the
+  // result — surface "ssh" so the UI/registry display it correctly.
+  provider: o.provider === "ssh" || o.auth === "ssh" ? "ssh" : r.provider,
+  loginUrl: r.loginUrl,
+  protocol: r.protocol,
+  host: r.url ? new URL(r.url).host : undefined,
+  site: r.site ?? o.site,
+  label: r.label,
+  localUrl: r.localUrl,
+  baseUrl: r.baseUrl,
+  domainUrl: r.domainUrl,
+  startedAt: Date.now(),
+  });
+  return r;
+};
+
+  // Exposes made in this process lifecycle (port + tunnel type + auth
+  // provider + url), for display. Not persisted across restarts.
+  const exposes = new Map<string, { port: number; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; startedAt?: number }>();
 
   /** Unregister the gateway host an expose registered (so stopping one expose
    *  doesn't leave a stale nginx server block — localhost:PORT hosts would
@@ -505,7 +630,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     },
     daemon: {
       status: () => daemonStatus(dirs.cacheDir),
-      start: (o) => startDaemon(dirs.cacheDir, { ...o, configDir: dirs.configDir }),
+      start: (o) => startDaemon(dirs.cacheDir, { ...o, configDir: dirs.configDir, nodePath: opts.nodePath }),
       stop: () => stopDaemon(dirs.cacheDir),
       request: <T>(method: string, params?: unknown, timeoutMs = 5_000) =>
         requestDaemon<T>(dirs.cacheDir, method, params, timeoutMs),
@@ -612,6 +737,16 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           await tm.stop(name);
           persistState();
           await unregisterExposeHost(name);
+          // TODO-1 (fail-clean): ssh provider 暴露停止 → 清理 backing ssh 域
+          // （该 site 无其他运行中 ssh 暴露时才删，避免误伤共用域）。
+          if (ex?.provider === "ssh" && ex.site) {
+            const others = [...exposes.values()].filter(
+              (e) => e !== ex && e.provider === "ssh" && e.site === ex.site,
+            );
+            if (!others.length) {
+              try { if (ssh.get(ex.site)) await ssh.remove(ex.site); } catch { /* best effort */ }
+            }
+          }
         },
         stopAll: async () => {
           for (const name of [...exposes.keys()]) await unregisterExposeHost(name);
@@ -635,46 +770,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         providers: () => (allowAuthNone ? ["none", ...registry.list()] : [...registry.list()]),
         noneAllowed: () => allowAuthNone,
         registerProvider: (f: AuthProviderFactory) => registry.register(f),
-        expose: async (port: number, o: Omit<ExposeOptions, "port"> = {}) => {
-          // per-call false tightens; per-call true can't loosen the instance/
-          // env/config ban (sticky) — exposeFlow re-resolves with env+config
-          const effAllowNone = o.allowAuthNone === false ? false : allowAuthNone;
-          const r = await exposeFlow(port, { ...o, allowAuthNone: effAllowNone, port }, {
-            configDir: dirs.configDir,
-            cacheDir: dirs.cacheDir,
-            resolveTool: async (name: string) =>
-              // per-expose param beats the shared toolOpts (env > config fallback)
-              o.allowToolDownload !== undefined
-                ? st_tools_ensure(name, { ...toolOpts, allowToolDownload: o.allowToolDownload })
-                : st_tools_ensure(name, toolOpts),
-            internal,
-            tunnels: tm,
-            auth: registry,
-            gateway,
-            proxy,
-            redis,
-            registerPid,
-            onTunnelStop: unregisterExposeHost,
-            log: () => {},
-          });
-          // record this expose's metadata for the lifecycle display (proxy-mode
-          // records have no tunnel → synthetic key `proxy:port:label`)
-          exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
-            port,
-            tunnelName: r.tunnel || undefined,
-            tunnelType: o.tunnelType,
-            provider: r.provider,
-            loginUrl: r.loginUrl,
-            protocol: r.protocol,
-            host: r.url ? new URL(r.url).host : undefined,
-            site: r.site,
-            label: r.label,
-            localUrl: r.localUrl,
-            baseUrl: r.baseUrl,
-            domainUrl: r.domainUrl,
-          });
-          return r;
-        },
+        expose: authExposeFn,
         userManagers: () => registry.userManagers(),
         tokenManagers: () => registry.tokenManagers(),
         totpProviders: () => registry.totpProviders(),
@@ -742,13 +838,32 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         },
         setUserPassword: async (name: string, password: string, provider?: string | string[], site?: string) => {
           const targets = resolveUserTargets(registry, provider);
-          for (const t of targets) await registry.userManager(t, site).setUserPassword(name, password);
-          return targets;
+          const done: string[] = [];
+          for (const t of targets) {
+            try {
+              await registry.userManager(t, site).setUserPassword(name, password);
+              done.push(t);
+            } catch (err) {
+              // 该 provider 没有此用户 → 跳过（用户只存在于其中一个 provider）
+              if (!(err instanceof Error) || !/not (found|registered)|no such user/i.test(err.message)) throw err;
+            }
+          }
+          if (!done.length) throw new Error(`user ${name} not registered`);
+          return done;
         },
         removeUser: async (name: string, provider?: string | string[], site?: string) => {
           const targets = resolveUserTargets(registry, provider);
-          for (const t of targets) await registry.userManager(t, site).removeUser(name);
-          return targets;
+          const done: string[] = [];
+          for (const t of targets) {
+            try {
+              await registry.userManager(t, site).removeUser(name);
+              done.push(t);
+            } catch (err) {
+              if (!(err instanceof Error) || !/not (found|registered)|no such user/i.test(err.message)) throw err;
+            }
+          }
+          if (!done.length) throw new Error(`user ${name} not registered`);
+          return done;
         },
         // —— token 管理（与 user 同构：按 site 隔离，见 TokenManager）——
         tokens: async (provider = "all", site = "default") => {
@@ -806,6 +921,59 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
         },
       };
     })(),
+    /** Site-scoped ssh public-key auth (M0b-ssh) — domain = site, port
+     *  auto-allocated; keys managed per domain (per site). */
+    ssh: {
+      list: () => ssh.list(),
+      get: (domain: string) => ssh.get(domain),
+      ensure: (cfg: SshDomainConfig) => ssh.ensure(cfg),
+      create: (cfg: SshDomainConfig) => ssh.create(cfg),
+      remove: (domain: string) => ssh.remove(domain),
+      start: (domain: string) => ssh.start(domain),
+      stop: (domain: string) => ssh.stop(domain),
+      keys: {
+        list: (domain: string) => ssh.listKeys(domain),
+        add: (domain: string, publicKey: string) => ssh.addKey(domain, publicKey),
+        generate: (domain: string, opts?: { type?: "ed25519" | "rsa" | "ecdsa"; bits?: number; comment?: string; count?: number }) => ssh.generateKey(domain, opts),
+        remove: (domain: string, fingerprint: string) => ssh.removeKey(domain, fingerprint),
+      },
+    },
+    /** 参数变体（Presets, TODO-2）——配置档读写 + AES-256-GCM 加密。 */
+    presets: {
+      list: (kind: PresetKind, type?: string) => listPresets(readConfigFile(dirs.configDir), kind, type, loadPresetsKey(dirs.cacheDir)),
+      get: (kind: PresetKind, type: string, name: string) => getPreset(readConfigFile(dirs.configDir), kind, type, name, loadPresetsKey(dirs.cacheDir)),
+      save: (kind: PresetKind, type: string, name: string, params: Record<string, string | number | boolean | undefined>) => {
+        const f = readConfigFile(dirs.configDir);
+        savePreset(f, kind, type, name, params, loadPresetsKey(dirs.cacheDir));
+        writeConfigFile(dirs.configDir, f);
+        return getPreset(f, kind, type, name, loadPresetsKey(dirs.cacheDir))!;
+      },
+      remove: (kind: PresetKind, type: string, name: string) => {
+        const f = readConfigFile(dirs.configDir);
+        const removed = removePreset(f, kind, type, name);
+        if (removed) writeConfigFile(dirs.configDir, f);
+        return removed;
+      },
+      summary: presetSummary,
+    },
+    /** self-expose（TODO-5）：宿主暴露自身端口 + allowlocal/allowHost 门控。
+     *  allowlocal 基线来自 env SERVICE_TUNNELS_EXPOSE（缺省 true）。 */
+    self: (() => {
+      const baseline = parseExposeEnv(process.env.SERVICE_TUNNELS_EXPOSE);
+      const gate = createSelfGate(baseline?.allowlocal ?? true, baseline?.allowHost ?? []);
+      const selfApi = {
+        exposeSelf: (opts: SelfExposeOptions) => exposeSelfFlow(authExposeFn, opts),
+        maybeExposeSelf: (env?: string) => maybeExposeSelfFlow({ self: selfApi, authExpose: authExposeFn }, env),
+        allowLocal: () => gate.allowLocal(),
+        setAllowLocalTemporary: (v: boolean, ttlMs: number) => gate.setAllowLocalTemporary(v, ttlMs),
+        confirmAllowLocal: (v: boolean) => gate.confirmAllowLocal(v),
+        getAllowLocalPending: () => gate.getAllowLocalPending(),
+        allowHosts: () => gate.allowHosts(),
+        setAllowHosts: (hosts: string[]) => gate.setAllowHosts(hosts),
+        isDirectAccessAllowed: (host: string | undefined) => gate.isDirectAccessAllowed(host),
+      };
+      return selfApi;
+    })(),
     /** Provider/tunnel parameter schemas — data-driven forms for clients
      *  (host renders inputs from these; no client changes per provider).
      *  lang: "zh" returns localized (Chinese) strings; default/en returns
@@ -816,6 +984,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       metas: () => tunnelMetas(),
       authProviders: async (lang?: string) => localizeSchemas(await authProviderSchemas(dirs.configDir), resolveLang(lang)),
       authMetas: () => authProviderMetas(dirs.configDir),
+      /** Schema contract versions — clients assert compatibility (adaptation-kit §5). */
+      versions: () => ({ tunnel: TUNNEL_SCHEMAS_VERSION, auth: AUTH_SCHEMAS_VERSION }),
     },
     state: () => readState(cachePaths(dirs.cacheDir).stateFile),
     shutdown: async () => {
@@ -824,9 +994,14 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
       try { await gateway.stop(); } catch {}
       try { await redis.stop(); } catch {}
       try { await proxy.stop(); } catch {}
+      // M0b-ssh: stop the in-process site ssh gateways so the listener closes
+      for (const d of ssh.list()) {
+        try { await ssh.stop(d.domain); } catch { /* best effort */ }
+      }
     },
     /** Exposes made in this process lifecycle (port + tunnel type + auth
-     *  provider + url + running), for display. Not persisted. */
+     *  provider + url + running + startedAt), for display. Not persisted
+     *  (daemon persists its own registry for the UI — M0b). */
     exposes: () =>
       [...exposes.entries()].map(([name, m]) => {
         const tun = m.tunnelName ? tm.get(m.tunnelName) : null;
@@ -842,7 +1017,11 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           url: tun?.url ?? null,
           // proxy-mode records have no tunnel process — "running" means the
           // binding is enrolled (lazily starts its provider on first request).
-          running: tun?.running ?? Boolean(m.localUrl),
+          // For startTransport:false hosts (localUrl empty) this must be
+          // binding-driven, not localUrl-driven (M0a-T3, 修 pi-web 宿主补丁).
+          running: m.tunnelName
+            ? (tun?.running ?? false)
+            : proxy.bindings().some((b) => b.port === m.port && (b.label ?? "") === (m.label ?? "")),
           pid: tun?.pid ?? null,
           accessLog: logs?.access ?? null,
           errorLog: logs?.error ?? null,
@@ -851,6 +1030,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
           localUrl: m.localUrl,
           baseUrl: m.baseUrl,
           domainUrl: m.domainUrl,
+          startedAt: m.startedAt ?? null,
         };
       }),
   };

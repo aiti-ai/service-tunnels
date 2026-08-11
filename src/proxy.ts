@@ -187,6 +187,13 @@ export interface ProxyOptions {
   /** Optional Basic password (empty = disabled). Open vhosts only. */
   password?: string;
   /**
+   * Response transform hook: return an HTML snippet to inject before `</head>`
+   * of text/html responses (generic injection — aiti-devtools launcher etc.).
+   * `{ port, url, method }` identifies the upstream request; null = no injection.
+   * Applies to both pipe and forward paths.
+   */
+  transformResponse?: (info: { port: number; url: string; method: string }) => string | null;
+  /**
    * Forward-auth gate (portal/authelia/oauth2-proxy): verify every OPEN vhost
    * request against the provider's authz endpoint before proxying. Takes
    * precedence over `password` (Basic). Both empty = open proxy (port
@@ -501,6 +508,7 @@ function pipeTo(
   port: number,
   req: IncomingMessage,
   res: ServerResponse,
+  transformResponse: ProxyOptions["transformResponse"] | undefined,
 ): void {
   const proxyReq = httpRequest({
     host: "127.0.0.1",
@@ -524,6 +532,23 @@ function pipeTo(
     const headers = { ...proxyRes.headers };
     delete headers.connection;
     delete headers["keep-alive"];
+    const inject = transformResponse
+      ? transformResponse({ port, url: req.url ?? "", method: req.method ?? "GET" })
+      : null;
+    if (inject && (headers["content-type"] ?? "").includes("text/html")) {
+      // 响应注入（通用 transformResponse）：缓冲 HTML → </head> 前插入
+      const chunks: Buffer[] = [];
+      proxyRes.on("data", (c: Buffer) => chunks.push(c));
+      proxyRes.on("end", () => {
+        let html = Buffer.concat(chunks).toString("utf8");
+        html = html.includes("</head>") ? html.replace("</head>", inject + "</head>") : html + inject;
+        const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
+        delete h2["transfer-encoding"];
+        res.writeHead(proxyRes.statusCode ?? 502, h2);
+        res.end(html);
+      });
+      return;
+    }
     res.writeHead(proxyRes.statusCode ?? 502, headers);
     proxyRes.pipe(res);
   });
@@ -572,6 +597,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
     password = "",
     auth,
     log = () => {},
+    transformResponse,
   } = opts;
   const suffixes = [...(opts.suffixes ?? DEFAULT_SUFFIXES)];
   for (const h of opts.allowedHosts ?? []) {
@@ -635,7 +661,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
         return;
       case "pipe":
         log(`pipe ${req.headers.host}${req.url ?? ""} → :${decision.port}`);
-        pipeTo(decision.port, req, res);
+        pipeTo(decision.port, req, res, transformResponse);
         return;
       case "redirect":
         log(`auth 302 ${req.headers.host} → ${decision.location}`);
@@ -673,6 +699,22 @@ export function createProxyServer(opts: ProxyOptions): Server {
       const headers = { ...proxyRes.headers };
       delete headers.connection;
       delete headers["keep-alive"];
+      const inject = transformResponse
+        ? transformResponse({ port: Number(t.port) || 80, url: path, method: req.method ?? "GET" })
+        : null;
+      if (inject && (headers["content-type"] ?? "").includes("text/html")) {
+        const chunks: Buffer[] = [];
+        proxyRes.on("data", (c: Buffer) => chunks.push(c));
+        proxyRes.on("end", () => {
+          let html = Buffer.concat(chunks).toString("utf8");
+          html = html.includes("</head>") ? html.replace("</head>", inject + "</head>") : html + inject;
+          const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
+          delete h2["transfer-encoding"];
+          res.writeHead(proxyRes.statusCode ?? 502, h2);
+          res.end(html);
+        });
+        return;
+      }
       res.writeHead(proxyRes.statusCode ?? 502, headers);
       proxyRes.pipe(res);
     });

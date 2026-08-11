@@ -1,6 +1,6 @@
 {
   "name": "service-tunnels",
-  "version": "0.3.31",
+  "version": "0.3.34",
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
@@ -29,7 +29,7 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/copy-vendor.mjs",
     "prepack": "npm run build",
     "test": "node --test --test-force-exit \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit"

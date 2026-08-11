@@ -1,3 +1,9 @@
+## 0.3.34 (2026-08-11)
+
+- **feat: transformResponse 通用响应注入**——`createServiceTunnels({ transformResponse })`：
+  text/html 响应在 `</head>` 前注入 HTML 片段（pipe/forward 双路径）。
+  用途：aiti-devtools launcher 注入、监控脚本、横幅等（代理层通用能力，类似 nginx sub_filter）。
+
 # Changelog
 
 本文件遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
@@ -6,6 +12,15 @@
 > 发布记录以 npm registry 实测时间为准；git 历史中的版本号
 > （如 0.2.38–0.2.41）若未出现在 registry 发布列表中，其功能统一计入下一个
 > 实际发布版本。
+
+## [0.3.33] - 2026-08-10
+
+### Fixed
+- **portal 登录页/2FA 页适配小屏响应式**：head 补 viewport meta（手机浏览器
+  不再按 ~980px 渲染后整体缩小）；表单与忙碌过渡卡片从固定 `width:22rem` 改
+  为 `width:100%;max-width:22rem` 流体宽度；全局 `box-sizing:border-box` 防
+  padding 撑破；body/overlay 加 1rem 边距，`@media(max-width:480px)` 下压缩
+  卡片内边距（2.5rem→1.5rem）。
 
 ## [Unreleased]
 
@@ -231,7 +246,7 @@
 
 ### Fixed
 - **basic 认证绕过**( /  / )：
-  嵌入方(pi-web Next middleware)的 rewrite 无法保留 vhost Host(fetch 规范
+  嵌入方(宿主应用 Next middleware)的 rewrite 无法保留 vhost Host(fetch 规范
   forbidden header),nginx gateway 的 server_name 匹配不到 → 落到默认 server
   → auth_basic 被绕过。basic 改由决策 API 进程内校验(新增 APR1/md5-crypt
   校验),凭证有效直接 pipe 到服务,无效 401。
