@@ -215,6 +215,22 @@ async function pickPort(): Promise<number> {
 /** Mode dispatch (sites-design.md §4): "proxy" is a first-class expose mode
  *  — explicit enrollment, no tunnel process, same site/auth realm as tunnel
  *  mode. "both" = local vhost + public tunnel sharing one site. */
+/**
+ * 多通道默认命名（M0a-T4）：同端口多次暴露（不同 site/provider）不撞名。
+ * 仅当 site ≠ default / provider 为真实 provider 时追加后缀；
+ * 默认 `expose-<port>`（auth-none、tcp）保持既有兼容（调用/测试不变）。
+ */
+function defaultTunnelName(
+  port: number,
+  o: { site?: string; provider?: string; protocol?: string },
+): string {
+  const parts = [`expose-${port}`];
+  if (o.site && o.site !== "default") parts.push(o.site);
+  if (o.provider && o.provider !== "auto" && o.provider !== "none") parts.push(o.provider);
+  if (o.protocol === "tcp") parts.push("tcp");
+  return parts.join("-");
+}
+
 export async function expose(port: number, opts: ExposeOptions, ctx: ExposeContext): Promise<ExposeResult> {
   const mode = opts.mode ?? "tunnel";
   if (opts.protocol === "tcp" && mode !== "tunnel") {
@@ -490,7 +506,7 @@ async function exposeTunnel(
     // "none" auth — route through the shared nginx gateway TOO (like basic but
     // with no auth), so access/error logs are recorded for every expose. The
     // only difference from basic is the absence of auth directives.
-    const name = opts.tunnelName ?? `expose-${port}`;
+    const name = opts.tunnelName ?? defaultTunnelName(port, { site: opts.site });
     const nginxPort = opts.nginxPort ?? 0;
     const gateway = ctx.gateway ?? new GatewayController({
       configDir: ctx.configDir,
@@ -575,7 +591,7 @@ async function exposeTunnel(
 
   // edge-auth providers (ngrok edge-oidc) skip the local gateway entirely
   if (provider.capabilities.edgeAuth && !provider.capabilities.localGateway) {
-    const name = opts.tunnelName ?? `expose-${port}`;
+    const name = opts.tunnelName ?? defaultTunnelName(port, { site: opts.site, provider: providerType });
     const tunnelAuth = provider.renderTunnelAuth?.() ?? {};
     await ctx.tunnels.stop(name);
     await ctx.onTunnelStop?.(name);
@@ -589,6 +605,11 @@ async function exposeTunnel(
     });
     await ctx.tunnels.start(name);
     const url = await waitForUrl(ctx.tunnels, name, 30_000);
+    // TODO-1 (fail-clean): 隧道失败 → 停隧道 + 停本次起的 provider（共享 gateway 不清）
+    if (!url) {
+      await ctx.tunnels.stop(name).catch(() => {});
+      try { await provider.stop(); } catch { /* best effort */ }
+    }
     return { url, tunnel: name, provider: providerType, protocol, ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
   }
 
@@ -625,7 +646,7 @@ async function exposeTunnel(
   const gatewayPort = await gateway.start(authMode);
 
   // tunnel pointing at the gateway
-  const name = opts.tunnelName ?? `expose-${port}`;
+  const name = opts.tunnelName ?? defaultTunnelName(port, { site: opts.site, provider: providerType });
   await ctx.tunnels.stop(name);
   await ctx.onTunnelStop?.(name);
   ctx.tunnels.add({
@@ -686,6 +707,11 @@ async function exposeTunnel(
     log(`expose ${port}: ${url} (auth via ${providerType}, host ${publicHost} registered, scheme ${scheme})`);
   }
 
+  // TODO-1 (fail-clean): 隧道失败 → 停隧道 + 停本次起的 provider（共享 gateway/redis 不清）
+  if (!url) {
+    await ctx.tunnels.stop(name).catch(() => {});
+    try { await provider.stop(); } catch { /* best effort */ }
+  }
   return {
     url,
     tunnel: name,

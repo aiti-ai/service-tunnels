@@ -11,15 +11,17 @@
  * NOT a library entry point.
  */
 import { createServer, type Socket } from "net";
-import { existsSync, unlinkSync } from "fs";
+import { existsSync, unlinkSync, readdirSync } from "fs";
+import { join } from "path";
 import { randomBytes } from "crypto";
 import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
+import type { ExposeRuntimeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
 import { readConfigFile, writeConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
-import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
+import { TunnelManager, tunnelParamSchemas, tunnelMetas, TUNNEL_SCHEMAS_VERSION, type TunnelConfig } from "./tunnels.ts";
 import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { registerPid } from "./pid-registry.ts";
@@ -33,6 +35,8 @@ import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-reg
 import { localizeSchemas, resolveLang } from "./i18n.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
+import { GatewayController } from "./gateway.ts";
+import { RedisController } from "./redis.ts";
 import type { AutheliaProvider } from "./authelia.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
@@ -88,8 +92,13 @@ for (const entry of readState(stateFile).internal) {
 
 type Handler = (params: unknown) => unknown | Promise<unknown>;
 
+// 最近一次 RPC handler 错误（诊断用：UI 把 daemon 拒绝转成泛化提示时，
+// 可查询真实原因，如 auth-none banned / ngrok 8013）。
+let lastError: string | null = null;
+
 const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
+  ["daemon.last-error", () => ({ error: lastError })],
   [
     "discover",
     (params) => {
@@ -144,9 +153,77 @@ const methods = new Map<string, Handler>([
   ["tunnel.stop", (params) => {
     const name = String(params);
     validateTunnelName(name);
-    return tunnels.stop(name).then(() => ({ ok: true }));
+    // M0b: tunnel-mode exposes are stopped here too — drop the registry record
+    // so expose.list stops showing them.
+    exposeRegistry.delete(name);
+    return tunnels.stop(name).then(() => {
+      persistExposeRegistry();
+      return { ok: true };
+    });
   }],
-  ["tunnel.stopAll", () => tunnels.stopAll().then(() => ({ ok: true }))],
+  ["tunnel.stopAll", () => tunnels.stopAll().then(() => {
+    exposeRegistry.clear();
+    persistExposeRegistry();
+    return { ok: true };
+  })],
+  // ── Expose registry (M0b): list + stop with the proxy-mode dual path ──
+  ["expose.list", () =>
+    [...exposeRegistry.values()]
+      .sort((a, b) => a.startedAt - b.startedAt)
+      .map((rec) => {
+        const cfg = rec.tunnelName ? tunnels.configs.find((c) => c.name === rec.tunnelName) : null;
+        const logs = findExposeLogs(rec.host);
+        return {
+          ...rec,
+          running: exposeRunning(rec),
+          params: cfg ? maskedTunnelParams(cfg) : null,
+          accessLog: logs.access,
+          errorLog: logs.error,
+        };
+      }),
+  ],
+  ["expose.stop", async (params) => {
+    const name = String(params);
+    const rec = exposeRegistry.get(name);
+    if (!rec) throw new Error(`expose ${name} not found`);
+    if (rec.tunnelName) {
+      await tunnels.stop(rec.tunnelName);
+    } else {
+      // proxy-mode: drop the binding (record is removed below)
+      try {
+        proxy.removeBinding(rec.port, rec.label ?? "");
+      } catch {
+        // already gone
+      }
+    }
+    exposeRegistry.delete(name);
+    persistExposeRegistry();
+    // TODO-1 (fail-clean): ssh provider 暴露停止 → 清理 backing ssh 域
+    // （该 site 无其他运行中 ssh 暴露时才删）。
+    if (rec.provider === "ssh" && rec.site) {
+      const others = [...exposeRegistry.values()].filter(
+        (r) => r.name !== name && r.provider === "ssh" && r.site === rec.site,
+      );
+      if (!others.length) {
+        try { if (ssh.get(rec.site)) await ssh.remove(rec.site); } catch { /* best effort */ }
+      }
+    }
+    return { ok: true, name };
+  }],
+  ["expose.stopAll", async () => {
+    await tunnels.stopAll();
+    for (const b of proxy.bindings()) {
+      try {
+        proxy.removeBinding(b.port, b.label);
+      } catch {
+        // already gone
+      }
+    }
+    exposeRegistry.clear();
+    persistExposeRegistry();
+    return { ok: true };
+  }],
+  }],
   ["config.allow-download", () => ({ allowToolDownload: toolAllowDownload })],
   [
     "config.set-allow-download",
@@ -361,7 +438,58 @@ const methods = new Map<string, Handler>([
         tunnels,
         auth: authRegistry,
         proxy,
+        // TODO-1: shared singletons — one nginx gateway + one redis for ALL
+        // exposes (eliminates per-expose nginx accumulation); not cleaned
+        // per-expose.
+        gateway,
+        redis,
         log: (line) => console.error(`[service-tunnels] ${line}`),
+      }).then((r) => {
+        // Record expose metadata in the registry (M0b) for expose.list/stop.
+        if (r && r.tunnel) {
+          exposeRegistry.set(r.tunnel, {
+            name: r.tunnel,
+            port: o.port,
+            mode: r.mode,
+            provider: sshRequested ? "ssh" : r.provider,
+            protocol: r.protocol,
+            site: r.site ?? o.site,
+            label: r.label,
+            localUrl: r.localUrl,
+            baseUrl: r.baseUrl,
+            domainUrl: r.domainUrl,
+            url: r.url,
+            loginUrl: r.loginUrl,
+            tunnelType: o.tunnelType,
+            tunnelName: r.tunnel,
+            host: r.url ? new URL(r.url).host : undefined,
+            startedAt: Date.now(),
+          });
+        } else if (r && (r.localUrl || r.mode)) {
+          const key = `proxy:${o.port}:${r.label ?? ""}`;
+          exposeRegistry.set(key, {
+            name: key,
+            port: o.port,
+            mode: r.mode ?? "proxy",
+            provider: r.provider,
+            protocol: r.protocol,
+            site: r.site ?? o.site,
+            label: r.label,
+            localUrl: r.localUrl,
+            baseUrl: r.baseUrl,
+            domainUrl: r.domainUrl,
+            url: r.url,
+            loginUrl: r.loginUrl,
+            tunnelType: o.tunnelType,
+            startedAt: Date.now(),
+          });
+        }
+        persistExposeRegistry();
+        return r;
+      });
+    },
+  ],
+  [
       });
     },
   ],
@@ -448,6 +576,7 @@ async function listen(): Promise<{ path: string; secret?: string }> {
             res.writeHead(200, { "content-type": "application/json" });
             res.end(JSON.stringify({ id: reqObj.id, result }));
           } catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
             res.writeHead(500, { "content-type": "application/json" });
             res.end(JSON.stringify({ error: String(err) }));
           }
@@ -533,6 +662,93 @@ const proxy = new ProxyManager({
 // restore persisted enrollments (P4): a restarted daemon re-serves the same
 // (port → site) bindings; providers come back lazily on first request.
 proxy.restore(readState(stateFile).bindings);
+
+// TODO-1 (fail-clean): SHARED nginx gateway + redis singletons. Previously
+// every expose created its own GatewayController (`ctx.gateway ?? new …`)
+// → nginx processes accumulated per expose. The daemon now owns ONE gateway
+// (nginx) + ONE redis for all exposes; they are NOT cleaned per-expose
+// (shared singletons stay for the daemon lifetime — restart cost > keep).
+const gateway = new GatewayController({
+  configDir,
+  cacheDir,
+  port: 0,
+  registerInternal: (role, p) => internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+  unregisterInternal: (role) => internal.unregister(role),
+  registerPid: (role, pid) => {
+    try { registerPid(cacheDir, process.pid, role, pid); } catch {}
+  },
+  log: (line) => console.error(`[service-tunnels] ${line}`),
+});
+const redis = new RedisController({ cacheDir, port: 0, log: () => {}, registerPid: (role, pid) => {
+  try { registerPid(cacheDir, process.pid, role, pid); } catch {}
+} });
+
+// ── Expose registry (M0b) ──────────────────────────────────────────────────
+// Records expose metadata (incl. proxy mode, which has no tunnel process) so
+// the UI can list/stop them. Persisted to state.json — display only: tunnel
+// processes restore via `tunnels.hydrate`, bindings via `proxy.restore`.
+// Params are masked at expose.list time (never store secrets).
+const exposeRegistry = new Map<string, ExposeRuntimeState>();
+for (const rec of readState(stateFile).exposes ?? []) {
+  if (rec && typeof rec.name === "string" && typeof rec.port === "number") exposeRegistry.set(rec.name, rec);
+}
+const persistExposeRegistry = () => {
+  writeState(stateFile, { ...readState(stateFile), exposes: [...exposeRegistry.values()] });
+};
+
+/** Masked tunnel params for the expose detail modal (token fields → last 4). */
+function maskedTunnelParams(cfg: TunnelConfig): Record<string, string> {
+  const out: Record<string, string> = {};
+  const mask = (v: string) => `••••${v.slice(-4)}`;
+  if (cfg.domain) out.domain = cfg.domain;
+  if (cfg.server) out.server = cfg.server;
+  if (cfg.host) out.host = cfg.host;
+  if (cfg.user) out.user = cfg.user;
+  if (cfg.port) out.port = String(cfg.port);
+  if (cfg.remotePort) out.remotePort = String(cfg.remotePort);
+  if (cfg.token) out.token = mask(cfg.token);
+  if (cfg.args?.length) out.args = cfg.args.join(" ");
+  if (cfg.cmd) out.cmd = cfg.cmd;
+  if (cfg.env) {
+    for (const [k, v] of Object.entries(cfg.env)) {
+      out[k] = /token|secret|password|key/i.test(k) ? mask(v) : v;
+    }
+  }
+  return out;
+}
+
+/** Resolve an expose's live running state: tunnel running, or (proxy mode)
+ *  binding enrolled — mirrors st.exposes() (M0a-T3) on the daemon side. */
+function exposeRunning(rec: ExposeRuntimeState): boolean {
+  if (rec.tunnelName) return tunnels.get(rec.tunnelName)?.running ?? false;
+  return proxy.bindings().some((b) => b.port === rec.port && (b.label ?? "") === (rec.label ?? ""));
+}
+
+/** Locate an expose's nginx access/error logs by host. Each expose creates its
+ *  own GatewayController (per-expose nginx root under cacheDir/tmp/nginx-\*),
+ *  so scan every nginx-* dir for <host>.access/error.log (M2). */
+function findExposeLogs(host: string | undefined): { access: string | null; error: string | null } {
+  if (!host) return { access: null, error: null };
+  const tmpRoot = join(cacheDir, "tmp");
+  let dir: string | null = null;
+  try {
+    if (!existsSync(tmpRoot)) return { access: null, error: null };
+    for (const name of readdirSync(tmpRoot)) {
+      if (!name.startsWith("nginx-")) continue;
+      const logsDir = join(tmpRoot, name, "logs");
+      if (!existsSync(join(logsDir, `${host}.access.log`))) continue;
+      dir = logsDir;
+      break;
+    }
+  } catch {
+    return { access: null, error: null };
+  }
+  if (!dir) return { access: null, error: null };
+  return {
+    access: join(dir, `${host}.access.log`),
+    error: join(dir, `${host}.error.log`),
+  };
+}
 
 function resolveDaemonUserTargets(registry: AuthRegistry, provider?: string | string[]): string[] {
   const all = registry.userManagers();

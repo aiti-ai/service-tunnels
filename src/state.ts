@@ -37,6 +37,28 @@ export interface BindingRuntimeState {
   bypassPaths?: string[];
 }
 
+/** Persisted expose metadata (M0b) — the daemon's expose registry, so the UI
+ *  can display exposes (incl. proxy mode, which has no tunnel process) after
+ *  a daemon restart. Never stores secrets: params are masked at list time. */
+export interface ExposeRuntimeState {
+  name: string;
+  port: number;
+  mode?: string;
+  provider?: string;
+  protocol?: string;
+  site?: string;
+  label?: string;
+  localUrl?: string;
+  baseUrl?: string;
+  domainUrl?: string;
+  url?: string | null;
+  loginUrl?: string;
+  tunnelType?: string;
+  tunnelName?: string;
+  host?: string;
+  startedAt: number;
+}
+
 export interface RuntimeState {
   daemon?: DaemonState;
   internal: InternalPortState[];
@@ -44,10 +66,13 @@ export interface RuntimeState {
   auth: { registered: string[] };
   /** Persisted proxy enrollments (mode proxy/both) — restored on daemon restart. */
   bindings: BindingRuntimeState[];
+  /** Persisted expose metadata (M0b) — display only; tunnel processes are
+   *  restored by `tunnels` hydrate, bindings by `proxy.restore`. */
+  exposes?: ExposeRuntimeState[];
 }
 
 export function emptyState(): RuntimeState {
-  return { internal: [], tunnels: {}, auth: { registered: [] }, bindings: [] };
+  return { internal: [], tunnels: {}, auth: { registered: [] }, bindings: [], exposes: [] };
 }
 
 export function readState(stateFile: string): RuntimeState {
@@ -61,6 +86,7 @@ export function readState(stateFile: string): RuntimeState {
       tunnels: parsed.tunnels ?? {},
       auth: { ...emptyState().auth, ...parsed.auth },
       bindings: Array.isArray(parsed.bindings) ? parsed.bindings : [],
+      exposes: Array.isArray(parsed.exposes) ? parsed.exposes : [],
     };
   } catch {
     return emptyState();
