@@ -109,6 +109,8 @@ interface CliArgs {
   listenAddr?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
   policy?: string;
+  /** ui --daemonize: detached re-spawn (survives shell session). */
+  daemonize?: boolean;
   /** --proxy-port <p>: proxy transport port (mode proxy/both). */
   proxyPort?: number;
   /** --base-domain <d>: user's wildcard-DNS domain for portless base URLs. */
@@ -311,6 +313,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--no-browser":
         args.noBrowser = true;
+        break;
+      case "--daemonize":
+        args.daemonize = true;
         break;
       case "--lang":
         args.lang = argv[++i];
@@ -1065,6 +1070,22 @@ async function main(): Promise<void> {
     }
 
     case "ui": {
+      if (args.daemonize) {
+        // Detached re-spawn: survives the shell session (like `daemon start`).
+        const { spawn } = await import("child_process");
+        const passThrough: string[] = [];
+        if (args.cacheDir) passThrough.push("--cache-dir", args.cacheDir);
+        if (args.configDir) passThrough.push("--config-dir", args.configDir);
+        if (args.port) passThrough.push("--port", String(args.port));
+        const child: import("child_process").ChildProcess = spawn(
+          process.execPath,
+          [process.argv[1]!, "ui", "--no-browser", ...passThrough],
+          { detached: true, stdio: "ignore" },
+        );
+        child.unref();
+        console.log(JSON.stringify({ ui: "daemonized", pid: child.pid ?? null }));
+        break;
+      }
       const { startUi } = await import("./ui.ts");
       const ui = startUi(st, {
         port: args.port ? Number(args.port) : undefined,
