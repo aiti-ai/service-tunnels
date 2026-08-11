@@ -20,6 +20,7 @@ import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
 import type { ExposeRuntimeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
+import { listListeningPorts } from "./ports.ts";
 import { readConfigFile, writeConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas, TUNNEL_SCHEMAS_VERSION, type TunnelConfig } from "./tunnels.ts";
 import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
@@ -103,6 +104,8 @@ let lastError: string | null = null;
 const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
   ["daemon.last-error", () => ({ error: lastError })],
+  ["port.list", (params) => {
+    const ports = listListeningPorts(String((params as { scope?: string } | undefined)?.scope ?? "current-user"));
     // SSH 网关端口是内部服务（认证层），不作为暴露目标
     const gwPorts = new Set(ssh.list().map((d) => d.port));
     return ports.filter((p) => !gwPorts.has(p.port));
@@ -571,6 +574,29 @@ const methods = new Map<string, Handler>([
         persistExposeRegistry();
         return r;
       });
+    },
+  ],
+  [
+    "port.detect",
+    async (params) => {
+      const port = Number((params as { port?: unknown } | null)?.port);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535)
+        throw new Error(`invalid port: ${port}`);
+      const { detectProtocol } = await import("./gateway.ts");
+      const { tunnelSupportsTcp } = await import("./tunnels.ts");
+      let protocol: "http" | "https" | "tcp" = "tcp";
+      try {
+        protocol = await detectProtocol(port, 1200);
+      } catch {
+        protocol = "tcp";
+      }
+      const types = ["ngrok", "ssh", "frpc", "cloudflared", "localtunnel", "bore", "serveo", "command"];
+      return {
+        port,
+        protocol,
+        tunnelTypes: types.filter((t) => t === "command" || (protocol === "tcp" ? tunnelSupportsTcp(t) : true)),
+        httpTunnelOnly: protocol === "http" || protocol === "https",
+      };
     },
   ],
   [

@@ -114,35 +114,35 @@ export interface GatewayConfig {
  *  the forwarding mode (nginx gateway for http/https; direct raw tunnel for
  *  tcp). */
 export async function detectProtocol(port: number, timeoutMs = 1500): Promise<"http" | "https" | "tcp"> {
-  const probeHttp = () =>
-    new Promise<boolean>((resolve) => {
-      void import("http").then(({ request }) => {
-        const req = request({ host: "127.0.0.1", port, path: "/", method: "GET", timeout: timeoutMs }, (r) => {
-          r.destroy();
-          resolve(true); // any HTTP response → plain http
-        });
-        req.on("error", () => resolve(false));
-        req.on("timeout", () => { req.destroy(); resolve(false); });
-        req.end();
-      });
-    });
-  const probeHttps = () =>
-    new Promise<boolean>((resolve) => {
-      void import("https").then(({ request }) => {
-        const req = request({ host: "127.0.0.1", port, path: "/", method: "GET", rejectUnauthorized: false, timeout: timeoutMs }, (r) => {
-          r.destroy();
-          resolve(true);
-        });
-        req.on("error", () => resolve(false));
-        req.on("timeout", () => { req.destroy(); resolve(false); });
-        req.end();
-      });
-    });
+  // Raw net/tls probes (no http agent → no keep-alive socket lingering).
+  // Every socket is explicitly destroyed so the event loop drains.
   const probeTcp = () =>
     new Promise<boolean>((resolve) => {
       void import("net").then(({ connect }) => {
         const s = connect(port, "127.0.0.1");
         s.once("connect", () => { s.destroy(); resolve(true); });
+        s.once("error", () => { s.destroy(); resolve(false); });
+        s.setTimeout(timeoutMs, () => { s.destroy(); resolve(false); });
+      });
+    });
+  const probeHttp = () =>
+    new Promise<boolean>((resolve) => {
+      void import("net").then(({ connect }) => {
+        const s = connect(port, "127.0.0.1");
+        let got = false;
+        s.once("connect", () => {
+          s.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        });
+        s.on("data", () => { got = true; s.destroy(); resolve(true); });
+        s.once("error", () => { s.destroy(); resolve(false); });
+        s.setTimeout(timeoutMs, () => { s.destroy(); resolve(got); });
+      });
+    });
+  const probeHttps = () =>
+    new Promise<boolean>((resolve) => {
+      void import("tls").then(({ connect }) => {
+        const s = connect({ host: "127.0.0.1", port, rejectUnauthorized: false });
+        s.once("secureConnect", () => { s.destroy(); resolve(true); });
         s.once("error", () => { s.destroy(); resolve(false); });
         s.setTimeout(timeoutMs, () => { s.destroy(); resolve(false); });
       });
