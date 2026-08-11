@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import { connect } from "net";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
@@ -8,6 +8,7 @@ import { readState } from "./state.ts";
 import { cachePaths } from "./config.ts";
 import { killRoleProcesses } from "./cleanup.ts";
 import { ensureMarker } from "./marker.ts";
+import { spawnNode } from "./spawn-node.ts";
 
 /**
  * Daemon controller — CLI-mode process model.
@@ -75,7 +76,7 @@ function ipcPath(ipc: string): string | null {
  */
 export function startDaemon(
   cacheDir: string,
-  opts: { foreground?: boolean; logFile?: string; configDir?: string; env?: Record<string, string> } = {},
+  opts: { foreground?: boolean; logFile?: string; configDir?: string; env?: Record<string, string>; nodePath?: string } = {},
 ): DaemonStatus {
   const existing = daemonStatus(cacheDir);
   if (existing.running) return existing;
@@ -86,14 +87,14 @@ export function startDaemon(
   mkdirSync(dirname(stateFile), { recursive: true });
 
   if (opts.foreground) {
-    const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
+    const child = spawnNode(opts.nodePath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
       stdio: "inherit",
     });
     return { running: true, pid: child.pid ?? null, ipc: null };
   }
 
   const logPath = opts.logFile ?? `${stateFile}.daemon.log`;
-  const child = spawn(process.execPath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
+  const child = spawnNode(opts.nodePath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
     env: { ...process.env, ...opts.env },

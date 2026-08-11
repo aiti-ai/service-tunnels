@@ -4,6 +4,7 @@ import { execFileSync, spawn } from "child_process";
 import { dirname, join } from "path";
 import { connect } from "net";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthToken, TokenManager } from "../auth-provider.ts";
+import { spawnNode } from "../spawn-node.ts";
 
 /**
  * token provider — Bearer-token auth for tunnel API 请求 (machine clients).
@@ -194,7 +195,7 @@ export class TokenAuthProvider implements AuthProvider, TokenManager {
     await this.prepare();
     for (let attempt = 0; ; attempt++) {
       if (!this.#port) this.#port = await this.#ctx.pickPort();
-      const p = spawn(process.execPath, [this.#serverFile], {
+      const p = spawnNode(this.#ctx.nodePath, [this.#serverFile], {
         env: {
           ...process.env,
           PORT: String(this.#port),

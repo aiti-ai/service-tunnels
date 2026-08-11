@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess } from "child_process";
+import { type ChildProcess } from "child_process";
 import { existsSync } from "fs";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { readStarttime } from "./guardian.ts";
+import { spawnNode } from "./spawn-node.ts";
 
 /**
  * Spawn the parent-death guardian (detached, unref'd). The guardian polls the
@@ -20,13 +21,13 @@ function guardianEntry(): string | null {
 
 export function spawnGuardian(
   parentPid: number,
-  opts: { intervalMs?: number; registrationFile?: string; cacheDir?: string } = {},
+  opts: { intervalMs?: number; registrationFile?: string; cacheDir?: string; nodePath?: string } = {},
 ): ChildProcess | null {
   const entry = guardianEntry();
   if (!entry || !parentPid) return null;
   const starttime = readStarttime(parentPid);
-  const child = spawn(
-    process.execPath,
+  const child = spawnNode(
+    opts.nodePath,
     [entry, String(parentPid), starttime, String(opts.intervalMs ?? 1_000), opts.registrationFile ?? "", opts.cacheDir ?? ""],
     { detached: true, stdio: ["ignore", "ignore", "ignore"] },
   );

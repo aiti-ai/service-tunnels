@@ -4,6 +4,7 @@ import { join } from "path";
 import { randomBytes, scryptSync, createHmac, timingSafeEqual } from "crypto";
 import { connect } from "net";
 import { validateUserName } from "../validation.ts";
+import { spawnNode } from "../spawn-node.ts";
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager } from "../auth-provider.ts";
 import { randomName } from "../auth-provider.ts";
 
@@ -220,7 +221,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     await this.prepare();
     for (let attempt = 0; ; attempt++) {
       if (!this.#port) this.#port = await this.#ctx.pickPort();
-      const p = spawn(process.execPath, [this.#serverFile], {
+      const p = spawnNode(this.#ctx.nodePath, [this.#serverFile], {
         env: {
           ...process.env,
           PORT: String(this.#port),

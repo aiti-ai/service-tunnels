@@ -21,6 +21,10 @@ export interface AuthPolicy {
 export interface ProviderContext {
   configDir: string;
   cacheDir: string;
+  /** Node runtime path for spawned helper scripts (portal/token). In Electron
+   *  hosts (VS Code extension host) spawns auto-run with ELECTRON_RUN_AS_NODE
+   *  so the app binary acts as node; an explicit path overrides execPath. */
+  nodePath?: string;
   /** Resolve a tool (PATH > cache > download) — e.g. authelia. */
   resolveTool: (name: string) => Promise<string>;
   /** Register a framework helper port (nginx/authelia/redis). */
