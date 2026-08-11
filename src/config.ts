@@ -46,10 +46,13 @@ export interface ServiceTunnelsConfigFile {
    *  Read-only fallback — the library/CLI never writes this file; see
    *  resolveAllowAuthNone for the precedence. */
   allowAuthNone?: boolean;
+  /** 参数变体（Presets, TODO-2）：隧道/认证参数的命名常用，敏感字段密文。
+   *  运行时创建（UI「另存为常用」/ API），writeConfigFile 持久化。 */
+  tunnelPresets?: Array<{ name: string; type: string; params: Record<string, string>; createdAt: number; updatedAt: number }>;
+  authPresets?: Array<{ name: string; type: string; params: Record<string, string>; createdAt: number; updatedAt: number }>;
   /** Auth 配置档（docs/oauth2-variants.md §3）：变体共享凭据 + 旧 oidc 字段。
    *  只读 fallback——表单/CLI --provider-set 的显式参数永远优先于它。 */
-  auth?: {
-    /** oauth2-proxy 原始路径（向后兼容，docs/config.md §config.json）。 */
+  auth?: {    /** oauth2-proxy 原始路径（向后兼容，docs/config.md §config.json）。 */
     oidc?: {
       issuerUrl?: string;
       clientId?: string;
