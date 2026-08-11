@@ -1,6 +1,7 @@
 import { execFileSync } from "child_process";
 import { readFileSync, readdirSync, statSync, rmSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 
 /**
@@ -225,7 +226,12 @@ async function main(): Promise<void> {
   }
 }
 
-// run only when invoked directly (node guardian.ts ...), never on import
-if (import.meta.main) {
+// run only when invoked directly (node guardian.ts ...), never on import.
+// Portable main-detection: import.meta.main is Node >=22.18 / 24.2 only — on
+// Node 20 it is silently undefined, which would make the guardian exit
+// without polling (helpers orphaned until the next start-time cleanup).
+const isMain =
+  !!process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
   void main();
 }
