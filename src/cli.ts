@@ -30,6 +30,8 @@ function usage(lang: Lang = "en"): void {
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
   expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
+  ssh domain list | create <name> --forward-port <p> [--ssh-port <p>] [--reverse-port <p>] [--host <h>] |
+               remove <name> | key list|add|generate|remove | host fingerprints [--domain <d>] [--public-key <k>] [--fingerprint <fp>] [--type ed25519|rsa|ecdsa] [--bits <n>] [--count <n>] [--comment <c>]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
   ui [--port <p>] [--no-browser]
   stop-all
@@ -92,6 +94,19 @@ interface CliArgs {
   description?: string;
   /** --expires <ISO|+2h|never|epoch> (auth token create): 有效期。 */
   expires?: string;
+  /** ssh key add --public-key / key remove --fingerprint. */
+  publicKey?: string;
+  fingerprint?: string;
+  /** ssh key generate --bits / --count. */
+  bits?: number;
+  count?: number;
+  /** ssh domain create --forward-port / key generate --comment. */
+  forwardPort?: number;
+  comment?: string;
+  /** expose --ssh-gateway <domain>: tcp tunnel target = SSH gateway port. */
+  sshGateway?: string;
+  /** ssh domain create --listen-addr: gateway bind IP (127.0.0.1 / 172.17.0.1 / 0.0.0.0). */
+  listenAddr?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
   policy?: string;
   /** --proxy-port <p>: proxy transport port (mode proxy/both). */
@@ -245,6 +260,33 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       }
       case "--display-name":
         args.displayName = argv[++i]!;
+        break;
+      case "--public-key":
+        args.publicKey = argv[++i]!;
+        break;
+      case "--fingerprint":
+        args.fingerprint = argv[++i]!;
+        break;
+      case "--bits":
+        args.bits = Number(argv[++i]!);
+        break;
+      case "--count":
+        args.count = Number(argv[++i]!);
+        break;
+      case "--forward-port":
+        args.forwardPort = Number(argv[++i]!);
+        break;
+      case "--ssh-gateway":
+        args.sshGateway = argv[++i]!;
+        break;
+      case "--listen-addr":
+        args.listenAddr = argv[++i]!;
+        break;
+      case "--site":
+        args.site = argv[++i]!;
+        break;
+      case "--comment":
+        args.comment = argv[++i]!;
         break;
       case "--provider":
         args.provider = argv[++i]!;
@@ -762,6 +804,7 @@ async function main(): Promise<void> {
         bypassPaths: args.bypassPaths,
         tunnelType: args.tunnel,
         tunnelName: args.name,
+        protocol: args.sshGateway ? "tcp" as const : undefined,
         // `--tunnel command` runs a raw shell command — this CLI invocation is
         // the explicit opt-in (same gate as tunnel add).
         dangerous: args.tunnel === "command",
@@ -769,6 +812,7 @@ async function main(): Promise<void> {
         basePath: args.basePath,
         tunnelParams,
         providerParams,
+        sshGateway: args.sshGateway,
         force: args.force,
         allowToolDownload: args.allowToolDownload,
         allowAuthNone: args.allowAuthNone,
@@ -781,6 +825,70 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       jsonOut(res);
+      break;
+    }
+
+    case "ssh": {
+      const op = cmd[1] ?? "domain";
+      const d = st.daemon;
+      const requireDomain = () => {
+        const domain = args.domain ?? cmd[3] ?? "";
+        if (!domain) {
+          console.error("ssh: --domain <name> required");
+          process.exit(2);
+        }
+        return domain;
+      };
+      if (op === "domain" && cmd[2] === "list") {
+        jsonOut(await d.request("ssh.domain.list"));
+      } else if (op === "domain" && cmd[2] === "create") {
+        const domain = requireDomain();
+        const res = await d.request("ssh.domain.create", {
+          domain,
+          site: args.site,
+          sshPort: args.port === undefined ? undefined : Number(args.port),
+          forwardPort: Number(args.forwardPort ?? args.target),
+          reversePort: args.remotePort === undefined ? undefined : Number(args.remotePort),
+          forwardHost: args.host,
+          listenAddr: args.listenAddr,
+        });
+        jsonOut(res);
+      } else if (op === "domain" && cmd[2] === "remove") {
+        jsonOut(await d.request("ssh.domain.remove", { domain: requireDomain() }));
+      } else if (op === "key" && cmd[2] === "list") {
+        jsonOut(await d.request("ssh.key.list", { domain: requireDomain() }));
+      } else if (op === "key" && cmd[2] === "add") {
+        const domain = requireDomain();
+        const publicKey = args.publicKey ?? cmd[4] ?? "";
+        if (!publicKey) {
+          console.error("ssh key add <domain> '<ssh-ed25519 AAAA...>'  (or --public-key)");
+          process.exit(2);
+        }
+        jsonOut(await d.request("ssh.key.add", { domain, publicKey }));
+      } else if (op === "key" && cmd[2] === "generate") {
+        const domain = requireDomain();
+        const res = await d.request("ssh.key.generate", {
+          domain,
+          type: args.type ?? "ed25519",
+          bits: args.bits === undefined ? undefined : Number(args.bits),
+          comment: args.comment,
+          count: args.count === undefined ? undefined : Number(args.count),
+        });
+        jsonOut(res);
+      } else if (op === "key" && cmd[2] === "remove") {
+        const domain = requireDomain();
+        const fingerprint = args.fingerprint ?? cmd[4] ?? "";
+        if (!fingerprint) {
+          console.error("ssh key remove <domain> <fingerprint>  (or --fingerprint)");
+          process.exit(2);
+        }
+        jsonOut(await d.request("ssh.key.remove", { domain, fingerprint }));
+      } else if (op === "host" && cmd[2] === "fingerprints") {
+        jsonOut(await d.request("ssh.host.fingerprints", { domain: requireDomain() }));
+      } else {
+        console.error("ssh domain list|create|remove | ssh key list|add|generate|remove | ssh host fingerprints --domain <d>");
+        process.exit(2);
+      }
       break;
     }
 

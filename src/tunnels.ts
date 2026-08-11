@@ -94,6 +94,9 @@ export interface TunnelConfig {
   type: TunnelType;
   /** Local port the tunnel exposes (nginx gateway port in auth mode). */
   target?: number;
+  /** SSH gateway domain (auth layer): when set, target is the gateway's SSH
+   *  port and only key-authorized users can reach the service. */
+  sshGateway?: string;
   /** Fixed public host (--domain / --subdomain / custom_domains). */
   domain?: string;
   /** Extra CLI args (passed through). */

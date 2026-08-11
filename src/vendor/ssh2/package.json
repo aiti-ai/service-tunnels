@@ -1,0 +1,7 @@
+{
+  "name": "ssh2-vendor",
+  "version": "1.17.0",
+  "description": "Vendored ssh2 server core (MIT) — CommonJS scope for the ESM package",
+  "private": true,
+  "type": "commonjs"
+}

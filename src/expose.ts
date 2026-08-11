@@ -119,6 +119,10 @@ export interface ExposeOptions {
   /** ngrok authtoken — injected as NGROK_AUTHTOKEN env into the ngrok process
    *  so it authenticates (otherwise ngrok exits with ERR_NGROK_4018). */
   ngrokAuthtoken?: string;
+  /** SSH gateway domain (auth layer for raw TCP exposes). When set, the tcp
+   *  tunnel target becomes the gateway's SSH port instead of the app port:
+   *  only holders of an authorized private key can reach the service. */
+  sshGateway?: string;
   /** Allow on-demand tool downloads for THIS expose (param > env > config
    *  fallback > default true). When false, missing tools error instead of
    *  downloading. */
@@ -192,6 +196,16 @@ export interface ExposeContext {
   /** Shared redis singleton (one session store for all authelia exposes). */
   redis?: RedisController;
   log?: (line: string) => void;
+  /** Resolve an SSH gateway domain to its bound port (daemon-owned manager).
+   *  Required only when ExposeOptions.sshGateway is used. */
+  sshGatewayPort?: (domain: string) => Promise<number | undefined> | number | undefined;
+  /** M0b-ssh: auto-provision the site's backing ssh domain (port auto-
+   *  allocated) — the caller only passes site + port. Returns the ssh port
+   *  and whether THIS call created the domain (TODO-1: rollback on failure
+   *  only removes domains this expose created). */
+  sshEnsureDomain?: (site: string, forwardPort: number) => Promise<{ port: number; created: boolean } | undefined>;
+  /** TODO-1: remove the site's backing ssh domain (rollback / stop cleanup). */
+  sshRemoveDomain?: (site: string) => Promise<unknown>;
 }
 
 async function pickPort(): Promise<number> {
@@ -463,6 +477,25 @@ async function exposeTunnel(
   // authenticates instead of exiting ERR_NGROK_4018). Harmless for other types.
   const tunnelEnv = opts.ngrokAuthtoken ? { NGROK_AUTHTOKEN: opts.ngrokAuthtoken } : undefined;
 
+  // M0b-ssh: "ssh" is a first-class provider = site-scoped public-key auth for
+  // ANY protocol. Port-forward is protocol-agnostic — http/https/tcp ports are
+  // served the same: auto-provision the site's backing ssh domain (port auto-
+  // allocated, invisible to the caller) and route a raw tcp tunnel at its ssh
+  // port. No gateway/domain/port management by the caller (ui-redesign §4.6).
+  // TODO-1 (暴露原子化): ssh provider 自动建域只在此次 expose 内回滚——
+  // 隧道失败 → 删除本次新建的域（非本次创建的不动）。
+  let createdSshDomain = false;
+
+  if (opts.provider === "ssh" || opts.auth === "ssh") {
+    if (!ctx.sshEnsureDomain || !ctx.sshGatewayPort) {
+      return { url: null, tunnel: "", error: "ssh auth requires an ssh manager (sshEnsureDomain/sshGatewayPort resolver missing)" };
+    }
+    const r = await ctx.sshEnsureDomain(site, port);
+    if (!r || !r.port) return { url: null, tunnel: "", error: `ssh auth: failed to provision site "${site}"` };
+    createdSshDomain = !!r.created;
+    opts = { ...opts, protocol: "tcp", sshGateway: site, auth: false };
+  }
+
   if (opts.protocol === "tcp") {
     // raw TCP — NO nginx gateway (nginx is HTTP-only), NO auth: tunnel
     // straight to the app port. Only TCP-capable tunnel types allowed.
@@ -470,20 +503,42 @@ async function exposeTunnel(
     if (!tunnelSupportsTcp(tunnelType)) {
       return { url: null, tunnel: "", error: `tunnel type "${tunnelType}" does not support tcp forwarding (use ngrok/ssh/frpc)` };
     }
-    const name = opts.tunnelName ?? `expose-${port}-tcp`;
+    // Optional SSH auth layer: point the raw tunnel at the SSH gateway port
+    // instead of the app port — only authorized private keys get through.
+    let target = port;
+    if (opts.sshGateway) {
+      if (!ctx.sshGatewayPort) {
+        return { url: null, tunnel: "", error: "ssh-gateway requires a daemon-owned ssh manager (sshGatewayPort resolver missing)" };
+      }
+      const gwPort = await ctx.sshGatewayPort(opts.sshGateway);
+      if (!gwPort) {
+        return { url: null, tunnel: "", error: `ssh gateway domain "${opts.sshGateway}" not found (create it first: service-tunnels ssh domain create ...)` };
+      }
+      target = gwPort;
+    }
+    const name = opts.tunnelName ?? defaultTunnelName(port, { site: opts.site, provider: opts.provider, protocol: "tcp" });
     await ctx.tunnels.stop(name);
     await ctx.onTunnelStop?.(name);
     ctx.tunnels.add({
       ...(opts.tunnelParams ?? {}),
       name,
       type: (opts.tunnelType as never) ?? "ngrok",
-      target: port,
+      target,
       protocol: "tcp",
       env: tunnelEnv,
+      sshGateway: opts.sshGateway,
     });
     await ctx.tunnels.start(name);
     const url = await waitForUrl(ctx.tunnels, name, 30_000);
-    return { url, tunnel: name, protocol, ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
+    // TODO-1 (fail-clean): 隧道启动失败 → 停隧道 + 删除本次新建的 ssh 域，
+    // 不留半残留（下次暴露自动重建）。共享单例（nginx/redis）不动。
+    if (!url && createdSshDomain) {
+      await ctx.tunnels.stop(name).catch(() => {});
+      await ctx.sshRemoveDomain?.(site).catch(() => {});
+    }
+    // raw tcp tunnel (incl. ssh-gateway auth) — protocol is always tcp even
+    // when the target port was detected as http/https (M0b-ssh: port-forward)
+    return { url, tunnel: name, protocol: "tcp", ...(url ? {} : tunnelFailure(ctx.tunnels, name)) };
   }
 
   if (!useAuth) {
