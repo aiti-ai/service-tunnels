@@ -225,6 +225,8 @@ config path | show | get <key> | set <key> <value>   # base-domain / proxy-port 
 - [`docs/auth-provider.md`](docs/auth-provider.md) — **编写 AuthProvider 指南**（接口 / 自描述协议字段 / 最小示例 / 注册 / 检查清单）
 - [`docs/design.md`](docs/design.md) — 架构 / 模块 / 认证 provider 模型 / 平台矩阵
 - [`docs/input-validation-security.md`](docs/input-validation-security.md) — **隧道参数输入安全**（审计 + 加固方案与实现）
+- [`docs/vscode-extension-plan.md`](docs/vscode-extension-plan.md) — VS Code 插件 + JS 生态适配套件计划
+- [`docs/idea-plugin-plan.md`](docs/idea-plugin-plan.md) — **IDEA 插件 + Java 移植计划**（纯 Java 核心内嵌，Phase 1 daemon IPC 桥接过渡）
 - [`docs/api.md`](docs/api.md) — 库 API
 - [`docs/cli.md`](docs/cli.md) — CLI 参考
 - [`docs/config.md`](docs/config.md) — 配置与目录规范
