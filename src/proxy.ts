@@ -192,7 +192,15 @@ export interface ProxyOptions {
    * `{ port, url, method }` identifies the upstream request; null = no injection.
    * Applies to both pipe and forward paths.
    */
-  transformResponse?: (info: { port: number; url: string; method: string }) => string | null;
+  /**
+   * Response transform: return the injection HTML.
+   * - `string` or `{ html }` → inject before `</head>` (buffers the HTML response);
+   * - `{ html, position: "prepend" }` → write the injection at the START of the
+   *   response body (no buffering, streams through; executes as early as possible).
+   *   For prepend, the caller should provide doctype/safe head content (`<script>`
+   *   etc.) — wrapping `<html>` elements are ignored by the parser beyond the first.
+   */
+  transformResponse?: (info: { port: number; url: string; method: string }) => string | { html: string; position?: "head" | "prepend" } | null;
   /**
    * Forward-auth gate (portal/authelia/oauth2-proxy): verify every OPEN vhost
    * request against the provider's authz endpoint before proxying. Takes
@@ -502,6 +510,13 @@ function renderLoginRedirectReq(template: string, input: ServiceHostResolveInput
     .replaceAll("$request_uri", input.url ?? "/");
 }
 
+/** 解析 transformResponse 结果：string → head 模式；{html, position} 按 position */
+function resolveInject(r: string | { html: string; position?: "head" | "prepend" } | null): { html: string; position: "head" | "prepend" } | null {
+  if (!r) return null;
+  if (typeof r === "string") return { html: r, position: "head" };
+  return { html: r.html, position: r.position === "prepend" ? "prepend" : "head" };
+}
+
 /** Pipe an HTTP request to 127.0.0.1:port (provider portal or nginx gateway).
  *  Used for `{basePath}/*` → provider and basic → gateway forwarding. */
 function pipeTo(
@@ -533,15 +548,22 @@ function pipeTo(
     delete headers.connection;
     delete headers["keep-alive"];
     const inject = transformResponse
-      ? transformResponse({ port, url: req.url ?? "", method: req.method ?? "GET" })
+      ? resolveInject(transformResponse({ port, url: req.url ?? "", method: req.method ?? "GET" }))
       : null;
     if (inject && (headers["content-type"] ?? "").includes("text/html")) {
-      // 响应注入（通用 transformResponse）：缓冲 HTML → </head> 前插入
+      if (inject.position === "prepend") {
+        // 前置注入：writeHead 后先写注入 → 再 pipe 上游流（不缓冲、更早执行、流式保持）
+        res.writeHead(proxyRes.statusCode ?? 502, headers);
+        res.write(inject.html);
+        proxyRes.pipe(res);
+        return;
+      }
+      // head 注入：缓冲 HTML → </head> 前插入
       const chunks: Buffer[] = [];
       proxyRes.on("data", (c: Buffer) => chunks.push(c));
       proxyRes.on("end", () => {
         let html = Buffer.concat(chunks).toString("utf8");
-        html = html.includes("</head>") ? html.replace("</head>", inject + "</head>") : html + inject;
+        html = html.includes("</head>") ? html.replace("</head>", inject.html + "</head>") : html + inject.html;
         const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
         delete h2["transfer-encoding"];
         res.writeHead(proxyRes.statusCode ?? 502, h2);
@@ -700,14 +722,20 @@ export function createProxyServer(opts: ProxyOptions): Server {
       delete headers.connection;
       delete headers["keep-alive"];
       const inject = transformResponse
-        ? transformResponse({ port: Number(t.port) || 80, url: path, method: req.method ?? "GET" })
+        ? resolveInject(transformResponse({ port: Number(t.port) || 80, url: path, method: req.method ?? "GET" }))
         : null;
       if (inject && (headers["content-type"] ?? "").includes("text/html")) {
+        if (inject.position === "prepend") {
+          res.writeHead(proxyRes.statusCode ?? 502, headers);
+          res.write(inject.html);
+          proxyRes.pipe(res);
+          return;
+        }
         const chunks: Buffer[] = [];
         proxyRes.on("data", (c: Buffer) => chunks.push(c));
         proxyRes.on("end", () => {
           let html = Buffer.concat(chunks).toString("utf8");
-          html = html.includes("</head>") ? html.replace("</head>", inject + "</head>") : html + inject;
+          html = html.includes("</head>") ? html.replace("</head>", inject.html + "</head>") : html + inject.html;
           const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
           delete h2["transfer-encoding"];
           res.writeHead(proxyRes.statusCode ?? 502, h2);

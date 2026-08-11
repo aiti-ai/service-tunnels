@@ -57,7 +57,7 @@ export interface ProxyManagerOptions {
   /** Accepted virtual-host suffixes (default DEFAULT_SUFFIXES). */
   suffixes?: string[];
   /** Response transform hook（透传 proxy）：text/html 响应 </head> 前注入 HTML 片段（通用注入） */
-  transformResponse?: (info: { port: number; url: string; method: string }) => string | null;
+  transformResponse?: (info: { port: number; url: string; method: string }) => string | { html: string; position?: "head" | "prepend" } | null;
   /**
    * User's wildcard-DNS base domain (e.g. "example.com"): an ADDITIONAL
    * portless address `<port>[-<label>].<baseDomain>` is served (and returned

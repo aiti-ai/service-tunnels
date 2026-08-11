@@ -109,7 +109,7 @@ export interface ServiceTunnelsOptions extends DirOptions {
   /** Child-process env marker prefix (default "service-tunnels"). */
   marker?: string;
   /** Response transform hook（透传 proxy）：text/html 响应 </head> 前注入 HTML 片段（通用注入） */
-  transformResponse?: (info: { port: number; url: string; method: string }) => string | null;
+  transformResponse?: (info: { port: number; url: string; method: string }) => string | { html: string; position?: "head" | "prepend" } | null;
   /** Auth provider plugins (M4+). */
   authPlugins?: unknown[];
   /** Explicit tool paths: { ngrok: "/opt/ngrok" }. Beats PATH and cache. */

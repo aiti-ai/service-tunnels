@@ -1,3 +1,9 @@
+## 0.3.35 (2026-08-11)
+
+- **feat: transformResponse 支持 prepend 模式**——`{ html, position: "prepend" }`：
+  响应开头直接写注入（不缓冲、流式保持、页面加载最早期执行）；string/head 模式保持（`</head>` 前）。
+  注：prepend 注入应为合法 head 内容（`<script>` 等），包裹 `<html>` 会被解析器忽略（只认首个）。
+
 ## 0.3.34 (2026-08-11)
 
 - **feat: transformResponse 通用响应注入**——`createServiceTunnels({ transformResponse })`：
