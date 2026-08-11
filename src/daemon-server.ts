@@ -18,6 +18,7 @@ import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
 import { readState, writeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
+import { listListeningPorts } from "./ports.ts";
 import { readConfigFile, writeConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
 import { TunnelManager, tunnelParamSchemas, tunnelMetas } from "./tunnels.ts";
 import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
@@ -90,6 +91,8 @@ type Handler = (params: unknown) => unknown | Promise<unknown>;
 
 const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
+  ["port.list", (params) => {
+    const ports = listListeningPorts(String((params as { scope?: string } | undefined)?.scope ?? "current-user"));
   [
     "discover",
     (params) => {
@@ -362,6 +365,29 @@ const methods = new Map<string, Handler>([
         auth: authRegistry,
         proxy,
         log: (line) => console.error(`[service-tunnels] ${line}`),
+    "port.detect",
+    async (params) => {
+      const port = Number((params as { port?: unknown } | null)?.port);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535)
+        throw new Error(`invalid port: ${port}`);
+      const { detectProtocol } = await import("./gateway.ts");
+      const { tunnelSupportsTcp } = await import("./tunnels.ts");
+      let protocol: "http" | "https" | "tcp" = "tcp";
+      try {
+        protocol = await detectProtocol(port, 1200);
+      } catch {
+        protocol = "tcp";
+      }
+      const types = ["ngrok", "ssh", "frpc", "cloudflared", "localtunnel", "bore", "serveo", "command"];
+      return {
+        port,
+        protocol,
+        tunnelTypes: types.filter((t) => t === "command" || (protocol === "tcp" ? tunnelSupportsTcp(t) : true)),
+        httpTunnelOnly: protocol === "http" || protocol === "https",
+      };
+    },
+  ],
+  [
       });
     },
   ],
