@@ -682,6 +682,13 @@ export interface ParamSpec {
 
 /** Tunnel-type parameter schemas (data-driven forms; the only place a tunnel
  *  type's user-facing parameters are declared). */
+/**
+ * Schema contract version — bump only on BREAKING shape changes (removal or
+ * repurpose of ParamSpec fields). Additive changes keep the version: clients
+ * must tolerate unknown fields (freeze policy: only-add). See
+ * docs/adaptation-kit.md §5. */
+export const TUNNEL_SCHEMAS_VERSION = 1;
+
 export const TUNNEL_PARAM_SCHEMAS: Record<TunnelType, ParamSpec[]> = {
   ngrok: [
     {
