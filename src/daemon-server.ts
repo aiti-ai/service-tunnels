@@ -32,7 +32,7 @@ import { spawnGuardian } from "./guardian-spawn.ts";
 import { ensureMarker } from "./marker.ts";
 import { expose as exposeFlow } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
-import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-registry.ts";
+import { AuthRegistry, authProviderSchemas, authProviderMetas, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
 import { localizeSchemas, resolveLang } from "./i18n.ts";
 import { listPresets, getPreset, savePreset, removePreset, loadPresetsKey, type PresetKind } from "./presets.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
@@ -311,6 +311,8 @@ const methods = new Map<string, Handler>([
       authMetas: authProviderMetas(configDir),
       // auth none ban status — clients hide the "none" option when false
       authNoneAllowed: resolveAllowAuthNone(configDir),
+      // schema contract versions — clients assert compatibility
+      versions: { tunnel: TUNNEL_SCHEMAS_VERSION, auth: AUTH_SCHEMAS_VERSION },
     };
   }],
   ["auth.user.managers", () => authRegistry.userManagers()],

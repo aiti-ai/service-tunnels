@@ -243,6 +243,10 @@ export async function loadProviderPlugins(configDir: string): Promise<AuthProvid
 /** Auth-provider parameter schemas (built-ins; plugins add their own via a
  *  `paramSchemas` module export). Drives the client expose form — adding a
  *  provider here needs no client code changes. */
+/** Schema contract version — bump only on BREAKING shape changes; additive
+ *  fields keep the version (clients tolerate unknown fields). */
+export const AUTH_SCHEMAS_VERSION = 1;
+
 export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
   authelia: [
     {
