@@ -33,6 +33,7 @@ import { AuthRegistry, authProviderSchemas, authProviderMetas } from "./auth-reg
 import { localizeSchemas, resolveLang } from "./i18n.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
+import { SshManager } from "./ssh/manager.ts";
 import type { AutheliaProvider } from "./authelia.ts";
 
 // argv: <stateFile> <sockPath> <configDir> <cacheDir>
@@ -88,8 +89,14 @@ for (const entry of readState(stateFile).internal) {
 
 type Handler = (params: unknown) => unknown | Promise<unknown>;
 
+const ssh = new SshManager({ cacheDir });
+
 const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
+    // SSH 网关端口是内部服务（认证层），不作为暴露目标
+    const gwPorts = new Set(ssh.list().map((d) => d.port));
+    return ports.filter((p) => !gwPorts.has(p.port));
+  }],
   [
     "discover",
     (params) => {
@@ -306,8 +313,24 @@ const methods = new Map<string, Handler>([
   }],
   [
     "expose",
-    (params) => {
-      const o = params as ExposeOptions & { toolPaths?: Record<string, string> };
+    async (params) => {
+      let o = params as ExposeOptions & { toolPaths?: Record<string, string> };
+      // M0b-ssh: provider "ssh" = site-scoped public-key auth (ANY protocol —
+      // port-forward is protocol-agnostic). Auto-provision the site's backing
+      // ssh domain (port auto-allocated, invisible to the caller) and route a
+      // raw tcp tunnel at its ssh port. The UI/caller only passes site + port.
+      const sshRequested = o?.provider === "ssh" || o?.auth === "ssh";
+      if (sshRequested) {
+        const domain = String(o?.site ?? "default");
+        if (!ssh.get(domain)) {
+          try {
+            await ssh.create({ domain, site: domain, forwardPort: o.port, sshPort: 0 });
+          } catch (err) {
+            throw new Error(`ssh auth: cannot provision site "${domain}": ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        o = { ...o, provider: undefined, auth: false, protocol: "tcp", sshGateway: domain };
+      }
       // Fail-closed boundary checks before the expose flow touches anything:
       // the port must be real, and schema-driven tunnel params must be an
       // object (the final tunnel config itself is validated at start()).
@@ -362,7 +385,115 @@ const methods = new Map<string, Handler>([
         auth: authRegistry,
         proxy,
         log: (line) => console.error(`[service-tunnels] ${line}`),
+        sshGatewayPort: (domain: string) => ssh.get(domain)?.port,
+        sshEnsureDomain: async (site, forwardPort) => {
+          const domain = String(site ?? "default");
+          const existing = ssh.get(domain);
+          try {
+            const info = existing ?? (await ssh.ensure({ domain, site, forwardPort, sshPort: 0 }));
+            return { port: info.port, created: !existing };
+          } catch (err) {
+            throw new Error(`ssh auth: cannot provision site "${domain}": ${err instanceof Error ? err.message : String(err)}`);
+          }
+        },
+        sshRemoveDomain: async (site) => {
+          const domain = String(site ?? "default");
+          try {
+            if (ssh.get(domain)) await ssh.remove(domain);
+          } catch { /* best effort */ }
+        },
+    "ssh.domain.list",
+    () => ssh.list(),
+  ],
+  [
+    "ssh.domain.create",
+    (params) => {
+      const cfg = (params ?? {}) as Record<string, unknown>;
+      validateUserName(cfg.domain);
+      if (cfg.site !== undefined) validateSiteName(String(cfg.site));
+      return ssh.create({
+        domain: String(cfg.domain),
+        site: cfg.site === undefined ? undefined : String(cfg.site),
+        sshPort: cfg.sshPort === undefined ? undefined : Number(cfg.sshPort),
+        forwardPort: Number(cfg.forwardPort),
+        reversePort: cfg.reversePort === undefined ? undefined : Number(cfg.reversePort),
+        forwardHost: cfg.forwardHost === undefined ? undefined : String(cfg.forwardHost),
+        listenAddr: cfg.listenAddr === undefined ? undefined : String(cfg.listenAddr),
+        authTimeoutMs: cfg.authTimeoutMs === undefined ? undefined : Number(cfg.authTimeoutMs),
+        maxConnections: cfg.maxConnections === undefined ? undefined : Number(cfg.maxConnections),
       });
+    },
+  ],
+  [
+    "ssh.domain.remove",
+    (params) => {
+      const domain = String((params as Record<string, unknown> | null)?.domain ?? "");
+      return ssh.remove(domain);
+    },
+  ],
+  [
+    "ssh.domain.stop",
+    (params) => {
+      const domain = String((params as Record<string, unknown> | null)?.domain ?? "");
+      validateUserName(domain);
+      return ssh.stop(domain);
+    },
+  ],
+  [
+    "ssh.domain.start",
+    (params) => {
+      const domain = String((params as Record<string, unknown> | null)?.domain ?? "");
+      validateUserName(domain);
+      return ssh.start(domain);
+    },
+  ],
+  [
+    "ssh.key.add",
+    (params) => {
+      const p = (params ?? {}) as { domain: string; publicKey: string };
+      validateUserName(p.domain);
+      if (typeof p.publicKey !== "string" || !p.publicKey.trim())
+        throw new Error("publicKey is required");
+      return ssh.addKey(p.domain, p.publicKey);
+    },
+  ],
+  [
+    "ssh.key.generate",
+    (params) => {
+      const p = (params ?? {}) as { domain: string; type?: string; bits?: number; comment?: string; count?: number };
+      validateUserName(p.domain);
+      return ssh.generateKey(p.domain, {
+        type: (p.type as "ed25519" | "rsa" | "ecdsa") ?? "ed25519",
+        bits: p.bits,
+        comment: p.comment,
+        count: p.count,
+      });
+    },
+  ],
+  [
+    "ssh.key.list",
+    (params) => {
+      const domain = String((params as Record<string, unknown> | null)?.domain ?? "");
+      validateUserName(domain);
+      return ssh.listKeys(domain);
+    },
+  ],
+  [
+    "ssh.key.remove",
+    (params) => {
+      const p = (params ?? {}) as { domain: string; fingerprint: string };
+      validateUserName(p.domain);
+      if (typeof p.fingerprint !== "string" || !p.fingerprint)
+        throw new Error("fingerprint is required");
+      return ssh.removeKey(p.domain, p.fingerprint);
+    },
+  ],
+  [
+    "ssh.host.fingerprints",
+    (params) => {
+      const domain = String((params as Record<string, unknown> | null)?.domain ?? "");
+      validateUserName(domain);
+      return ssh.hostFingerprints(domain);
     },
   ],
   [
