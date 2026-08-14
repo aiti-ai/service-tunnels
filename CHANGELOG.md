@@ -1,3 +1,12 @@
+## 0.3.37 (2026-08-14)
+
+- **fix: IPv6 通配监听（`::`）展开为双栈可达地址**——`expandListeningAddresses`（端口
+  发现）：监听 `::` 的 socket 默认双栈（net.ipv6.bindv6only=0，Linux/macOS），同样
+  接受 IPv4 连接（IPv4-mapped）——之前只展开 IPv6 地址、漏掉 IPv4，导致 `::` 绑定的
+  服务发现不到 IPv4 可达地址；现在同时展开 `127.0.0.1` + LAN IPv4 与 `::1` + LAN
+  IPv6。`0.0.0.0`/`*` 保持 IPv4-only（纯 IPv4 socket 不接受 IPv6，反向关系不成立）。
+  测试：`discovery.test.mjs` 新增双栈用例。
+
 ## 0.3.35 (2026-08-11)
 
 - **feat: transformResponse 支持 prepend 模式**——`{ html, position: "prepend" }`：

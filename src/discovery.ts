@@ -428,11 +428,18 @@ export function expandListeningAddresses(addresses: string[]): string[] {
   const { ipv4, ipv6 } = lanAddresses();
   for (const a of addresses) {
     if (a === "0.0.0.0" || a === "*") {
+      // IPv4 wildcard (macOS lsof renders 0.0.0.0 as `*`): IPv4 only — a
+      // plain IPv4 socket never accepts IPv6, so don't claim IPv6 URLs.
       out.add("127.0.0.1");
       for (const ip of ipv4) out.add(ip);
     } else if (a === "::" || a === "::0") {
+      // IPv6 wildcard is dual-stack by default (net.ipv6.bindv6only=0 on
+      // Linux/macOS): a socket bound to :: ALSO accepts IPv4 connections
+      // (IPv4-mapped) — both families are reachable, don't drop IPv4.
       out.add("::1");
       for (const ip of ipv6) out.add(ip);
+      out.add("127.0.0.1");
+      for (const ip of ipv4) out.add(ip);
     } else {
       out.add(a);
     }
