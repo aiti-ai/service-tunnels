@@ -113,6 +113,14 @@ test("expands wildcard binds into concrete addresses", async () => {
   assert.deepEqual(expandListeningAddresses(["127.0.0.1"]), ["127.0.0.1"]);
 });
 
+test("IPv6 wildcard :: expands to BOTH families (dual-stack)", async () => {
+  const { expandListeningAddresses } = await loadSubject();
+  const expanded = expandListeningAddresses(["::"]);
+  // dual-stack (v6only=0): :: also accepts IPv4-mapped connections
+  assert.ok(expanded.includes("127.0.0.1"), expanded.join(", "));
+  assert.ok(expanded.includes("::1"), expanded.join(", "));
+});
+
 test("discovers a port opened by our own child process", { timeout: 20_000 }, async () => {
   if (process.platform !== "linux") return; // /proc backend
   const { discoverServicePorts } = await loadSubject();
