@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request, createServer } from "node:http";
+import { gunzipSync } from "node:zlib";
 
 function tempDirs() {
   const base = mkdtempSync(join(tmpdir(), "st-inject-"));
@@ -39,6 +40,24 @@ function startBackend() {
   });
 }
 
+/** 带 Accept-Encoding: gzip 的导航请求：验证注入后重压链序（gzip 解压后
+ *  注入字节仍在正确位置；prepend = 最前，head = </head> 前）。 */
+function gzipNavGet(port, host, path) {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port, path, headers: { Host: host, "Accept-Encoding": "gzip", "Sec-Fetch-Mode": "navigate", connection: "close" } }, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        let decoded = null;
+        try { decoded = gunzipSync(Buffer.concat(chunks)).toString("utf8"); } catch { /* 非 gzip 时留 null */ }
+        resolve({ status: res.statusCode, enc: res.headers["content-encoding"] ?? null, decoded });
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 const NGNIX_BIN = ["/usr/sbin/nginx", "/usr/local/sbin/nginx", "/opt/homebrew/sbin/nginx"].find(existsSync) ?? "nginx";
 
 test("gateway inject: config generation (head via sub_filter, prepend via add_before_body)", async () => {
@@ -55,6 +74,9 @@ test("gateway inject: config generation (head via sub_filter, prepend via add_be
   assert.match(head, /sub_filter_once on;/);
   assert.match(head, /sub_filter_types text\/html;/);
   assert.match(head, /proxy_set_header Accept-Encoding "";/);
+  assert.match(head, /gzip on;/); // 注入后重压回 gzip（隧道链路恢复压缩）
+  assert.match(head, /gzip_proxied any;/);
+  assert.match(head, /gzip_types text\/css application\/javascript application\/json image\/svg\+xml text\/plain;/);
   assert.equal(head.includes("add_before_body"), false, "head mode must not use addition module");
   // 注入只落在 location /（应用主代理）——provider 登录页/白名单 location 不注入
   assert.ok(head.indexOf("sub_filter") > head.indexOf("location /"), "sub_filter lives inside location /");
@@ -70,6 +92,7 @@ test("gateway inject: config generation (head via sub_filter, prepend via add_be
   assert.equal(prep.includes("$http_x_requested_with) { rewrite"), false, "x-requested-with folded into the map key");
   assert.match(prep, /return 200 '';/); // 空响应（不注入）由内部 location 提供
   assert.equal(prep.includes("sub_filter"), false, "prepend mode must not use sub_filter");
+  assert.match(prep, /gzip on;/); // prepend 模式同样重压（addition → … → gzip 链序）
   // string 简写 → head 模式
   const str = generateHostNginx(
     { host: "a.example.com", port: 5173, inject: "<b>hi</b>" },
@@ -84,6 +107,21 @@ test("gateway inject: config generation (head via sub_filter, prepend via add_be
   );
   const subCount = (bypass.match(/sub_filter '<\/head>'/g) ?? []).length;
   assert.equal(subCount, 3, "location / + 2 bypass locations each carry sub_filter (all direct pages inject)");
+  const gzipCount = (bypass.match(/gzip on;/g) ?? []).length;
+  assert.equal(gzipCount, 3, "gzip recompression follows every injected location");
+
+  // recompress: false → 关闭重压（追求流式 flush）；无 inject → 完全不碰压缩
+  const noRecomp = generateHostNginx(
+    { host: "c.example.com", port: 5173, authMode: "none", inject: { html: "<b>x</b>", recompress: false } },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.equal(noRecomp.includes("gzip on;"), false, "recompress:false disables re-gzip");
+  assert.match(noRecomp, /proxy_set_header Accept-Encoding "";/, "strip still required (sub_filter needs identity)");
+  const noInject = generateHostNginx(
+    { host: "d.example.com", port: 5173, authMode: "none" },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.equal(noInject.includes("gzip"), false, "non-inject host: compression passes through untouched");
 });
 
 test("gateway inject: real nginx e2e — 只注入主页面导航的 text/html", { timeout: 60_000 }, async (t) => {
@@ -132,6 +170,14 @@ test("gateway inject: real nginx e2e — 只注入主页面导航的 text/html",
     // 4) 无 Sec-Fetch 头（curl/老浏览器直连）→ 注入（缺省兼容）
     const plain = await httpReq({ ...host, path: "/" });
     assert.match(plain.body, /window\.__INJECTED__/);
+
+    // 4b) 带 Accept-Encoding: gzip → 注入后重压回 gzip：解压后注入仍在 </head> 前
+    //     （sub_filter → … → gzip 链序：压的是注入完成的合并输出）
+    const gz = await gzipNavGet(gwPort, "demo.inject.test", "/");
+    assert.equal(gz.status, 200);
+    assert.equal(gz.enc, "gzip", "injected navigation served with content-encoding: gzip");
+    assert.ok(gz.decoded !== null, "response body must be gzip (decodable)");
+    assert.ok(gz.decoded.indexOf("__INJECTED__") < gz.decoded.indexOf("</head>"), "head inject survives recompression");
 
     // 5) 非 text/html（JSON/JS）即使 navigate 也不注入——不破坏用户文件
     const json = await httpReq({ ...host, headers: { ...host.headers, "Sec-Fetch-Mode": "navigate" }, path: "/data.json" });
@@ -188,6 +234,14 @@ test("gateway inject: prepend e2e — add_before_body 只注入主页面导航",
     // 3) 无头直连（curl）→ 注入
     const plain = await httpReq({ ...host, path: "/" });
     assert.ok(plain.body.startsWith("<script>window.__PREPEND__=1</script>"));
+
+    // 4b) 带 Accept-Encoding: gzip → 注入后重压回 gzip：解压后注入字节仍在最前
+    //     （addition → … → gzip 链序：压的是注入完成的合并输出）
+    const gz = await gzipNavGet(gwPort, "demo.inject.test", "/");
+    assert.equal(gz.status, 200);
+    assert.equal(gz.enc, "gzip", "injected navigation served with content-encoding: gzip");
+    assert.ok(gz.decoded !== null, "response body must be gzip (decodable)");
+    assert.ok(gz.decoded.startsWith("<script>window.__PREPEND__=1</script>"), "prepend bytes survive recompression: " + gz.decoded.slice(0, 40));
 
     // 4) 非 text/html 不注入；模板片段经 XHR 不注入（不注坏用户文件）
     const json = await httpReq({ ...host, headers: { ...host.headers, "Sec-Fetch-Mode": "navigate" }, path: "/data.json" });

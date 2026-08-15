@@ -119,6 +119,53 @@ test("parseServiceHost matches <port>.<suffix> (open) and <port>-<label>.<suffix
   assert.equal(parseServiceHost(undefined, [".st.localhost"]), null);
 });
 
+test("transformResponse inject: 注入请求上游收 identity；回调抛异常降级不注入；非 HTML 透传", async () => {
+  const { createProxyServer } = await loadProxy();
+  const { InternalRegistry } = await loadDiscovery();
+  // 后端：记录 accept-encoding，按路径返回不同 content-type
+  const seen = [];
+  const backend = httpServer((req, res) => {
+    seen.push({ url: req.url, ae: req.headers["accept-encoding"] ?? null });
+    if (req.url === "/page") { res.writeHead(200, { "content-type": "text/html" }); res.end("<html><head></head><body>hello</body></html>"); return; }
+    if (req.url === "/data") { res.writeHead(200, { "content-type": "application/json" }); res.end('{"ok":1}'); return; }
+    res.writeHead(200, { "content-type": "text/plain" }); res.end("plain");
+  });
+  await new Promise((r) => backend.listen(0, "127.0.0.1", r));
+  const svcPort = backend.address().port;
+  let calls = 0;
+  const server = createProxyServer({
+    port: 0,
+    suffixes: [".st.localhost"],
+    resolveSite: async () => ({}),
+    internal: new InternalRegistry(),
+    transformResponse: ({ url }) => {
+      calls++;
+      if (url === "/boom") throw new Error("host callback exploded");
+      return { html: "<script>INJ</script>", position: "prepend" };
+    },
+  });
+  await new Promise((r) => server.once("listening", r));
+  const port = server.address().port;
+  try {
+    // 1) text/html + 注入命中 → 注入成功，且上游收到 identity（不再收到 gzip）
+    const r = await rawGet(port, `${svcPort}.st.localhost`, "/page", { "accept-encoding": "gzip, br" });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.startsWith("<script>INJ</script>"), true, "prepend injected");
+    assert.equal(seen.find((s) => s.url === "/page").ae, "identity", "inject target requests upstream accept-encoding: identity");
+    // 2) 回调抛异常 → 降级普通转发（不注入、不崩）
+    const boom = await rawGet(port, `${svcPort}.st.localhost`, "/boom");
+    assert.equal(boom.body, "plain");
+    // 3) 注入命中但响应非 text/html → 不注入；identity 已发（明文透传语义正确）
+    const data = await rawGet(port, `${svcPort}.st.localhost`, "/data");
+    assert.equal(data.body, '{"ok":1}');
+    assert.equal(seen.find((s) => s.url === "/data").ae, "identity");
+    assert.ok(calls >= 3, "callback evaluated per request");
+  } finally {
+    await new Promise((r) => { server.closeAllConnections?.(); server.close(() => r()); });
+    backend.close();
+  }
+});
+
 test("basic auth validation", async () => {
   const { validBasicAuth, authHeader } = await loadProxy();
   const header = authHeader("secret");

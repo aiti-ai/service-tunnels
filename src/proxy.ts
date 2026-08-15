@@ -532,6 +532,18 @@ function pipeTo(
   res: ServerResponse,
   transformResponse: ProxyOptions["transformResponse"] | undefined,
 ): void {
+  // resolve inject BEFORE sending the upstream request: when injecting we
+  // must strip accept-encoding (or the upstream returns a gzip stream and the
+  // injected bytes poison it → ERR_CONTENT_DECODING_FAILED). Host callbacks
+  // must not break the proxy — swallow and treat as no-inject.
+  let inject: { html: string; position: "head" | "prepend" } | null = null;
+  if (transformResponse) {
+    try {
+      inject = resolveInject(transformResponse({ port, url: req.url ?? "", method: req.method ?? "GET" }));
+    } catch {
+      inject = null;
+    }
+  }
   const proxyReq = httpRequest({
     host: "127.0.0.1",
     port,
@@ -541,6 +553,7 @@ function pipeTo(
       ...req.headers,
       connection: "keep-alive",
       "x-forwarded-for": `${req.socket.remoteAddress ?? ""}, ${req.headers["x-forwarded-for"] ?? ""}`.trim().replace(/,\s*$/, ""),
+      ...(inject ? { "accept-encoding": "identity" } : {}),
     },
   });
   proxyReq.on("error", () => {
@@ -554,9 +567,6 @@ function pipeTo(
     const headers = { ...proxyRes.headers };
     delete headers.connection;
     delete headers["keep-alive"];
-    const inject = transformResponse
-      ? resolveInject(transformResponse({ port, url: req.url ?? "", method: req.method ?? "GET" }))
-      : null;
     if (inject && (headers["content-type"] ?? "").includes("text/html")) {
       if (inject.position === "prepend") {
         // 前置注入：writeHead 后先写注入 → 再 pipe 上游流（不缓冲、更早执行、流式保持）
@@ -573,6 +583,9 @@ function pipeTo(
         html = html.includes("</head>") ? html.replace("</head>", inject.html + "</head>") : html + inject.html;
         const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
         delete h2["transfer-encoding"];
+        // 防御：身份请求下上游不应返回 content-encoding，但若违规回 gzip，
+        // 明文 buffer 配压缩头会 ERR_CONTENT_DECODING_FAILED——剥掉。
+        delete h2["content-encoding"];
         res.writeHead(proxyRes.statusCode ?? 502, h2);
         res.end(html);
       });
@@ -706,6 +719,15 @@ export function createProxyServer(opts: ProxyOptions): Server {
         const t = new URL(decision.target);
         log(`proxy ${req.headers.host} → 127.0.0.1:${t.port} ${req.method} ${t.pathname + t.search}`);
         const path = t.pathname + t.search;
+    // same as pipeTo: strip accept-encoding when injecting, BEFORE the request
+    let inject: { html: string; position: "head" | "prepend" } | null = null;
+    if (transformResponse) {
+      try {
+        inject = resolveInject(transformResponse({ port: Number(t.port) || 80, url: path, method: req.method ?? "GET" }));
+      } catch {
+        inject = null;
+      }
+    }
 
     const proxyReq = httpRequest({
       host: t.hostname,
@@ -715,6 +737,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
       headers: {
         ...req.headers,
         connection: "keep-alive",
+        ...(inject ? { "accept-encoding": "identity" } : {}),
       },
     });
     proxyReq.on("error", () => {
@@ -728,9 +751,6 @@ export function createProxyServer(opts: ProxyOptions): Server {
       const headers = { ...proxyRes.headers };
       delete headers.connection;
       delete headers["keep-alive"];
-      const inject = transformResponse
-        ? resolveInject(transformResponse({ port: Number(t.port) || 80, url: path, method: req.method ?? "GET" }))
-        : null;
       if (inject && (headers["content-type"] ?? "").includes("text/html")) {
         if (inject.position === "prepend") {
           res.writeHead(proxyRes.statusCode ?? 502, headers);
@@ -745,6 +765,9 @@ export function createProxyServer(opts: ProxyOptions): Server {
           html = html.includes("</head>") ? html.replace("</head>", inject.html + "</head>") : html + inject.html;
           const h2: Record<string, string | string[] | undefined> = { ...headers, "content-length": String(Buffer.byteLength(html)) };
           delete h2["transfer-encoding"];
+          // 防御：身份请求下上游不应返回 content-encoding，但若违规回 gzip，
+          // 明文 buffer 配压缩头会 ERR_CONTENT_DECODING_FAILED——剥掉。
+          delete h2["content-encoding"];
           res.writeHead(proxyRes.statusCode ?? 502, h2);
           res.end(html);
         });

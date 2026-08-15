@@ -1,3 +1,26 @@
+## 0.3.38 (2026-08-15)
+
+- **fix: transformResponse 注入路径剥离 accept-encoding**——pipe/forward 之前
+  `...req.headers` 原样转发，上游（如 Next）按 `accept-encoding: gzip` 返回压缩流
+  → prepend/head 注入的明文字节拼进 gzip 二进制 → 浏览器
+  `ERR_CONTENT_DECODING_FAILED`。现在注入判定提前到发上游请求前，命中注入的
+  请求改发 `accept-encoding: identity`（与 nginx 网关的
+  `proxy_set_header Accept-Encoding ""` 对齐）；未注入请求保持透传。
+- **feat: 隧道注入后重压回 gzip（inject recompress，默认开）**——上游被强制
+   identity 后隧道链路（边缘 → 浏览器）变明文；现在注入 location 输出侧
+  `gzip on`（nginx 过滤器链序 addition → sub_filter → … → gzip → write，
+  gzip 压的是注入完成的合并输出），gzip_proxied any + 补齐 css/js/json/svg
+  gzip_types，被剥离压缩的文本子资源一并恢复。`recompress: false` 可关
+  （追求流式 flush；zlib 会合并流式 HTML 分块）。客户端未带 Accept-Encoding
+  时 nginx 自动跳过，无额外开销。未 inject 的 host 不碰压缩。
+- **fix: 注入路径健壮性**——`transformResponse` 回调调用包 try-catch（宿主
+  回调抛异常降级为无注入，不拖垮转发链）；head 缓冲注入剥 `content-encoding`
+  （身份请求下上游违规回 gzip 时防止明文配压缩头）。
+- **test: 真实 nginx e2e 补 gzip 重压链序断言**——带 `Accept-Encoding: gzip`
+  的导航请求：prepend 解压后注入字节仍为第一个字节、head 仍在 `</head>` 前
+  （addition/sub_filter → … → gzip 链序）；proxy 层注入测试覆盖 identity
+  上游头、回调异常降级、非 HTML 透传。
+
 ## 0.3.37 (2026-08-14)
 
 - **fix: IPv6 通配监听（`::`）展开为双栈可达地址**——`expandListeningAddresses`（端口

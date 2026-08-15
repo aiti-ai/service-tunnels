@@ -71,13 +71,19 @@ export interface GatewayInject {
   html: string;
   /** "head" = `</head>` 前插入（默认）；"prepend" = 响应开头直接写。 */
   position?: "head" | "prepend";
+  /** 注入后重新压缩回 gzip（默认 true）。上游被强制 identity（否则压缩流
+   *  会注坏），注入完成的明文响应由 nginx gzip 模块重新压缩——隧道链路
+   *  （边缘 → 浏览器）恢复压缩；代价是流式 HTML 分块会被 zlib 合并（
+   *  追求最早 flush 可设 false 换回流式明文）。客户端未带 Accept-Encoding
+   *  时 nginx 自动跳过压缩，无额外开销。 */
+  recompress?: boolean;
 }
 
 /** 归一化注入参数：string → head 模式；{html, position} 按 position。 */
 export function normalizeInject(raw: string | GatewayInject | null | undefined): GatewayInject | null {
   if (!raw) return null;
   if (typeof raw === "string") return { html: raw, position: "head" };
-  return { html: raw.html, position: raw.position === "prepend" ? "prepend" : "head" };
+  return { html: raw.html, position: raw.position === "prepend" ? "prepend" : "head", recompress: raw.recompress };
 }
 
 /** nginx 双引号字符串字面量：非打印/非 ASCII 字节 \xHH 转义、\" 与 \\ 转义——
@@ -362,6 +368,18 @@ export function generateHostNginx(
       sub_filter_types text/html;
       # sub_filter 无法匹配 gzip 内容——统一要未压缩响应
       proxy_set_header Accept-Encoding "";
+`;
+  }
+  // 注入后重压回 gzip：nginx 过滤器链数据流向为 addition → sub_filter →
+  // … → gzip → copy → chunked → write——gzip 压的是注入完成的合并输出，
+  // 不会注坏也不会双重压缩（上游已 identity；客户端未带 Accept-Encoding
+  // 时 nginx 自动跳过）。gzip_types 默认含 text/html，这里补齐被剥离压缩的
+  // 常见文本子资源。
+  if (inject && inject.recompress !== false) {
+    injectLoc += `      gzip on;
+      gzip_proxied any;
+      gzip_vary on;
+      gzip_types text/css application/javascript application/json image/svg+xml text/plain;
 `;
   }
   // 认证放行白名单：不带 auth_request 的 location，直接转发应用（前缀匹配，
