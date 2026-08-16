@@ -29,6 +29,7 @@ if (path === "/api/status" && req.method === "GET") {
     tunnelTcpSupport: st.tunnels.tcpSupport ? st.tunnels.tcpSupport() : [],
     userManagers: st.auth.userManagers(),
     totpProviders: st.auth.totpProviders(),
+    biometricProviders: st.auth.biometricProviders(),
     sites: st.sites.list(),
     tools: { list: st.tools.list(), allowDownload: st.tools.allowDownload() },
     allowAuthNone: st.auth.noneAllowed(),
@@ -226,22 +227,27 @@ if (path === "/api/user-list" && req.method === "GET") {
   const site = url.searchParams.get("site") ?? "default";
   const provider = url.searchParams.get("provider") ?? "all";
   const groups = await ctx.st.auth.users(provider, site);
+  const bioProviders = ctx.st.auth.biometricProviders();
   const users = [];
   for (const g of groups) {
     for (const u of g.users) {
       let totp = false;
       try { totp = !!(await ctx.st.auth.totpStatus(u.name, g.provider, site)).enrolled; } catch { /* no totp */ }
-      users.push({ ...u, provider: g.provider, totp });
+      let biometrics: { face: boolean; voice: boolean } | undefined;
+      if (bioProviders.includes(g.provider)) {
+        try { biometrics = await ctx.st.auth.biometricStatus(u.name, g.provider, site); } catch { /* no biometrics */ }
+      }
+      users.push({ ...u, provider: g.provider, totp, ...(biometrics ? { biometrics } : {}) });
     }
   }
   json(res, 200, { users });
   return true;
 }
 
-const userAction = /^\/api\/(user-add|user-set-password|user-remove|totp-enroll|totp-activate|totp-disable)$/.exec(path);
+const userAction = /^\/api\/(user-add|user-set-password|user-remove|totp-enroll|totp-activate|totp-disable|biometric-enroll-face|biometric-verify-face|biometric-enroll-voice|biometric-verify-voice|biometric-enroll-ticket|biometric-disable)$/.exec(path);
 if (userAction && req.method === "POST") {
   const op = userAction[1]!;
-  const body = await readJson<{ name?: string; password?: string; code?: string; site?: string; provider?: string; label?: string }>(req);
+  const body = await readJson<{ name?: string; password?: string; code?: string; site?: string; provider?: string; label?: string; samples?: number[][]; vectors?: number[][]; utterances?: number[][]; method?: "face" | "voice" }>(req);
   const site = body.site ?? "default";
   const provider = body.provider ?? undefined;
   const st = ctx.st;
@@ -266,6 +272,25 @@ if (userAction && req.method === "POST") {
     } else if (op === "totp-disable") {
       await st.auth.totpDisable(body.name ?? "", provider, site);
       json(res, 200, { disabled: body.name });
+    } else if (op === "biometric-enroll-face") {
+      if (!body.name || !Array.isArray(body.samples)) { json(res, 400, { error: "name and samples required" }); return true; }
+      json(res, 200, await st.auth.biometricEnrollFace(body.name, body.samples, provider, site));
+    } else if (op === "biometric-verify-face") {
+      if (!body.name || !Array.isArray(body.vectors)) { json(res, 400, { error: "name and vectors required" }); return true; }
+      json(res, 200, await st.auth.biometricVerifyFace(body.name, body.vectors, provider, site));
+    } else if (op === "biometric-enroll-voice") {
+      if (!body.name || !Array.isArray(body.utterances)) { json(res, 400, { error: "name and utterances required" }); return true; }
+      json(res, 200, await st.auth.biometricEnrollVoice(body.name, body.utterances, provider, site));
+    } else if (op === "biometric-verify-voice") {
+      if (!body.name || !Array.isArray(body.vectors)) { json(res, 400, { error: "name and vectors required" }); return true; }
+      json(res, 200, await st.auth.biometricVerifyVoice(body.name, body.vectors, provider, site));
+    } else if (op === "biometric-enroll-ticket") {
+      if (!body.name || !body.method) { json(res, 400, { error: "name and method required" }); return true; }
+      json(res, 200, await st.auth.biometricEnrollUrl(body.name, body.method, provider, site));
+    } else if (op === "biometric-disable") {
+      if (!body.name || !body.method) { json(res, 400, { error: "name and method required" }); return true; }
+      await st.auth.biometricDisable(body.name, body.method, provider, site);
+      json(res, 200, { disabled: body.name, method: body.method });
     }
   } catch (err) {
     json(res, 400, { error: err instanceof Error ? err.message : String(err) });

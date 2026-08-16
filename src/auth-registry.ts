@@ -2,7 +2,7 @@ import { existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { pathToFileURL } from "url";
 import type { AuthProvider, AuthProviderFactory, ProviderContext, UserManager, TokenManager } from "./auth-provider.ts";
-import { isUserManager, isTokenManager } from "./auth-provider.ts";
+import { isUserManager, isTokenManager, isBiometricManager } from "./auth-provider.ts";
 import { AutheliaProvider, type AutheliaProviderOptions } from "./authelia.ts";
 import { BasicAuthProvider, type BasicAuthProviderOptions } from "./providers/basic.ts";
 import { TokenAuthProvider, type TokenAuthProviderOptions } from "./providers/token.ts";
@@ -107,6 +107,19 @@ export class AuthRegistry {
       try {
         const p = this.#probeFactory(t) as unknown as { totpEnroll?: unknown; totpStatus?: unknown };
         return typeof p.totpEnroll === "function" && typeof p.totpStatus === "function";
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** Provider types supporting biometric 2FA management (biometricEnrollFace…)
+   *  — e.g. portal (P1: face; voice P2). Clients show biometric UI only for
+   *  these. */
+  biometricProviders(): string[] {
+    return [...this.#factories.keys()].filter((t) => {
+      try {
+        return isBiometricManager(this.#probeFactory(t));
       } catch {
         return false;
       }
@@ -274,6 +287,48 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
       label: "Base path",
       description: "Login page path; random by default (e.g. /portal-sneaky-capybara)",
       placeholder: "/portal-...",
+    },
+    {
+      key: "sessionTtlDays",
+      label: "Session TTL (days)",
+      type: "number",
+      default: 7,
+      description: "Session lifetime without \"remember me\"",
+    },
+    {
+      key: "rememberMeTtlDays",
+      label: "Remember-me TTL (days)",
+      type: "number",
+      default: 365,
+      description: "Session lifetime when \"remember me\" is checked (full 2FA still required first)",
+    },
+    {
+      key: "twoFactorGraceDays",
+      label: "2FA re-verify grace (days)",
+      type: "number",
+      default: 52,
+      description: "Within the grace period the 2FA step is skipped; after it expires, re-verify skips only the password (min 1 day, default rememberTtl/7)",
+    },
+    {
+      key: "biometrics",
+      label: "Face/Voice 2FA",
+      type: "boolean",
+      default: false,
+      description: "Enable face/voice 2FA (face downloads ~8.4MB browser assets on first start; enrollment via portal /enroll page)",
+    },
+    {
+      key: "biometricThresholds.face",
+      label: "Face match threshold",
+      type: "number",
+      default: 0.6,
+      description: "Max L2 distance (lower = stricter; 0.6 = dlib/face-api recommended)",
+    },
+    {
+      key: "biometricThresholds.voice",
+      label: "Voice match threshold",
+      type: "number",
+      default: 0.9,
+      description: "Min cosine similarity (higher = stricter; MFCC 78-d vector)",
     },
   ],
   "oauth2-proxy": [

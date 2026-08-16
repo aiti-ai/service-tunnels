@@ -51,20 +51,35 @@ window.loadSiteBlock=async(site,block)=>{
 function renderUsersTable(site,users){
   const providers=(state.status&&state.status.userManagers)||[];
   const totps=(state.status&&state.status.totpProviders)||[];
+  const bios=(state.status&&state.status.biometricProviders)||[];
   let h='<div class="actions" style="margin:8px 0;flex-wrap:wrap"><input id="nu-name" placeholder="'+esc(tr('ui.promptUsername'))+'" style="max-width:110px"><input id="nu-pass" type="password" placeholder="'+esc(tr('ui.promptPassword'))+'" style="max-width:110px">'
     +'<select id="nu-provider" style="max-width:130px">'+providers.map((p)=>'<option value="'+esc(p)+'">'+esc(p)+'</option>').join('')+'</select>'
     +'<button class="btn btn-sm btn-primary" onclick="addUser(\''+site+'\')">'+esc(tr('ui.btn.addUser'))+'</button></div>';
-  h+='<table><thead><tr><th>'+esc(tr('ui.promptUsername'))+'</th><th>provider</th><th>2FA</th><th></th></tr></thead><tbody>'
+    h+='<table><thead><tr><th>'+esc(tr('ui.promptUsername'))+'</th><th>provider</th><th>2FA</th><th>bio</th><th></th></tr></thead><tbody>'
     +(users.length?users.map((u)=>{
       const pv=esc(u.provider||'');
-      return '<tr><td>'+esc(u.name)+'</td><td><span class="badge">'+pv+'</span></td><td>'+(u.totp?'<span class="ok">●</span>':'<span class="dim">○</span>')+'</td>'
+      const bio=u.biometrics||{};
+      const bioCell=bios.includes(u.provider)
+        ?(bio.face?'<span class="ok" title="face">●</span>':'<span class="dim" title="face">○</span>')+' '
+         +(bio.voice?'<span class="ok" title="voice">●</span>':'<span class="dim" title="voice">○</span>')
+        :'';
+      const bioBtns=bios.includes(u.provider)
+        ?((bio.face
+            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">face off</button>'
+            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">face on</button>')
+          +(bio.voice
+            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">voice off</button>'
+            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">voice on</button>'))
+        :'';
+      return '<tr><td>'+esc(u.name)+'</td><td><span class="badge">'+pv+'</span></td><td>'+(u.totp?'<span class="ok">●</span>':'<span class="dim">○</span>')+'</td><td>'+bioCell+'</td>'
       +'<td><div class="actions"><button class="btn btn-sm" onclick="userPass(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.btn.setPassword'))+'</button>'
       +(totps.includes(u.provider)?(u.totp
         ?'<button class="btn btn-sm" onclick="totpDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">2fa off</button>'
         :'<button class="btn btn-sm" onclick="totpEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">2fa on</button>'):'')
+      +bioBtns
       +'<button class="btn btn-sm btn-danger" onclick="userRemove(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.ssh.removeBtn'))+'</button></div></td></tr>';
     }).join('')
-      :'<tr><td colspan="4" class="muted">'+esc(tr('ui.empty.users'))+'</td></tr>')
+      :'<tr><td colspan="5" class="muted">'+esc(tr('ui.empty.users'))+'</td></tr>')
     +'</tbody></table>';
   return h;
 }
@@ -96,6 +111,8 @@ window.userRemove=async(site,provider,name)=>{confirmDlg('remove user',esc(name)
 window.totpEnroll=async(site,provider,name)=>{try{const d=await api('/api/totp-enroll',{method:'POST',body:{name,site,provider}});openModal('<h3>2FA · '+esc(name)+'</h3><div class="muted" style="word-break:break-all">'+esc(d.otpauthUrl||'')+'</div><div class="hint">'+esc(d.secret||'')+'</div><div class="actions" style="margin-top:10px"><input id="totp-code" placeholder="6-digit" style="max-width:100px"><button class="btn btn-sm btn-primary" onclick="totpActivate(\''+site+'\',\''+provider+'\',\''+esc(name)+'\')">activate</button></div>');}catch(e){toast(String(e),true);}};
 window.totpActivate=async(site,provider,name)=>{const code=document.getElementById('totp-code').value;if(!/^\d{6}$/.test(code)){toast('6-digit code');return;}try{const d=await api('/api/totp-activate',{method:'POST',body:{name,code,site,provider}});toast(d.activated?'activated':'wrong code');closeModal();}catch(e){toast(String(e),true);}};
 window.totpDisable=async(site,provider,name)=>{try{await api('/api/totp-disable',{method:'POST',body:{name,site,provider}});toast('2fa off');}catch(e){toast(String(e),true);}};
+window.bioEnroll=async(site,provider,name,method)=>{try{const d=await api('/api/biometric-enroll-ticket',{method:'POST',body:{name,method,site,provider}});if(d.url){window.open(d.url,'_blank');toast(tr('ui.biometricEnrollTicket',{method}));}else{toast(String(d),true);}}catch(e){toast(String(e),true);}};
+window.bioDisable=async(site,provider,name,method)=>{try{if(!confirm(tr('ui.confirmDisableBiometric',{name,method})))return;await api('/api/biometric-disable',{method:'POST',body:{name,method,site,provider}});toast(method+' off');loadSiteBlock(site,'users');}catch(e){toast(String(e),true);}};
 window.sshAdd=async(site)=>{const pub=document.getElementById('ssh-pub').value;if(!pub)return;try{await api('/api/ssh-keys',{method:'POST',body:{action:'add',site,publicKey:pub}});toast('added');goSite(site,'ssh');}catch(e){toast(String(e),true);}};
 window.sshRevoke=async(site,fp)=>{confirmDlg('revoke key',esc(fp),'revoke',async()=>{try{await api('/api/ssh-keys',{method:'POST',body:{action:'revoke',site,fingerprint:fp}});toast('revoked');goSite(site,'ssh');}catch(e){toast(String(e),true);}});};
 window.sshGen=async(site)=>{try{const d=await api('/api/ssh-keys',{method:'POST',body:{action:'generate',site,type:'ed25519'}});const k=Array.isArray(d)?d[0]:d;openModal('<h3>'+esc(tr('ui.ssh.privateKeyTitle'))+'</h3><div class="muted">'+esc(tr('ui.ssh.privateKeyHint'))+'</div><textarea readonly rows="10" id="ssh-priv">'+esc(k.privateKey)+'</textarea><div class="actions" style="margin-top:10px"><button class="btn btn-sm btn-primary" onclick="copyPriv()">copy</button><button class="btn btn-sm" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');}catch(e){toast(String(e),true);}};

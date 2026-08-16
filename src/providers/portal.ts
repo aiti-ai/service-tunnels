@@ -1,11 +1,12 @@
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from "fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from "fs";
 import { execFileSync, spawn } from "child_process";
 import { join } from "path";
-import { randomBytes, scryptSync, createHmac, timingSafeEqual } from "crypto";
+import { randomBytes, scryptSync, createHmac, timingSafeEqual, createHash } from "crypto";
 import { connect } from "net";
 import { validateUserName } from "../validation.ts";
 import { spawnNode } from "../spawn-node.ts";
-import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager } from "../auth-provider.ts";
+import { download as justgetDownload } from "../vendor/justget/justget.mjs";
+import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser, UserManager, BiometricManager } from "../auth-provider.ts";
 import { randomName } from "../auth-provider.ts";
 
 /**
@@ -52,6 +53,108 @@ export interface PortalAuthProviderOptions {
   site?: string;
   /** 缺省策略(registerHost 未指定时生效):one_factor | two_factor | deny。 */
   policy?: AuthPolicy["policy"];
+  /** 会话 TTL（天，缺省 7）。 */
+  sessionTtlDays?: number;
+  /** 勾选“记住我”后的会话 TTL（天，缺省 365）——仅延长完整认证
+   *  （twoFactor 完成）后的会话；1FA 会话不延长。 */
+  rememberMeTtlDays?: number;
+  /** 2FA 复验周期（天，缺省 rememberMeTtlDays/7，最小 1）：周期内探针
+   *  直接放行；过期则免密码直跳 2FA 步骤页（会话仍有效时）。
+   *  biometric-2fa-design.md §5。 */
+  twoFactorGraceDays?: number;
+  /** 启用生物识别 2FA（P1: face；voice P2）。true = 全部；或数组枚举。
+   *  缺省关。启用 face 时首次 prepare 下载 ~8.4MB 浏览器资产到
+   *  cacheDir/bin/face-models/<ver>/（SHA-256 校验，镜像优先，
+   *  biometric-2fa-design.md §7.5）。 */
+  biometrics?: boolean | Array<"face" | "voice">;
+  /** 匹配阈值：face = 128-d 向量欧氏距离上限（缺省 0.6，越小越严）；
+   *  voice = 78-d MFCC 向量余弦相似度下限（缺省 0.90，越大越严）。 */
+  biometricThresholds?: { face?: number; voice?: number };
+}
+
+/** 人脸模板记录（templates.json，biometric-2fa-design.md §9.2）。 */
+export interface FaceTemplate {
+  status: "pending" | "active";
+  vectors: number[][];
+  threshold: number;
+  enrolledAt: number;
+}
+/** 语音模板（P2，biometric-2fa-design.md §8）：78-d MFCC(mean+std) 向量。 */
+export interface VoiceTemplate {
+  status: "pending" | "active";
+  vectors: number[][];
+  threshold: number;
+  enrolledAt: number;
+}
+export interface BiometricTemplates {
+  face?: FaceTemplate;
+  voice?: VoiceTemplate;
+}
+
+// —— face 浏览器资产（@vladmandic/face-api 1.7.15，biometric-2fa-design.md §7.5）——
+// 下载源：自有 Gitee 镜像（国内主力）→ jsdelivr → unpkg；SHA-256 固定清单。
+// 注：registry.npmmirror.com 的 unpkg 文件 CDN 对本包 403（白名单），不可用。
+export const FACE_ASSETS_VERSION = "1.7.15";
+interface FaceAsset {
+  file: string;
+  sha256: string;
+  size: number;
+  /** npm 包内路径（jsdelivr/unpkg 用；Gitee 镜像是平铺文件名）。 */
+  npmPath: string;
+}
+export const FACE_ASSETS: FaceAsset[] = [
+  { file: "face-api.js", sha256: "0160f7af3a8c78cece45c7ecc765383bad74becfd438bb787cdd627b2d6f2cf6", size: 1_333_943, npmPath: "dist/face-api.js" },
+  { file: "tiny_face_detector_model-weights_manifest.json", sha256: "5d1af4849ac48d5b985f4a9b16010c512353ddd6fcc63d50fd0bc9e9e64296e5", size: 3_219, npmPath: "model/tiny_face_detector_model-weights_manifest.json" },
+  { file: "tiny_face_detector_model.bin", sha256: "b7503ce7df31039b1c43316a9b865cab6a70dd748cc602d3fa28b551503c3871", size: 193_321, npmPath: "model/tiny_face_detector_model.bin" },
+  { file: "face_landmark_68_model-weights_manifest.json", sha256: "ca4886639f86e99b39fed0c155f81b63317225773bd9616716e887b0153389c9", size: 8_485, npmPath: "model/face_landmark_68_model-weights_manifest.json" },
+  { file: "face_landmark_68_model.bin", sha256: "4611ef65c87d836d03d684b30eec4d195d8b219fa1dd58fc58945831c6b9299b", size: 356_840, npmPath: "model/face_landmark_68_model.bin" },
+  { file: "face_recognition_model-weights_manifest.json", sha256: "cbaffa501b0b9275a12b63357a6843e7e30c054e1c9151e1a5f879b26e32986b", size: 19_615, npmPath: "model/face_recognition_model-weights_manifest.json" },
+  { file: "face_recognition_model.bin", sha256: "b413e420d6840b2775fba32008db6f3cddb07d485967fb42cfcf379c16a8c589", size: 6_444_032, npmPath: "model/face_recognition_model.bin" },
+];
+export function faceAssetsDir(cacheDir: string): string {
+  return join(cacheDir, "bin", "face-models", FACE_ASSETS_VERSION);
+}
+function faceAssetUrls(a: FaceAsset): string[] {
+  const tag = `face-api-${FACE_ASSETS_VERSION}`;
+  const urls = [
+    `https://gitee.com/justdb-mirrors/face-models/releases/download/${tag}/${a.file}`,
+    `https://cdn.jsdelivr.net/npm/@vladmandic/face-api@${FACE_ASSETS_VERSION}/${a.npmPath}`,
+    `https://unpkg.com/@vladmandic/face-api@${FACE_ASSETS_VERSION}/${a.npmPath}`,
+  ];
+  const mirror = process.env.SERVICE_TUNNELS_FACE_MIRROR; // {file} 占位镜像前缀，最高优先
+  return mirror ? [mirror.replace("{file}", a.file), ...urls] : urls;
+}
+/** 128-d 描述子样本校验：1..5 组，每组恰 128 个有限数，幅值 ≤1（L2 归一化）。 */
+export function validateFaceSamples(samples: unknown, what = "samples"): number[][] {
+  if (!Array.isArray(samples) || samples.length < 1 || samples.length > 5) {
+    throw new Error(`${what}: expected 1-5 vectors`);
+  }
+  return samples.map((v) => {
+    if (
+      !Array.isArray(v) ||
+      v.length !== 128 ||
+      !v.every((x) => typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1.0001)
+    ) {
+      throw new Error(`${what}: each vector must be 128 finite numbers in [-1,1]`);
+    }
+    return v as number[];
+  });
+}
+/** 匹配距离：注册向量 × 提交向量两两欧氏距离取最小（face-api 惯例）。 */
+export function faceDistance(enroll: number[][], submit: number[][]): number {
+  let best = Infinity;
+  for (const e of enroll) {
+    for (const v of submit) {
+      let s = 0;
+      for (let k = 0; k < 128; k++) {
+        const t = e[k]! - v[k]!;
+        s += t * t;
+      }
+      const d = Math.sqrt(s);
+      if (d < best) best = d;
+    }
+  }
+  return best;
 }
 
 interface PortalUserRecord {
@@ -132,7 +235,7 @@ function verifyTotpParent(secretB32: string, code: string): boolean {
   return false;
 }
 
-export class PortalAuthProvider implements AuthProvider, UserManager {
+export class PortalAuthProvider implements AuthProvider, UserManager, BiometricManager {
   readonly type = "portal";
   /** Site (auth realm) this instance belongs to ("default" when absent). */
   readonly site: string;
@@ -158,6 +261,17 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   #secret = "";
   #proc: ReturnType<typeof spawn> | null = null;
   #creds = { name: "admin", password: "" };
+  // 记住我（可信设备）三参数（biometric-2fa-design.md §5）：会话 TTL 7d /
+  // remember 365d / 2FA 复验周期 = remember/7（最小 1 天）。子进程经 env 注入。
+  #ttlMs = 7 * 24 * 3600 * 1000;
+  #rememberTtlMs = 365 * 24 * 3600 * 1000;
+  #graceMs = 52 * 24 * 3600 * 1000;
+  // 生物识别（P1: face）——biometric-2fa-design.md §7/§9
+  #bioFace = false;
+  #faceThreshold = 0.6;
+  #bioVoice = false;
+  #voiceThreshold = 0.9;
+  #templatesFile = "";
 
   constructor(ctx: ProviderContext, opts: PortalAuthProviderOptions = {}) {
     this.#ctx = ctx;
@@ -173,6 +287,22 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     this.#basePath = opts.basePath ?? "";
     this.#deployBasePath = (opts.deployBasePath ?? "").replace(/\/+$/, "");
     this.site = opts.site ?? "default";
+    const days = (v: unknown, dflt: number): number =>
+      typeof v === "number" && Number.isFinite(v) && v > 0 ? v : dflt;
+    this.#ttlMs = days(opts.sessionTtlDays, 7) * 24 * 3600 * 1000;
+    this.#rememberTtlMs = days(opts.rememberMeTtlDays, 365) * 24 * 3600 * 1000;
+    this.#graceMs =
+      Math.max(
+        days(opts.twoFactorGraceDays, Math.round(this.#rememberTtlMs / (7 * 24 * 3600 * 1000))),
+        1,
+      ) * 24 * 3600 * 1000;
+    this.#bioFace = opts.biometrics === true || (Array.isArray(opts.biometrics) && opts.biometrics.includes("face"));
+    const th = opts.biometricThresholds?.face;
+    this.#faceThreshold = typeof th === "number" && Number.isFinite(th) && th > 0 && th <= 2 ? th : 0.6;
+    this.#bioVoice = opts.biometrics === true || (Array.isArray(opts.biometrics) && opts.biometrics.includes("voice"));
+    const tv = opts.biometricThresholds?.voice;
+    this.#voiceThreshold = typeof tv === "number" && Number.isFinite(tv) && tv > 0 && tv <= 1 ? tv : 0.9;
+    this.#templatesFile = join(this.#dir, "templates.json");
     // per-instance random secret — NOT persisted: exposes are lifecycle-only,
     // so a restart kills the tunnels and the public hosts change. A persisted
     // cookie secret would keep sessions valid only for the OLD (dead) hosts.
@@ -202,6 +332,27 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
   async validate(): Promise<string[]> {
     const problems: string[] = [];
     if (!this.#creds.password) problems.push("portal auth requires a password");
+    const dayOpts: Array<[string, unknown]> = [
+      ["sessionTtlDays", this.#opts.sessionTtlDays],
+      ["rememberMeTtlDays", this.#opts.rememberMeTtlDays],
+      ["twoFactorGraceDays", this.#opts.twoFactorGraceDays],
+    ];
+    for (const [k, v] of dayOpts) {
+      if (v != null && (typeof v !== "number" || !Number.isFinite(v) || v <= 0)) {
+        problems.push(`portal ${k} must be a positive number of days`);
+      }
+    }
+    const bio = this.#opts.biometrics;
+    if (bio !== undefined && bio !== true && !(Array.isArray(bio) && bio.every((m) => m === "face" || m === "voice"))) {
+      problems.push('portal biometrics must be true or an array of "face"/"voice"');
+    }
+    const bth = this.#opts.biometricThresholds;
+    if (bth?.face != null && (typeof bth.face !== "number" || !Number.isFinite(bth.face) || bth.face <= 0 || bth.face > 2)) {
+      problems.push("portal biometricThresholds.face must be in (0, 2]");
+    }
+    if (bth?.voice != null && (typeof bth.voice !== "number" || !Number.isFinite(bth.voice) || bth.voice <= 0 || bth.voice > 1)) {
+      problems.push("portal biometricThresholds.voice must be in (0, 1]");
+    }
     return problems;
   }
 
@@ -216,9 +367,61 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     return this.status();
   }
 
+  /** 下载/修复 face 浏览器资产（biometric-2fa-design.md §7.5）：存在且 SHA-256
+   *  匹配则跳过；否则按镜像 → jsdelivr → unpkg 顺序下载，逐文件校验。 */
+  async #ensureFaceAssets(): Promise<void> {
+    const dir = faceAssetsDir(this.#ctx.cacheDir);
+    mkdirSync(dir, { recursive: true });
+    for (const a of FACE_ASSETS) {
+      const dest = join(dir, a.file);
+      let ok = false;
+      try {
+        const buf = readFileSync(dest);
+        ok = buf.length === a.size && createHash("sha256").update(buf).digest("hex") === a.sha256;
+      } catch {
+        ok = false;
+      }
+      if (ok) continue;
+      let done = false;
+      let lastErr: unknown;
+      for (const url of faceAssetUrls(a)) {
+        try {
+          await justgetDownload({
+            url,
+            output: dest,
+            options: { timeout: 120_000, connectTimeout: 10_000, retries: 1, retryDelay: 500 },
+          });
+          const buf = readFileSync(dest);
+          if (buf.length !== a.size || createHash("sha256").update(buf).digest("hex") !== a.sha256) {
+            throw new Error(`sha256 mismatch for ${a.file}`);
+          }
+          done = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          try {
+            rmSync(dest);
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+      if (!done) {
+        throw new Error(
+          `portal face assets: failed to download ${a.file}: ${(lastErr as Error | undefined)?.message ?? lastErr} ` +
+            `(set SERVICE_TUNNELS_FACE_MIRROR="https://…/{file}" to override the mirror)`,
+        );
+      }
+      this.#ctx.log(`portal: face asset ${a.file} downloaded`);
+    }
+  }
+
   async start(): Promise<AuthProviderStatus> {
     if (this.status().running) return this.status();
     await this.prepare();
+    // face 资产在真正开始服务前就绪（prepare 保持离线——库调用方可先准备
+    // 配置/脚本，不触发网络；下载只发生在 start）
+    if (this.#bioFace) await this.#ensureFaceAssets();
     for (let attempt = 0; ; attempt++) {
       if (!this.#port) this.#port = await this.#ctx.pickPort();
       const p = spawnNode(this.#ctx.nodePath, [this.#serverFile], {
@@ -231,6 +434,15 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
           DEPLOY_BASE_PATH: this.#deployBasePath,
           POLICY_FILE: this.#policyFile,
           POLICY_DEFAULT: this.#opts.policy ?? "one_factor",
+          TTL_MS: String(this.#ttlMs),
+          REMEMBER_TTL_MS: String(this.#rememberTtlMs),
+          GRACE_MS: String(this.#graceMs),
+          TEMPLATES_FILE: this.#templatesFile,
+          FACE_ENABLED: this.#bioFace ? "1" : "",
+          FACE_THRESHOLD: String(this.#faceThreshold),
+          VOICE_ENABLED: this.#bioVoice ? "1" : "",
+          VOICE_THRESHOLD: String(this.#voiceThreshold),
+          ASSETS_DIR: faceAssetsDir(this.#ctx.cacheDir),
           SECURE: process.env.PORTAL_SECURE === "1" ? "1" : "",
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -337,7 +549,12 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
 
   async listUsers(): Promise<AuthUser[]> {
     const rows = await this.#readDb();
-    return [...rows.entries()].map(([name, rec]) => ({ name, displayName: rec.displayName }));
+    const tpl = await this.#readTemplates();
+    return [...rows.entries()].map(([name, rec]) => {
+      const u: AuthUser = { name, displayName: rec.displayName };
+      if (tpl[name]) u.biometrics = { face: tpl[name]?.face?.status === "active", voice: tpl[name]?.voice?.status === "active" };
+      return u;
+    });
   }
 
   async addUser(name: string, password: string, displayName?: string): Promise<void> {
@@ -372,7 +589,135 @@ export class PortalAuthProvider implements AuthProvider, UserManager {
     const rows = await this.#readDb();
     if (!rows.delete(name)) throw new Error(`user ${name} not registered`);
     await this.#writeDb(rows);
+    // 生物模板随用户删除（templates.json 同步清理，避免孤儿向量）
+    const tpl = await this.#readTemplates();
+    if (tpl[name]) {
+      delete tpl[name];
+      await this.#writeTemplates(tpl);
+    }
     this.#ctx.log(`portal: user ${name} removed`);
+  }
+
+  // —— 生物识别 2FA 管理（BiometricManager，biometric-2fa-design.md §9）——
+
+  async #readTemplates(): Promise<Record<string, BiometricTemplates>> {
+    try {
+      return JSON.parse(readFileSync(this.#templatesFile, "utf8")) as Record<string, BiometricTemplates>;
+    } catch {
+      return {};
+    }
+  }
+
+  async #writeTemplates(rows: Record<string, BiometricTemplates>): Promise<void> {
+    mkdirSync(this.#dir, { recursive: true });
+    const file = `${this.#templatesFile}.${process.pid}.tmp`;
+    writeFileSync(file, JSON.stringify(rows, null, 2), "utf8");
+    try {
+      execFileSync("chmod", ["600", file], { stdio: "ignore" });
+    } catch {
+      // best-effort
+    }
+    execFileSync("mv", [file, this.#templatesFile], { stdio: "ignore" });
+  }
+
+  async biometricStatus(name: string): Promise<{ face: boolean; voice: boolean }> {
+    const tpl = await this.#readTemplates();
+    const t = tpl[name];
+    return { face: t?.face?.status === "active", voice: t?.voice?.status === "active" };
+  }
+
+  /** 注册人脸模板：写入 pending（首验门——未验证前登录不可用，对齐
+   *  totpPending 语义）。samples 来自管理界面浏览器采集（128-d 描述子）。 */
+  async biometricEnrollFace(name: string, samples: number[][]): Promise<{ pending: boolean }> {
+    if (!this.#bioFace) throw new Error("face biometrics not enabled on this portal (portal opts biometrics)");
+    validateUserName(name);
+    const rows = await this.#readDb();
+    if (!rows.has(name)) throw new Error(`user ${name} not registered`);
+    const vecs = validateFaceSamples(samples);
+    const tpl = await this.#readTemplates();
+    tpl[name] = { ...tpl[name], face: { status: "pending", vectors: vecs, threshold: this.#faceThreshold, enrolledAt: Date.now() } };
+    await this.#writeTemplates(tpl);
+    this.#ctx.log(`portal: face template enrolled for ${name} (pending first-verify)`);
+    return { pending: true };
+  }
+
+  /** 验证人脸向量；pending 模板首验成功即转 active（首验门）。 */
+  async biometricVerifyFace(name: string, vectors: number[][]): Promise<{ matched: boolean; distance: number }> {
+    validateUserName(name);
+    const sub = validateFaceSamples(vectors, "vectors");
+    const tpl = await this.#readTemplates();
+    const face = tpl[name]?.face;
+    if (!face) throw new Error(`user ${name} has no face template`);
+    const d = faceDistance(face.vectors, sub);
+    const matched = d <= (face.threshold ?? this.#faceThreshold);
+    if (matched && face.status === "pending") {
+      face.status = "active";
+      await this.#writeTemplates(tpl);
+      this.#ctx.log(`portal: face template activated for ${name} (d=${d.toFixed(3)})`);
+    }
+    return { matched, distance: d };
+  }
+
+  async biometricDisable(name: string, method: "face" | "voice"): Promise<void> {
+    validateUserName(name);
+    const tpl = await this.#readTemplates();
+    if (!tpl[name]?.[method]) throw new Error(`user ${name} has no ${method} template`);
+    delete tpl[name]![method];
+    await this.#writeTemplates(tpl);
+    this.#ctx.log(`portal: ${method} template removed for ${name}`);
+  }
+
+  /** 注册语音模板（P2）：3 次朗读（数字串挑战，每次不同）→ 78-d 向量 →
+   *  质量门（两两余弦 ≥ VOICE_ENROLL_MIN_PAIR_SIM）→ pending 首验门。 */
+  async biometricEnrollVoice(name: string, utterances: number[][]): Promise<{ pending: boolean }> {
+    if (!this.#bioVoice) throw new Error("voice biometrics not enabled on this portal (portal opts biometrics)");
+    validateUserName(name);
+    const rows = await this.#readDb();
+    if (!rows.has(name)) throw new Error(`user ${name} not registered`);
+    const vecs = validateVoiceSamples(utterances);
+    if (vecs.length < 3) throw new Error("voice enrollment needs 3 utterances (digit challenges)");
+    const q = voiceEnrollQuality(vecs);
+    if (q < VOICE_ENROLL_MIN_PAIR_SIM) {
+      throw new Error(`voice samples inconsistent (pair similarity ${q.toFixed(3)} < ${VOICE_ENROLL_MIN_PAIR_SIM}) — recapture in a quieter environment`);
+    }
+    const tpl = await this.#readTemplates();
+    tpl[name] = { ...tpl[name], voice: { status: "pending", vectors: vecs, threshold: this.#voiceThreshold, enrolledAt: Date.now() } };
+    await this.#writeTemplates(tpl);
+    this.#ctx.log(`portal: voice template enrolled for ${name} (pending first-verify, q=${q.toFixed(3)})`);
+    return { pending: true };
+  }
+
+  /** 验证语音向量；pending 模板首验成功即转 active。similarity = 两两余弦最大。 */
+  async biometricVerifyVoice(name: string, vectors: number[][]): Promise<{ matched: boolean; similarity: number }> {
+    validateUserName(name);
+    const sub = validateVoiceSamples(vectors, "vectors");
+    const tpl = await this.#readTemplates();
+    const voice = tpl[name]?.voice;
+    if (!voice) throw new Error(`user ${name} has no voice template`);
+    const s = voiceSimilarity(voice.vectors, sub);
+    const matched = s >= (voice.threshold ?? this.#voiceThreshold);
+    if (matched && voice.status === "pending") {
+      voice.status = "active";
+      await this.#writeTemplates(tpl);
+      this.#ctx.log(`portal: voice template activated for ${name} (s=${s.toFixed(3)})`);
+    }
+    return { matched, similarity: s };
+  }
+
+  /** portal /enroll 采集页的一次性注册票（预先设置路径，biometric-2fa-design
+   *  §9.1）：HMAC(SECRET) 无状态签名——子进程用同一 SECRET 验证；10 分钟
+   *  有效。管理 UI 拿到 url 后直接开页面，采集/加密/资产全在 portal 一侧。 */
+  async biometricEnrollTicket(name: string, method: "face" | "voice"): Promise<{ token: string; method: string; expiresInMs: number }> {
+    if (method !== "face" && method !== "voice") throw new Error(`biometric method ${method} not supported`);
+    if (method === "face" && !this.#bioFace) throw new Error("face biometrics not enabled on this portal");
+    if (method === "voice" && !this.#bioVoice) throw new Error("voice biometrics not enabled on this portal");
+    validateUserName(name);
+    const rows = await this.#readDb();
+    if (!rows.has(name)) throw new Error(`user ${name} not registered`);
+    const ttl = 10 * 60_000;
+    const payload = Buffer.from(JSON.stringify({ n: name, m: method, e: Date.now() + ttl })).toString("base64url");
+    const sig = createHmac("sha256", this.#secret).update(payload).digest("base64url");
+    return { token: `${payload}.${sig}`, method, expiresInMs: ttl };
   }
 
   // —— TOTP 2FA management ——
@@ -518,11 +863,161 @@ function waitTcp(port: number, timeoutMs: number): Promise<void> {
   });
 }
 
+/** voice 特征维度：13 MFCC × (Δ+ΔΔ 每帧 39 维) × (mean+std) = 78。 */
+export const VOICE_DIM = 78;
+/** voice 样本校验：1..5 组，每组恰 VOICE_DIM 个有限数（MFCC 量级宽松）。 */
+export function validateVoiceSamples(samples: unknown, what = "samples"): number[][] {
+  if (!Array.isArray(samples) || samples.length < 1 || samples.length > 5) {
+    throw new Error(`${what}: expected 1-5 vectors`);
+  }
+  return samples.map((v) => {
+    if (
+      !Array.isArray(v) ||
+      v.length !== VOICE_DIM ||
+      !v.every((x) => typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1e6)
+    ) {
+      throw new Error(`${what}: each vector must be ${VOICE_DIM} finite numbers`);
+    }
+    return v as number[];
+  });
+}
+/** 余弦相似度。 */
+export function cosineSim(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!;
+    na += a[i]! * a[i]!;
+    nb += b[i]! * b[i]!;
+  }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+/** voice 匹配：注册向量 × 提交向量余弦取最大（≥ threshold 视为同一人）。 */
+export function voiceSimilarity(enroll: number[][], submit: number[][]): number {
+  let best = -1;
+  for (const e of enroll) {
+    for (const v of submit) {
+      const s = cosineSim(e, v);
+      if (s > best) best = s;
+    }
+  }
+  return best;
+}
+/** voice 注册质量门：样本两两余弦最小值（现场一致性——噪声环境/他人代录
+ *  会拉低；低于 floor 的模板直接拒绝，防止写入永远验证不过的模板）。 */
+export const VOICE_ENROLL_MIN_PAIR_SIM = 0.85;
+export function voiceEnrollQuality(vectors: number[][]): number {
+  let min = 1;
+  for (let i = 0; i < vectors.length; i++) {
+    for (let j = i + 1; j < vectors.length; j++) {
+      const s = cosineSim(vectors[i]!, vectors[j]!);
+      if (s < min) min = s;
+    }
+  }
+  return min;
+}
+
+// 页面公共 JS（纯文本常量，生成时 JSON.stringify 注入）：字节转换 + 混合加密
+// （AES-256-GCM 载荷 + RSA-OAEP 包裹密钥，§7.2）+ MFCC 78-d 提取（零依赖）。
+export const PAGE_CRYPTO_JS = `
+function b2u(b){var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}
+function u2b(u){var s="";for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s);}
+async function hybridEncrypt(pubB64,keyId,payloadStr){
+  var aes=crypto.getRandomValues(new Uint8Array(32));
+  var iv=crypto.getRandomValues(new Uint8Array(12));
+  var ak=await crypto.subtle.importKey("raw",aes,{name:"AES-GCM"},false,["encrypt"]);
+  var ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv:iv},ak,new TextEncoder().encode(payloadStr)));
+  var rk=await crypto.subtle.importKey("spki",b2u(atob(pubB64)),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);
+  var wk=new Uint8Array(await crypto.subtle.encrypt({name:"RSA-OAEP"},rk,aes));
+  return {keyId:keyId,wrapped:u2b(wk),iv:u2b(iv),data:u2b(ct)};
+}
+function fftMag(frame){
+  var n=frame.length,re=new Float64Array(n),im=new Float64Array(n);
+  for(var i=0;i<n;i++){var w=0.54-0.46*Math.cos(2*Math.PI*i/(n-1));re[i]=frame[i]*w;}
+  for(var i=1,j=0;i<n;i++){var bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;
+    if(i<j){var tr=re[i];re[i]=re[j];re[j]=tr;}}
+  for(var len=2;len<=n;len<<=1){var ang=-2*Math.PI/len,half=len>>1;
+    for(var i=0;i<n;i+=len)for(var k=0;k<half;k++){
+      var c=Math.cos(ang*k),s=Math.sin(ang*k);
+      var ur=re[i+k],ui=im[i+k];
+      var vr=re[i+k+half]*c-im[i+k+half]*s,vi=re[i+k+half]*s+im[i+k+half]*c;
+      re[i+k]=ur+vr;im[i+k]=ui+vi;re[i+k+half]=ur-vr;im[i+k+half]=ui-vi;}}
+  var out=new Float64Array(n/2);for(var i=0;i<n/2;i++)out[i]=Math.sqrt(re[i]*re[i]+im[i]*im[i]);return out;
+}
+var MEL_F=null;
+function melFilters(nfilt,nfft,sr){
+  if(MEL_F)return MEL_F;
+  var f=function(hz){return 2595*Math.log(1+hz/700)/Math.LN10;};
+  var inv=function(m){return 700*(Math.pow(10,m/2595)-1);};
+  var lo=f(0),hi=f(Math.min(8000,sr/2));
+  var pts=[];for(var i=0;i<nfilt+2;i++)pts.push(inv(lo+(hi-lo)*i/(nfilt+1)));
+  var bins=pts.map(function(hz){return Math.round(hz/(sr/2)*(nfft/2));});
+  var F=[];
+  for(var m=0;m<nfilt;m++){
+    var row=new Float64Array(nfft/2);
+    for(var k=bins[m];k<bins[m+1];k++)row[k]=(k-bins[m])/(bins[m+1]-bins[m]);
+    for(var k=bins[m+1];k<bins[m+2];k++)row[k]=(bins[m+2]-k)/(bins[m+2]-bins[m+1]);
+    F.push(row);
+  }
+  MEL_F=F;return F;
+}
+function mfcc78(pcm,sr){
+  var FR=400,HP=Math.round(sr*0.01),NF=512,NMEL=26,NMFCC=13;
+  var frames=[];
+  for(var off=0;off+FR<=pcm.length;off+=HP){
+    var fr=pcm.subarray(off,off+FR);
+    var e=0;for(var i=0;i<FR;i++)e+=fr[i]*fr[i];
+    frames.push({f:fr,e:e});
+  }
+  if(frames.length<8)return null;
+  var maxE=0;for(var i=0;i<frames.length;i++)if(frames[i].e>maxE)maxE=frames[i].e;
+  frames=frames.filter(function(x){return x.e>maxE*0.01;});
+  if(frames.length<8)return null;
+  var F=melFilters(NMEL,NF,sr),cos1=Math.PI/NMEL;
+  var mf=[];
+  for(var t=0;t<frames.length;t++){
+    var padded=new Float64Array(NF);padded.set(frames[t].f);
+    var mag=fftMag(padded);
+    var c=new Float64Array(NMFCC);
+    for(var m=0;m<NMEL;m++){var s=0;for(var k=0;k<NF/2;k++)s+=F[m][k]*mag[k];s=Math.log(s+1e-10);
+      for(var i=0;i<NMFCC;i++)c[i]+=(s*Math.cos(cos1*i*(m+0.5)));
+    }
+    for(var i=0;i<NMFCC;i++)c[i]/=NMEL;
+    mf.push(c);
+  }
+  var T=mf.length,feat=[];
+  for(var t=0;t<T;t++){
+    var d1=new Float64Array(NMFCC),d2=new Float64Array(NMFCC);
+    if(t>0&&t<T-1)for(var i=0;i<NMFCC;i++)d1[i]=(mf[t+1][i]-mf[t-1][i])/2;
+    if(t>1&&t<T-2)for(var i=0;i<NMFCC;i++)d2[i]=(mf[t+2][i]-mf[t-2][i])/2;else if(t>0&&t<T-1)for(var i=0;i<NMFCC;i++)d2[i]=(mf[t+1][i]-mf[t-1][i])/2;
+    var row=new Float64Array(NMFCC*3);
+    for(var i=0;i<NMFCC;i++){row[i]=mf[t][i];row[NMFCC+i]=d1[i];row[NMFCC*2+i]=d2[i];}
+    feat.push(row);
+  }
+  var D=feat[0].length,out=new Array(D*2);
+  for(var i=0;i<D;i++){var s=0;for(var t=0;t<T;t++)s+=feat[t][i];var mu=s/T;var v=0;
+    for(var t=0;t<T;t++){var x=feat[t][i]-mu;v+=x*x;}out[i]=mu;out[D+i]=Math.sqrt(v/T);}
+  return out;
+}
+async function extractVoiceVector(blob){
+  var buf=await blob.arrayBuffer();
+  var ac=new (window.AudioContext||window.webkitAudioContext)();
+  var decoded=await ac.decodeAudioData(buf);
+  var off=new OfflineAudioContext(1,Math.ceil(decoded.duration*16000),16000);
+  var src=off.createBufferSource();src.buffer=decoded;src.connect(off.destination);src.start();
+  var rendered=await off.startRendering();
+  var v=mfcc78(rendered.getChannelData(0),16000);
+  ac.close();
+  return v;
+}
+`;
+
 /** The generated portal server (ESM, written to cacheDir/tmp/portal/server.mjs). */
 function writeServerScript(file: string, basePath: string, deployBasePath = "", site = "default"): void {
   const script = `import { createServer } from "http";
-import { readFileSync, writeFileSync } from "fs";
-import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants } from "crypto";
+import { readFileSync, writeFileSync, renameSync, chmodSync } from "fs";
+import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants, createDecipheriv } from "crypto";
 
 const PORT = Number(process.env.PORT);
 const SECRET = process.env.SECRET;
@@ -535,7 +1030,24 @@ const SECURE = process.env.SECURE === "1";
 const COOKIE = "st_portal${site === "default" ? "" : "_" + site}_session";
 const COOKIE2 = "st_portal${site === "default" ? "" : "_" + site}_2fa";
 const SITE = ${JSON.stringify(site)};
-const TTL_MS = 7 * 24 * 3600 * 1000;
+// 会话/记住我 TTL 与 2FA 复验周期（biometric-2fa-design.md §5）——父进程按
+// opts 计算后经 env 注入；缺省 7d / 365d / 52d（= 365/7，最小 1 天）。
+const TTL_MS = Number(process.env.TTL_MS) || 7 * 24 * 3600 * 1000;
+const REMEMBER_TTL_MS = Number(process.env.REMEMBER_TTL_MS) || 365 * 24 * 3600 * 1000;
+const GRACE_MS = Number(process.env.GRACE_MS) || 52 * 24 * 3600 * 1000;
+// 生物识别（P1: face）——模板/资产/阈值经 env 注入（biometric-2fa-design.md §7）
+const TEMPLATES_FILE = process.env.TEMPLATES_FILE || "";
+const FACE_ENABLED = process.env.FACE_ENABLED === "1";
+const FACE_THRESHOLD = Number(process.env.FACE_THRESHOLD) || 0.6;
+const VOICE_ENABLED = process.env.VOICE_ENABLED === "1";
+const VOICE_THRESHOLD = Number(process.env.VOICE_THRESHOLD) || 0.9;
+const ENROLL_SECRET = process.env.SECRET || "";
+const ASSETS_DIR = process.env.ASSETS_DIR || "";
+const MODEL_FILES = [
+  "tiny_face_detector_model-weights_manifest.json", "tiny_face_detector_model.bin",
+  "face_landmark_68_model-weights_manifest.json", "face_landmark_68_model.bin",
+  "face_recognition_model-weights_manifest.json", "face_recognition_model.bin",
+];
 
 function loadUsers() {
   try {
@@ -545,14 +1057,32 @@ function loadUsers() {
   }
 }
 
+// 生物识别模板（templates.json，父进程管理 API 原子写；此处只读、逐请求）
+function loadTemplates() {
+  try {
+    return JSON.parse(readFileSync(TEMPLATES_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+// /enroll 采集页写入（登录时自助注册/票注册）——与父进程同一原子写模式
+// （tmp + chmod 600 + rename；父进程管理 API 可能并发写同一文件）
+function writeTemplates(rows) {
+  const tmp = TEMPLATES_FILE + "." + process.pid + ".tmp";
+  writeFileSync(tmp, JSON.stringify(rows, null, 2), "utf8");
+  try { chmodSync(tmp, 0o600); } catch { /* best-effort */ }
+  renameSync(tmp, TEMPLATES_FILE);
+}
+
 function sign(payload) {
   return createHmac("sha256", SECRET).update(payload).digest("base64url");
 }
 
-function issueSession(name, cookieName = COOKIE, ttl = TTL_MS, twoFactor = false) {
+function issueSession(name, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0) {
   // cookieName is mixed into the payload so a 2FA ticket can never be
-  // replayed as a full session cookie (or vice versa)
-  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name + (twoFactor ? ".2fa" : "");
+  // replayed as a full session cookie (or vice versa). twoFactorAt = 最近一次
+  // 2FA 完成时刻（".2fa:<epochMs>"后缀）——探针按 GRACE_MS 复验（remember me）。
+  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name + (twoFactorAt ? ".2fa:" + twoFactorAt : "");
   const body = Buffer.from(payload).toString("base64url");
   return body + "." + sign(body);
 }
@@ -571,8 +1101,11 @@ function verifySession(token, cookieName = COOKIE) {
   const expiry = Number(parts[0]);
   if (!expiry || expiry < Date.now()) return null;
   if (parts[1] !== cookieName) return null;
-  const twoFactor = parts[3] === "2fa";
-  return { name: parts.slice(2).join(".").replace(/\.2fa$/, ""), twoFactor };
+  let name = parts.slice(2).join(".");
+  let twoFactorAt = 0;
+  const m2fa = /\\.2fa:(\\d+)$/.exec(name);
+  if (m2fa) { twoFactorAt = Number(m2fa[1]); name = name.slice(0, name.length - m2fa[0].length); }
+  return { name, twoFactorAt, expiry };
 }
 
 function hostPolicy(host) {
@@ -619,6 +1152,116 @@ function verifyTotp(secretB32, code) {
   return false;
 }
 
+// —— 2FA 方法抽象（biometric-2fa-design.md §6）————————————————
+// P0：totp 唯一内置方法；face/voice 在 P1/P2 加入（availableMethods 挂勾 +
+// 专属页/路由）。方法页共享同一 COOKIE2 票据，全部 POST /login/2fa，body
+// 带 method 字段区分（缺省 totp，向后兼容旧表单）。
+const METHOD_LABELS = { totp: "Authenticator app (TOTP)", face: "Face recognition", voice: "Voice recognition" };
+function availableMethods(name, rec) {
+  const out = [];
+  if (rec && rec.totpSecret) out.push("totp");
+  if (FACE_ENABLED) {
+    const t = loadTemplates()[name];
+    if (t && t.face && t.face.status === "active") out.push("face");
+  }
+  if (VOICE_ENABLED) {
+    const t = loadTemplates()[name];
+    if (t && t.voice && t.voice.status === "active") out.push("voice");
+  }
+  return out;
+}
+
+// voice 挑战（随机 6 位数字 + nonce 单次消费；digits 展示给用户朗读）
+const voiceChallenges = new Map();
+const VOICE_CHALLENGE_TTL = 5 * 60_000;
+function issueVoiceChallenge(name) {
+  cleanupVoiceChallenges();
+  let digits = "";
+  for (let i = 0; i < 6; i++) digits += Math.floor(Math.random() * 10);
+  const nonce = randomBytes(16).toString("hex");
+  voiceChallenges.set(nonce, { name, digits, expires: Date.now() + VOICE_CHALLENGE_TTL });
+  return { nonce, digits };
+}
+function cleanupVoiceChallenges() {
+  const now = Date.now();
+  for (const [n, c] of voiceChallenges) if (c.expires < now) voiceChallenges.delete(n);
+}
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
+}
+function voiceSimilarity(enroll, submit) {
+  let best = -1;
+  for (const e of enroll) for (const v of submit) { const s = cosineSim(e, v); if (s > best) best = s; }
+  return best;
+}
+function voiceEnrollQuality(vectors) {
+  let min = 1;
+  for (let i = 0; i < vectors.length; i++)
+    for (let j = i + 1; j < vectors.length; j++) { const s = cosineSim(vectors[i], vectors[j]); if (s < min) min = s; }
+  return min;
+}
+// voice 向量校验：恰 78 个有限数（MFCC 量级宽松）
+function validVoiceVec(v) {
+  return Array.isArray(v) && v.length === 78 && v.every(function (x) { return typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1e6; });
+}
+// 注册票验证（父进程 biometricEnrollTicket 的 HMAC 签名；单次消费用内存
+// Map token→expiry，超 256 条时清扫过期项——防无界增长）
+const usedTickets = new Map();
+function sweepUsedTickets() {
+  if (usedTickets.size <= 256) return;
+  const now = Date.now();
+  for (const [t, e] of usedTickets) if (e < now) usedTickets.delete(t);
+}
+function verifyEnrollTicket(token) {
+  const i = String(token || "").indexOf(".");
+  if (i < 1) return null;
+  const payload = String(token).slice(0, i);
+  const sig = String(token).slice(i + 1);
+  const expect = createHmac("sha256", ENROLL_SECRET).update(payload).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expect);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+  sweepUsedTickets();
+  if (usedTickets.has(String(token))) return null; // 单次使用
+  try {
+    const d = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!d || !d.n || !d.m || !d.e || d.e < Date.now()) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+// face 挑战 nonce（页面渲染时签发，5 分钟单次使用——payload 必须携带，
+// 重放旧 payload 时 nonce 已消费/过期 → 拒绝）
+const faceChallenges = new Map();
+const FACE_CHALLENGE_TTL = 5 * 60_000;
+function issueFaceChallenge(name) {
+  cleanupFaceChallenges();
+  const nonce = randomBytes(16).toString("hex");
+  faceChallenges.set(nonce, { name, expires: Date.now() + FACE_CHALLENGE_TTL });
+  return nonce;
+}
+function cleanupFaceChallenges() {
+  const now = Date.now();
+  for (const [n, c] of faceChallenges) if (c.expires < now) faceChallenges.delete(n);
+}
+// face 匹配距离（与父进程 faceDistance 同式）：注册向量 × 提交向量两两欧氏取最小
+function faceDistance(enroll, submit) {
+  let best = Infinity;
+  for (const e of enroll) {
+    for (const v of submit) {
+      let s = 0;
+      for (let k = 0; k < 128; k++) { const t = e[k] - v[k]; s += t * t; }
+      const d = Math.sqrt(s);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+
 function escapeAttr(s) {
   // raw next in the hidden field (NOT URL-encoded): the browser form-encodes
   // on submit + URLSearchParams decodes server-side, so pre-encoding would
@@ -626,7 +1269,7 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function totpPage(next, error, host) {
+function totpPage(next, error, host, remember = false) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Two-factor</title>'
     + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
@@ -645,7 +1288,9 @@ function totpPage(next, error, host) {
     + '<h1>Two-factor authentication</h1>'
     + '<p class="hint">Enter the 6-digit code from your authenticator app.</p>'
     + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
-    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">' + err
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">'
+    + '<input type="hidden" name="method" value="totp">'
+    + (remember ? '<input type="hidden" name="remember" value="1">' : "") + err
     + '<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\\d{6}" required autofocus>'
     + '<button type="submit">Verify</button></form>'
     + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Verifying…</p><p>Please wait</p></div></div>'
@@ -681,7 +1326,7 @@ function banState(account, ip) {
   const ipUntil = addr && addr.bannedUntil > now ? addr.bannedUntil : 0;
   return Math.max(acctUntil, ipUntil);
 }
-function recordFailure(account, ip) {
+function recordFailure(account, ip, maxRetries = MAX_RETRIES) {
   const now = Date.now();
   const b = loadBrute();
   const acct = b.accounts[account] || (b.accounts[account] = { fails: [], strikes: 0, bannedUntil: 0 });
@@ -689,7 +1334,7 @@ function recordFailure(account, ip) {
   for (const t of [acct, addr]) {
     t.fails = sweepFailures(t.fails, now);
     t.fails.push(now);
-    if (t.fails.length >= MAX_RETRIES) {
+    if (t.fails.length >= maxRetries) {
       const factor = Math.pow(2, Math.min(t.strikes, 4));
       t.bannedUntil = now + BAN_MS * factor;
       t.strikes += 1;
@@ -725,7 +1370,7 @@ function cleanupRsaKeys() {
   const now = Date.now();
   for (const [id, k] of rsaKeys) if (k.expires < now) rsaKeys.delete(id);
 }
-function decryptPassword(keyId, encryptedB64) {
+function decryptRaw(keyId, encryptedB64) {
   const pair = rsaKeys.get(keyId);
   rsaKeys.delete(keyId); // one-time use — replay of a captured ciphertext fails
   if (!pair || pair.expires < Date.now()) throw new Error("stale or unknown key id");
@@ -733,10 +1378,24 @@ function decryptPassword(keyId, encryptedB64) {
     return privateDecrypt(
       { key: pair.privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
       Buffer.from(encryptedB64, "base64"),
-    ).toString("utf8");
+    );
   } catch {
     throw new Error("decryption failed");
   }
+}
+function decryptPassword(keyId, encryptedB64) {
+  return decryptRaw(keyId, encryptedB64).toString("utf8");
+}
+// 混合解密（face 向量 payload 远超 RSA-OAEP 190B 上限）：RSA 包裹一次性
+// AES-256-GCM 密钥，载荷走 AES（WebCrypto 的 AES-GCM 输出尾部含 16B tag）
+function decryptHybrid(keyId, wrappedB64, ivB64, dataB64) {
+  const aesRaw = decryptRaw(keyId, wrappedB64);
+  const buf = Buffer.from(dataB64, "base64");
+  const tag = buf.subarray(buf.length - 16);
+  const ct = buf.subarray(0, buf.length - 16);
+  const d = createDecipheriv("aes-256-gcm", aesRaw, Buffer.from(ivB64, "base64"));
+  d.setAuthTag(tag);
+  return Buffer.concat([d.update(ct), d.final()]).toString("utf8");
 }
 
 function html(next, error, keyId, publicKey, host) {
@@ -775,6 +1434,8 @@ function html(next, error, keyId, publicKey, host) {
     + 'h1{font-size:1.15rem;margin:0 0 1.2rem}label{display:block;font-size:.8rem;color:#666;margin:.8rem 0 .25rem}'
     + '@media(max-width:480px){form,#busy .card{padding:1.5rem 1.25rem}}'
     + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px}'
+    + 'label.rm{display:flex;gap:.45rem;align-items:center;font-size:.82rem;color:#555;margin:.9rem 0 0;cursor:pointer}'
+    + 'label.rm input{width:auto;margin:0}'
     + 'button{margin-top:1.4rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
     + 'p.warn{background:#fdf3e0;border:1px solid #f0c36d;color:#8a6d1a;font-size:.8rem;padding:.5rem .7rem;border-radius:6px;margin:1rem 0 .2rem;line-height:1.4}'
     + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
@@ -792,13 +1453,293 @@ function html(next, error, keyId, publicKey, host) {
     + '<input type="hidden" name="keyId" id="keyId">'
     + '<label>Username</label><input name="username" autocomplete="username" required autofocus>'
     + '<label>Password</label><input name="password" id="pw" type="password" autocomplete="current-password" required>'
+    + '<label class="rm"><input type="checkbox" name="remember" value="1"> Remember me on this device</label>'
     + '<button type="submit">Sign in</button></form>'
     + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Signing in…</p><p>Please wait</p></div></div>'
     + '</body></html>';
 }
 
-function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactor = false) {
-  const token = issueSession(name, cookieName, ttl, twoFactor);
+// 2FA 方法选择页（多方法时）+ 零方法错误页。按钮为链接（GET /login/2fa?m=…），
+// 票据仍走 COOKIE2 cookie——无需表单。
+function chooserPage(next, methods, remember, host, error, enrollMethods) {
+  const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const btns = (methods || []).map(function (m) {
+    return '<a class="m" href="' + BASE + "/login/2fa?m=" + m + "&next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">'
+      + METHOD_LABELS[m] + "</a>";
+  }).join("");
+  // 零方法时可注册方法的「立即设置」入口（登录时自助注册，§9.1：
+  // 仅零方法账户开放——已有方法者必须先过既有因子，防密码窃贼自助加因子）
+  const enrolls = (!methods || !methods.length) && enrollMethods && enrollMethods.length
+    ? '<p class="hint" style="margin-top:1.2rem">No 2FA yet — set one up now:</p>'
+      + enrollMethods.map(function (m) {
+        return '<a class="m" href="' + BASE + "/enroll?m=" + m + "&next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Set up ' + METHOD_LABELS[m] + "</a>";
+      }).join("")
+    : "";
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Two-factor</title>'
+    + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
+    + 'main{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:22rem}'
+    + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .6rem}'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
+    + 'a.m{display:block;padding:.7rem;margin:.5rem 0;border:1px solid #d0d3da;border-radius:8px;color:#2d6cdf;text-decoration:none;font-size:.95rem;text-align:center}'
+    + 'a.m:hover{border-color:#2d6cdf;background:#f0f5ff}'
+    + '@media(max-width:480px){main{padding:1.5rem 1.25rem}}</style>'
+    + '</head><body><main>'
+    + '<h1>Two-factor authentication</h1>'
+    + '<p class="hint">Choose a second factor to continue.</p>'
+    + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
+    + err + btns + enrolls
+    + '</main></body></html>';
+}
+
+// face 验证页（biometric-2fa-design.md §7.2）：浏览器本地提取 128-d 向量
+// （face-api.js + 3 模型从本站 assets 加载，原始画面不出设备），眨眼活体
+// 断言（EAR），JSON{nonce,vectors,blinked} 一次性 RSA-OAEP 加密上传。
+function facePage(next, error, host, remember, nonce, keyId, publicKey, altMethods) {
+  const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const alt = altMethods && altMethods.length > 1
+    ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
+    : "";
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Face verification</title>'
+    + '<script src="' + BASE + '/assets/face-api.js"></script>'
+    + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
+    + 'main{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:22rem;text-align:center}'
+    + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .8rem}'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
+    + '#cam{position:relative;width:14rem;height:14rem;margin:0 auto;border-radius:50%;overflow:hidden;background:#e8eaee;border:3px solid #d0d3da}'
+    + '#cam video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}'
+    + 'p.st{font-size:.85rem;color:#444;margin:.9rem 0 .2rem;min-height:1.2em}'
+    + '#dots{display:flex;gap:.4rem;justify-content:center;margin:.4rem 0 .2rem}'
+    + '#dots i{width:.7rem;height:.7rem;border-radius:50%;background:#d0d3da;display:inline-block}'
+    + '#dots i.on{background:#2d6cdf}'
+    + 'a.alt{display:inline-block;margin-top:1rem;font-size:.85rem;color:#2d6cdf}'
+    + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}'
+    + '#busy .spin{width:2.2rem;height:2.2rem;border:3px solid #d0d3da;border-top-color:#2d6cdf;border-radius:50%;animation:st .8s linear infinite}'
+    + '@keyframes st{to{transform:rotate(360deg)}}#busy p{margin-top:1rem;color:#555;font-size:.95rem}'
+    + '@media(max-width:480px){main{padding:1.5rem 1.25rem}}</style>'
+    + '</head><body><main>'
+    + '<h1>Face verification</h1>'
+    + '<p class="hint">Look at the camera and blink once.</p>'
+    + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
+    + '<div id="cam"><video id="v" autoplay muted playsinline></video></div>'
+    + '<p id="st" class="st">Loading…</p>'
+    + '<div id="dots"><i></i><i></i><i></i></div>' + err + alt
+    + '<form id="f" method="post" action="' + BASE + '/login/2fa">'
+    + '<input type="hidden" name="method" value="face">'
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">'
+    + (remember ? '<input type="hidden" name="remember" value="1">' : "")
+    + '<input type="hidden" name="keyId" id="keyId"><input type="hidden" name="wrapped" id="wrapped"><input type="hidden" name="iv" id="iv"><input type="hidden" name="data" id="data">'
+    + '</form><div id="busy"><div class="spin"></div><p>Verifying…</p></div></main>'
+    + '<script>'
+    + 'var A=' + JSON.stringify(BASE) + ',NONCE=' + JSON.stringify(nonce) + ',PUB=' + JSON.stringify(publicKey) + ',KEY_ID=' + JSON.stringify(keyId) + ';'
+    + 'var vectors=[],eyeClosed=false,blinked=false,done=false;'
+    + 'function st(t){document.getElementById("st").textContent=t;}'
+    + 'function dot(){var d=document.querySelectorAll("#dots i");for(var i=0;i<d.length;i++)d[i].className=i<vectors.length?"on":"";}'
+    + 'function b2u(b){var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}'
+    + 'function u2b(u){var s="";for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s);}'
+    + 'function ear(p){function d(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}return (d(p[1],p[5])+d(p[2],p[4]))/(2*d(p[0],p[3]));}'
+    + 'async function submitFace(){done=true;document.getElementById("busy").style.display="flex";'
+    + 'var payload=JSON.stringify({nonce:NONCE,vectors:vectors,blinked:blinked});'
+    + 'try{'
+    + 'var aes=crypto.getRandomValues(new Uint8Array(32));'
+    + 'var iv=crypto.getRandomValues(new Uint8Array(12));'
+    + 'var ak=await crypto.subtle.importKey("raw",aes,{name:"AES-GCM"},false,["encrypt"]);'
+    + 'var ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv:iv},ak,new TextEncoder().encode(payload)));'
+    + 'var rk=await crypto.subtle.importKey("spki",b2u(atob(PUB)),{name:"RSA-OAEP",hash:"SHA-256"},false,["encrypt"]);'
+    + 'var wk=new Uint8Array(await crypto.subtle.encrypt({name:"RSA-OAEP"},rk,aes));'
+    + 'document.getElementById("wrapped").value=u2b(wk);'
+    + 'document.getElementById("iv").value=u2b(iv);'
+    + 'document.getElementById("data").value=u2b(ct);'
+    + 'document.getElementById("keyId").value=KEY_ID;'
+    + 'document.getElementById("f").submit();'
+    + '}catch(e){document.getElementById("busy").style.display="none";done=false;st("Encryption failed — retry");}'
+    + '}'
+    + 'async function loop(){'
+    + 'if(done)return;'
+    + 'try{'
+    + 'var det=await faceapi.detectSingleFace(document.getElementById("v"),new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.5})).withFaceLandmarks().withFaceDescriptor();'
+    + 'if(det){'
+    + 'var e=(ear(det.landmarks.getLeftEye())+ear(det.landmarks.getRightEye()))/2;'
+    + 'if(e<0.22)eyeClosed=true;else if(eyeClosed)blinked=true;'
+    + 'if(blinked&&vectors.length<3){vectors.push(Array.from(det.descriptor));dot();}'
+    + 'st(blinked?(vectors.length>=3?"Submitting…":"Captured "+vectors.length+" of 3"):"Blink once to continue");'
+    + 'if(blinked&&vectors.length>=3){submitFace();return;}'
+    + '}else st("No face detected — center your face");'
+    + '}catch(err){}'
+    + 'setTimeout(loop,150);'
+    + '}'
+    + '(async function(){'
+    + 'try{'
+    + 'await faceapi.tf.ready();'
+    + 'await faceapi.nets.tinyFaceDetector.loadFromUri(A+"/assets/models/");'
+    + 'await faceapi.nets.faceLandmark68Net.loadFromUri(A+"/assets/models/");'
+    + 'await faceapi.nets.faceRecognitionNet.loadFromUri(A+"/assets/models/");'
+    + 'st("Starting camera…");'
+    + 'var s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:640}});'
+    + 'var v=document.getElementById("v");v.srcObject=s;await v.play();'
+    + 'loop();'
+    + '}catch(err){st("Camera or models unavailable: "+(err&&err.message?err.message:String(err)));var a=document.querySelector("a.alt");if(a)a.style.display="inline-block";}'
+    + '})();'
+    + '</script></body></html>';
+}
+
+const PAGE_CRYPTO_JS = ${JSON.stringify(PAGE_CRYPTO_JS)};
+
+// voice 验证页（§8.3）：展示随机数字挑战 → 录音 → 浏览器 MFCC 提取 78-d
+// → 混合加密上传。录音手动开始/停止（最大 8s），MediaRecorder 采集。
+function voicePage(next, error, host, remember, nonce, digits, keyId, publicKey, altMethods) {
+  const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const alt = altMethods && altMethods.length > 1
+    ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
+    : "";
+  const disp = String(digits).split("").join(" ");
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Voice verification</title>'
+    + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
+    + 'main{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:24rem;text-align:center}'
+    + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .8rem}'
+    + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
+    + '#digits{font-size:2.2rem;letter-spacing:.35em;font-weight:600;color:#222;margin:.6rem 0 1rem}'
+    + 'button{padding:.6rem 1.2rem;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer;font-size:.95rem;margin:0 .3rem}'
+    + 'button.sec{background:#eef2fb;color:#2d6cdf}'
+    + 'button:disabled{opacity:.5;cursor:default}'
+    + 'p.st{font-size:.85rem;color:#444;margin:.9rem 0 .2rem;min-height:1.2em}'
+    + 'a.alt{display:inline-block;margin-top:1rem;font-size:.85rem;color:#2d6cdf}'
+    + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}'
+    + '#busy .spin{width:2.2rem;height:2.2rem;border:3px solid #d0d3da;border-top-color:#2d6cdf;border-radius:50%;animation:st .8s linear infinite}'
+    + '@keyframes st{to{transform:rotate(360deg)}}#busy p{margin-top:1rem;color:#555;font-size:.95rem}'
+    + '@media(max-width:480px){main{padding:1.5rem 1.25rem}}</style>'
+    + '</head><body><main>'
+    + '<h1>Voice verification</h1>'
+    + '<p class="hint">Read the digits aloud, then stop recording.</p>'
+    + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
+    + '<div id="digits">' + escapeAttr(disp) + '</div>'
+    + '<button id="rec">Record</button><button id="stop" class="sec" disabled>Stop</button>'
+    + '<p id="st" class="st"></p>' + err + alt
+    + '<form id="f" method="post" action="' + BASE + '/login/2fa">'
+    + '<input type="hidden" name="method" value="voice">'
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">'
+    + (remember ? '<input type="hidden" name="remember" value="1">' : "")
+    + '<input type="hidden" name="keyId" id="keyId"><input type="hidden" name="wrapped" id="wrapped"><input type="hidden" name="iv" id="iv"><input type="hidden" name="data" id="data">'
+    + '</form><div id="busy"><div class="spin"></div><p>Verifying…</p></div></main>'
+    + '<script>' + PAGE_CRYPTO_JS
+    + 'var A=' + JSON.stringify(BASE) + ',NONCE=' + JSON.stringify(nonce) + ',PUB=' + JSON.stringify(publicKey) + ',KEY_ID=' + JSON.stringify(keyId) + ';'
+    + 'function st(t){document.getElementById("st").textContent=t;}'
+    + 'var rec=null,chunks=[],busy=false,vec=null;'
+    + 'document.getElementById("rec").onclick=async function(){'
+    + 'if(busy)return;try{'
+    + 'var s=await navigator.mediaDevices.getUserMedia({audio:true});'
+    + 'rec=new MediaRecorder(s);chunks=[];'
+    + 'rec.ondataavailable=function(e){if(e.data.size)chunks.push(e.data);};'
+    + 'rec.onstop=async function(){'
+    + 's.getTracks().forEach(function(t){t.stop();});'
+    + 'st("Extracting voice features…");'
+    + 'try{vec=await extractVoiceVector(new Blob(chunks,{type:rec.mimeType}));}catch(e){vec=null;}'
+    + 'if(!vec){st("Recording too short — try again");enable(true);return;}'
+    + 'document.getElementById("busy").style.display="flex";'
+    + 'try{'
+    + 'var f=await hybridEncrypt(PUB,KEY_ID,JSON.stringify({nonce:NONCE,vector:vec}));'
+    + 'for(var k in f)document.getElementById(k).value=f[k];'
+    + 'document.getElementById("f").submit();'
+    + '}catch(e){document.getElementById("busy").style.display="none";st("Encryption failed — retry");enable(true);}'
+    + '};'
+    + 'rec.start();busy=true;enable(false);st("Recording… read the digits");'
+    + 'setTimeout(function(){if(rec&&rec.state==="recording")rec.stop();},8000);'
+    + '}catch(err){st("Microphone unavailable: "+(err&&err.message?err.message:String(err)));}'
+    + '};'
+    + 'document.getElementById("stop").onclick=function(){if(rec&&rec.state==="recording")rec.stop();};'
+    + 'function enable(on){document.getElementById("rec").disabled=!on;document.getElementById("stop").disabled=on;busy=!on;}'
+    + '</script></body></html>';
+}
+
+// voice 注册页（3 轮数字挑战）：每轮录音→提取 78-d；3 轮统一提交 /enroll
+// （rounds:[{nonce,vector}×3]）。登录时路径靠 cookie，票路径带 t。
+function enrollVoicePage(next, error, host, remember, keyId, publicKey, ch1, ticket, action, altMethods) {
+  const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const T = ticket ? JSON.stringify(ticket) : "";
+  const alt = altMethods && altMethods.length > 1
+    ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
+    : "";
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Voice setup</title>'
+    + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
+    + 'main{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:24rem;text-align:center}'
+    + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .8rem}'
+    + '#digits{font-size:2rem;letter-spacing:.3em;font-weight:600;color:#222;margin:.6rem 0 1rem}'
+    + 'button{padding:.6rem 1.2rem;border:0;border-radius:8px;background:#2d6cdf;color:#fff;cursor:pointer;font-size:.95rem;margin:0 .3rem}'
+    + 'button.sec{background:#eef2fb;color:#2d6cdf}button:disabled{opacity:.5;cursor:default}'
+    + 'p.st{font-size:.85rem;color:#444;margin:.9rem 0 .2rem;min-height:1.2em}'
+    + 'a.alt{display:inline-block;margin-top:1rem;font-size:.85rem;color:#2d6cdf}'
+    + '#dots{display:flex;gap:.4rem;justify-content:center;margin:.4rem 0 .2rem}'
+    + '#dots i{width:.7rem;height:.7rem;border-radius:50%;background:#d0d3da;display:inline-block}'
+    + '#dots i.on{background:#2d6cdf}'
+    + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50}'
+    + '#busy .spin{width:2.2rem;height:2.2rem;border:3px solid #d0d3da;border-top-color:#2d6cdf;border-radius:50%;animation:st .8s linear infinite}'
+    + '@keyframes st{to{transform:rotate(360deg)}}#busy p{margin-top:1rem;color:#555;font-size:.95rem}'
+    + '@media(max-width:480px){main{padding:1.5rem 1.25rem}}</style>'
+    + '</head><body><main>'
+    + '<h1>Voice 2FA setup</h1>'
+    + '<p class="hint">Record 3 readings of random digits.</p>'
+    + '<div id="digits"></div>'
+    + '<button id="rec">Record</button><button id="stop" class="sec" disabled>Stop</button>'
+    + '<p id="st" class="st"></p>'
+    + '<div id="dots"><i></i><i></i><i></i></div>' + err + alt
+    + '<form id="f" method="post" action="' + action + '">'
+    + '<input type="hidden" name="method" value="voice">'
+    + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">'
+    + (T ? '<input type="hidden" name="t" value="' + escapeAttr(T) + '">' : "")
+    + (remember ? '<input type="hidden" name="remember" value="1">' : "")
+    + '<input type="hidden" name="keyId" id="keyId"><input type="hidden" name="wrapped" id="wrapped"><input type="hidden" name="iv" id="iv"><input type="hidden" name="data" id="data">'
+    + '</form><div id="busy"><div class="spin"></div><p>Saving…</p></div></main>'
+    + '<script>' + PAGE_CRYPTO_JS
+    + 'var A=' + JSON.stringify(BASE) + ',PUB=' + JSON.stringify(publicKey) + ',KEY_ID=' + JSON.stringify(keyId) + ',T=' + T + ';'
+    + 'var rounds=[],cur=' + JSON.stringify(ch1) + ',busy=false;'
+    + 'function st(t){document.getElementById("st").textContent=t;}'
+    + 'function showCh(){document.getElementById("digits").textContent=String(cur.digits).split("").join(" ");'
+    + 'var d=document.querySelectorAll("#dots i");for(var i=0;i<d.length;i++)d[i].className=i<rounds.length?"on":"";}'
+    + 'showCh();'
+    + 'var curRec=null;'
+    + 'document.getElementById("rec").onclick=async function(){'
+    + 'if(busy)return;try{'
+    + 'var s=await navigator.mediaDevices.getUserMedia({audio:true});'
+    + 'curRec=new MediaRecorder(s);var chunks=[];'
+    + 'curRec.ondataavailable=function(e){if(e.data.size)chunks.push(e.data);};'
+    + 'var rec=curRec;'
+    + 'rec.onstop=async function(){'
+    + 's.getTracks().forEach(function(t){t.stop();});'
+    + 'st("Extracting…");'
+    + 'var v=null;try{v=await extractVoiceVector(new Blob(chunks,{type:rec.mimeType}));}catch(e){}'
+    + 'if(!v){st("Too short — try again");enable(true);return;}'
+    + 'rounds.push({nonce:cur.nonce,vector:v});'
+    + 'if(rounds.length>=3){await submitRounds();return;}'
+    + 'try{var r=await fetch(A+"/enroll/challenge?m=voice"+(T?"&t="+encodeURIComponent(T):""),{credentials:"include"});'
+    + 'var j=await r.json();if(!j.nonce){st("Challenge failed — reload");return;}cur=j;showCh();'
+    + 'st("Reading "+(rounds.length+1)+" of 3");enable(true);'
+    + '}catch(e){st("Network error — reload");}'
+    + '};'
+    + 'rec.start();busy=true;enable(false);st("Recording… read the digits");'
+    + 'setTimeout(function(){if(rec.state==="recording")rec.stop();},8000);'
+    + '}catch(err){st("Microphone unavailable: "+(err&&err.message?err.message:String(err)));}'
+    + '};'
+    + 'document.getElementById("stop").onclick=function(){if(curRec&&curRec.state==="recording")curRec.stop();};'
+    + 'function enable(on){document.getElementById("rec").disabled=!on;document.getElementById("stop").disabled=on;busy=!on;}'
+    + 'async function submitRounds(){document.getElementById("busy").style.display="flex";'
+    + 'try{'
+    + 'var f=await hybridEncrypt(PUB,KEY_ID,JSON.stringify({rounds:rounds}));'
+    + 'for(var k in f)document.getElementById(k).value=f[k];'
+    + 'document.getElementById("f").submit();'
+    + '}catch(e){document.getElementById("busy").style.display="none";st("Encryption failed — retry");enable(true);}'
+    + '}'
+    + '</script></body></html>';
+}
+
+// 注册完成页（票路径）：采集页独立窗口直接关闭即可
+function enrollDonePage(method) {
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Done</title>'
+    + '<style>body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7}main{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);text-align:center}p{color:#555}</style>'
+    + '</head><body><main><h1>\u2705 ' + (method === "face" ? "Face" : "Voice") + ' 2FA activated</h1>'
+    + '<p>You can close this tab and sign in with your ' + (method === "face" ? "face" : "voice") + '.</p></main></body></html>';
+}
+
+function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0) {
+  const token = issueSession(name, cookieName, ttl, twoFactorAt);
   res.writeHead(302, {
     Location: next || "/",
     "Set-Cookie": cookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
@@ -828,7 +1769,9 @@ createServer((req, res) => {
       res.end("denied by policy");
       return;
     }
-    if (policy === "two_factor" && !sess.twoFactor) {
+    if (policy === "two_factor" && (!sess.twoFactorAt || Date.now() - sess.twoFactorAt > GRACE_MS)) {
+      // 2FA 复验周期（remember me 可信设备）：周期外一律 401——nginx 302 回
+      // 登录页后，GET /login 识别“会话有效但 2FA 过期”直接放行到 2FA 步骤页
       res.writeHead(401, { "Content-Type": "text/plain" });
       res.end("2fa required");
       return;
@@ -840,6 +1783,29 @@ createServer((req, res) => {
 
   if (url.pathname === BASE + "/login" && req.method === "GET") {
     const next = url.searchParams.get("next") || DEPLOY || "/";
+    // remember me（可信设备）复验路径：会话有效但 2FA 复验周期已过 → 跳过
+    // 密码、直接发 COOKIE2 票据进 2FA 步骤页；会话完全满足策略 → 直达 next。
+    // remember 属性延续：旧会话剩余寿命 > TTL_MS → 原本是 remember 会话。
+    const sc = (req.headers.cookie || "").split(";").map((c) => c.trim()).find((c) => c.startsWith(COOKIE + "="));
+    const sess = sc ? verifySession(sc.slice(COOKIE.length + 1)) : null;
+    if (sess) {
+      const policy = hostPolicy((req.headers.host || "").split(":")[0]);
+      if (policy === "two_factor") {
+        if (!sess.twoFactorAt || Date.now() - sess.twoFactorAt > GRACE_MS) {
+          const tmp = issueSession(sess.name, COOKIE2, 5 * 60_000);
+          const remember = sess.expiry - Date.now() > TTL_MS;
+          res.writeHead(302, {
+            Location: BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : ""),
+            "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict" + (SECURE ? "; Secure" : ""),
+          });
+          res.end();
+          return;
+        }
+        res.writeHead(302, { Location: next });
+        res.end();
+        return;
+      }
+    }
     const { keyId, publicKey } = issueRsaKey();
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(html(next, "", keyId, publicKey, req.headers.host || ""));
@@ -888,29 +1854,92 @@ createServer((req, res) => {
         return;
       }
       clearFailures(name, ip);
-      // TOTP second factor:user 已注册或该 host 策略要求双因素
+      // 2FA 方法选择（biometric-2fa-design.md §6）：0 个方法 & 非 two_factor
+      // → 1FA 会话（remember 不延长弱会话）；0 个 & two_factor → 错误页；
+      // 1 个 → 直达方法页；多个 → chooser。票据固定 5 分钟，remember 随
+      // 隐藏字段透传到最终 setSession。
       const policy = hostPolicy((req.headers.host || "").split(":")[0]);
-      if (rec.totpSecret || policy === "two_factor") {
-        const tmp = issueSession(name, COOKIE2, 5 * 60_000);
-        res.writeHead(200, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict",
-        });
-        res.end(totpPage(next, policy === "two_factor" && !rec.totpSecret ? "2FA is required for this host, but this account has no TOTP enrolled yet." : "", req.headers.host || ""));
+      const methods = availableMethods(name, rec);
+      const remember = params.get("remember") === "1";
+      if (!methods.length && policy !== "two_factor") {
+        setSession(res, name, next); // 1FA：默认 TTL（remember 不适用）
         return;
       }
-      setSession(res, name, next);
+      const tmp = issueSession(name, COOKIE2, 5 * 60_000);
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict" + (SECURE ? "; Secure" : ""),
+      });
+      if (!methods.length) {
+        const em = FACE_ENABLED && VOICE_ENABLED ? ["face", "voice"] : FACE_ENABLED ? ["face"] : VOICE_ENABLED ? ["voice"] : [];
+        res.end(chooserPage(next, [], remember, req.headers.host || "", em.length ? "" : "2FA is required for this host, but this account has no 2FA method enrolled.", em));
+      } else if (methods.length === 1 && methods[0] === "totp") {
+        res.end(totpPage(next, "", req.headers.host || "", remember));
+      } else if (methods.length === 1 && methods[0] === "face") {
+        const { keyId, publicKey } = issueRsaKey();
+        res.end(facePage(next, "", req.headers.host || "", remember, issueFaceChallenge(name), keyId, publicKey, methods));
+      } else if (methods.length === 1 && methods[0] === "voice") {
+        const { keyId, publicKey } = issueRsaKey();
+        const ch = issueVoiceChallenge(name);
+        res.end(voicePage(next, "", req.headers.host || "", remember, ch.nonce, ch.digits, keyId, publicKey, methods));
+      } else {
+        res.end(chooserPage(next, methods, remember, req.headers.host || ""));
+      }
+      return;
     });
     return;
   }
 
-  // TOTP second-factor step
+  // 2FA step page: GET renders（chooser / 单方法直达，免密码复验路径也走这）
+  if (url.pathname === BASE + "/login/2fa" && req.method === "GET") {
+    const next = url.searchParams.get("next") || DEPLOY || "/";
+    const m = url.searchParams.get("m") || "";
+    const remember = url.searchParams.get("r") === "1";
+    const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
+      .find((c) => c.startsWith(COOKIE2 + "="));
+    const sess2 = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
+    if (!sess2) {
+      // 票据缺失/过期 → 回密码页（正常登录流程从 POST /login 直出方法页，
+      // 不经此分支）
+      res.writeHead(302, { Location: BASE + "/login?next=" + encodeURIComponent(next) });
+      res.end();
+      return;
+    }
+    const users = loadUsers();
+    const methods = availableMethods(sess2.name, users[sess2.name]);
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    if (!methods.length) {
+      res.end(chooserPage(next, [], remember, req.headers.host || "", "2FA is required, but this account has no 2FA method enrolled."));
+      return;
+    }
+    const method = methods.includes(m) ? m : (methods.length === 1 ? methods[0] : "");
+    if (method === "totp") {
+      res.end(totpPage(next, "", req.headers.host || "", remember));
+    } else if (method === "face") {
+      const { keyId, publicKey } = issueRsaKey();
+      res.end(facePage(next, "", req.headers.host || "", remember, issueFaceChallenge(sess2.name), keyId, publicKey, methods));
+    } else if (method === "voice") {
+      const { keyId, publicKey } = issueRsaKey();
+      const ch = issueVoiceChallenge(sess2.name);
+      res.end(voicePage(next, "", req.headers.host || "", remember, ch.nonce, ch.digits, keyId, publicKey, methods));
+    } else {
+      // 多方法未选 → chooser（附带零方法时的「立即设置」入口）
+      const em = (!methods.length && FACE_ENABLED) || (!methods.length && VOICE_ENABLED)
+        ? (FACE_ENABLED && VOICE_ENABLED ? ["face", "voice"] : FACE_ENABLED ? ["face"] : ["voice"]) : [];
+      res.end(chooserPage(next, methods, remember, req.headers.host || "", "", em));
+    }
+    return;
+  }
+
+  // 2FA verify: POST /login/2fa，body 带 method 区分（缺省 totp，向后兼容）
   if (url.pathname === BASE + "/login/2fa" && req.method === "POST") {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       const params = new URLSearchParams(body);
       const next = params.get("next") || DEPLOY || "/";
+      const method = params.get("method") || "totp";
+      const remember = params.get("remember") === "1";
       const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
         .find((c) => c.startsWith(COOKIE2 + "="));
       const sess2 = cookie ? verifySession(cookie.slice(COOKIE2.length + 1), COOKIE2) : null;
@@ -920,17 +1949,376 @@ createServer((req, res) => {
         res.end(totpPage(next, "Session expired — please sign in again.", req.headers.host || ""));
         return;
       }
+      if (method === "face") {
+        // 人脸第二因子（biometric-2fa-design.md §7.3/§7.4）：一次性 RSA 解密
+        // payload → nonce 单次消费 → 向量形状校验 → 阈值匹配（L2 距离）。
+        // 眨眼断言是客户端证据（v1 已知残余风险，锁定更严：3 次/15min）。
+        if (!FACE_ENABLED) {
+          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(chooserPage(next, availableMethods(name, loadUsers()[name]), remember, req.headers.host || "", "Face verification is not enabled on this portal."));
+          return;
+        }
+        const bannedUntil = banState("bio-face:" + name, ip);
+        if (bannedUntil > Date.now()) {
+          res.writeHead(429, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Retry-After": String(Math.ceil((bannedUntil - Date.now()) / 1000)),
+          });
+          const { keyId: k429, publicKey: p429 } = issueRsaKey();
+          res.end(facePage(next, "Too many failed attempts — face verification is temporarily locked.", req.headers.host || "", remember, issueFaceChallenge(name), k429, p429, ["face"]));
+          return;
+        }
+        const keyId = params.get("keyId") || "";
+        const wrapped = params.get("wrapped") || "";
+        const iv = params.get("iv") || "";
+        const dataB64 = params.get("data") || "";
+        let data = null;
+        if (wrapped && iv && dataB64 && keyId) {
+          try {
+            data = JSON.parse(decryptHybrid(keyId, wrapped, iv, dataB64));
+          } catch {
+            res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+            const { keyId: k1, publicKey: p1 } = issueRsaKey();
+            res.end(facePage(next, "Session expired — please reload and try again.", req.headers.host || "", remember, issueFaceChallenge(name), k1, p1, ["face"]));
+            return;
+          }
+        }
+        cleanupFaceChallenges();
+        const ch = data && typeof data.nonce === "string" ? faceChallenges.get(data.nonce) : undefined;
+        if (data && typeof data.nonce === "string") faceChallenges.delete(data.nonce);
+        const vectors = data && Array.isArray(data.vectors) ? data.vectors : [];
+        const vecOk =
+          ch && ch.name === name && ch.expires > Date.now() && data && data.blinked === true &&
+          vectors.length >= 1 && vectors.length <= 5 &&
+          vectors.every((v) => Array.isArray(v) && v.length === 128 && v.every((x) => typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1.0001));
+        const tplRec = loadTemplates()[name];
+        const face = tplRec && tplRec.face && tplRec.face.status === "active" ? tplRec.face : null;
+        const th = (face && face.threshold) || FACE_THRESHOLD;
+        const d = vecOk && face ? faceDistance(face.vectors, vectors) : Infinity;
+        if (!vecOk || !face || d > th) {
+          recordFailure("bio-face:" + name, ip, 3); // 比密码更严：3 次封禁 15min
+          res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+          const { keyId: k2, publicKey: p2 } = issueRsaKey();
+          res.end(facePage(
+            next,
+            !vecOk ? "Verification failed — blink at the camera and retry." : !face ? "No active face template for this account." : "Face not recognized (distance " + d.toFixed(2) + " > " + th + ").",
+            req.headers.host || "", remember, issueFaceChallenge(name), k2, p2, availableMethods(name, loadUsers()[name]),
+          ));
+          return;
+        }
+        clearFailures("bio-face:" + name, ip);
+        setSession(res, name, next, COOKIE, remember ? REMEMBER_TTL_MS : TTL_MS, Date.now());
+        return;
+      }
+      if (method === "voice") {
+        // 语音第二因子（§8.3）：nonce 单次消费 + 数字挑战 + 78-d 向量余弦匹配。
+        // 注：不校验读出内容（v1 限制，§8.4）——锁定 3 次/15min 与 face 同严。
+        if (!VOICE_ENABLED) {
+          res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+          res.end(chooserPage(next, availableMethods(name, loadUsers()[name]), remember, req.headers.host || "", "Voice verification is not enabled on this portal."));
+          return;
+        }
+        const bannedUntil = banState("bio-voice:" + name, ip);
+        if (bannedUntil > Date.now()) {
+          res.writeHead(429, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Retry-After": String(Math.ceil((bannedUntil - Date.now()) / 1000)),
+          });
+          const { keyId: k429, publicKey: p429 } = issueRsaKey();
+          const ch429 = issueVoiceChallenge(name);
+          res.end(voicePage(next, "Too many failed attempts — voice verification is temporarily locked.", req.headers.host || "", remember, ch429.nonce, ch429.digits, k429, p429, ["voice"]));
+          return;
+        }
+        const keyId = params.get("keyId") || "";
+        const wrapped = params.get("wrapped") || "";
+        const iv = params.get("iv") || "";
+        const dataB64 = params.get("data") || "";
+        let data = null;
+        if (wrapped && iv && dataB64 && keyId) {
+          try {
+            data = JSON.parse(decryptHybrid(keyId, wrapped, iv, dataB64));
+          } catch {
+            res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+            const { keyId: k1, publicKey: p1 } = issueRsaKey();
+            const ch1 = issueVoiceChallenge(name);
+            res.end(voicePage(next, "Session expired — please reload and try again.", req.headers.host || "", remember, ch1.nonce, ch1.digits, k1, p1, ["voice"]));
+            return;
+          }
+        }
+        cleanupVoiceChallenges();
+        const ch = data && typeof data.nonce === "string" ? voiceChallenges.get(data.nonce) : undefined;
+        if (data && typeof data.nonce === "string") voiceChallenges.delete(data.nonce);
+        const vecOk = ch && ch.name === name && ch.expires > Date.now() && validVoiceVec(data ? data.vector : null);
+        const tplRec = loadTemplates()[name];
+        const voice = tplRec && tplRec.voice && tplRec.voice.status === "active" ? tplRec.voice : null;
+        const th = (voice && voice.threshold) || VOICE_THRESHOLD;
+        const sim = vecOk && voice ? voiceSimilarity(voice.vectors, [data.vector]) : -1;
+        if (!vecOk || !voice || sim < th) {
+          recordFailure("bio-voice:" + name, ip, 3);
+          res.writeHead(401, { "Content-Type": "text/html; charset=utf-8" });
+          const { keyId: k2, publicKey: p2 } = issueRsaKey();
+          const ch2 = issueVoiceChallenge(name);
+          res.end(voicePage(
+            next,
+            !vecOk ? "Verification failed — record the digits and retry." : !voice ? "No active voice template for this account." : "Voice not recognized (similarity " + sim.toFixed(2) + " < " + th + ").",
+            req.headers.host || "", remember, ch2.nonce, ch2.digits, k2, p2, availableMethods(name, loadUsers()[name]),
+          ));
+          return;
+        }
+        clearFailures("bio-voice:" + name, ip);
+        setSession(res, name, next, COOKIE, remember ? REMEMBER_TTL_MS : TTL_MS, Date.now());
+        return;
+      }
+      if (method !== "totp") {
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(chooserPage(next, availableMethods(name, loadUsers()[name]), remember, req.headers.host || "", "Unknown 2FA method."));
+        return;
+      }
       const users = loadUsers();
       const rec = users[name];
       if (!rec || !rec.totpSecret || !verifyTotp(rec.totpSecret, params.get("code") || "")) {
         recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(totpPage(next, "Invalid code.", req.headers.host || ""));
+        res.end(totpPage(next, "Invalid code.", req.headers.host || "", remember));
         return;
       }
       clearFailures(name, ip);
-      setSession(res, name, next, COOKIE, TTL_MS, true); // 2FA 完成的会话
+      // 2FA 完成会话：remember → 365d（可配）否则默认 TTL；twoFactorAt=now
+      // 供探针按 GRACE_MS 复验（免密码直跳 2FA 页的周期也由此重新起算）
+      setSession(res, name, next, COOKIE, remember ? REMEMBER_TTL_MS : TTL_MS, Date.now());
     });
+    return;
+  }
+
+  // —— 生物识别注册采集页（§9.1 两条路径）————————————
+  // GET /enroll?m=face|voice[&t=<票>][&next=][&r=1]
+  //   票路径：父进程 biometricEnrollTicket 的 HMAC 票（预设置，管理 UI 开链接）
+  //   cookie 路径：登录中 2FA 票据 + **零方法账户**（登录时自助注册；已有方法
+  //   者必须先过既有因子——防密码窃贼自助加因子），并续签 5 分钟给采集留时间
+  function enrollAuth(url2) {
+    const t = url2.searchParams.get("t") || "";
+    if (t) {
+      const d = verifyEnrollTicket(t);
+      if (!d) return null;
+      return { via: "ticket", name: d.n, method: d.m, token: t };
+    }
+    const c = (req.headers.cookie || "").split(";").map((x) => x.trim()).find((x) => x.startsWith(COOKIE2 + "="));
+    const s2 = c ? verifySession(c.slice(COOKIE2.length + 1), COOKIE2) : null;
+    if (!s2) return null;
+    return { via: "cookie", name: s2.name, method: "", token: "" };
+  }
+
+  if (url.pathname === BASE + "/enroll" && req.method === "GET") {
+    const next = url.searchParams.get("next") || DEPLOY || "/";
+    const remember = url.searchParams.get("r") === "1";
+    const m = url.searchParams.get("m") || "";
+    const auth = enrollAuth(url);
+    if (!auth) {
+      res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(chooserPage(next, [], remember, req.headers.host || "", "Enrollment link expired — start again from sign-in."));
+      return;
+    }
+    const method = auth.via === "ticket" ? auth.method : m;
+    const enabled = method === "face" ? FACE_ENABLED : method === "voice" ? VOICE_ENABLED : false;
+    if (!enabled) {
+      res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(chooserPage(next, [], remember, req.headers.host || "", method + " enrollment is not enabled on this portal."));
+      return;
+    }
+    // cookie 路径只允许零方法账户（否则拒绝，引导走既有因子）
+    if (auth.via === "cookie") {
+      const methods = availableMethods(auth.name, loadUsers()[auth.name]);
+      if (methods.length) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(chooserPage(next, methods, remember, req.headers.host || "", "This account already has 2FA — verify with an existing method first."));
+        return;
+      }
+      // 续签票据（采集耗时长于 5 分钟初始票据）
+      const tmp = issueSession(auth.name, COOKIE2, 5 * 60_000);
+      res.setHeader("Set-Cookie", COOKIE2 + "=" + tmp + "; Path=/; HttpOnly; SameSite=Strict" + (SECURE ? "; Secure" : ""));
+    }
+    const { keyId, publicKey } = issueRsaKey();
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    // 切换方法链接：把全部启用方法传给页面（无摄像头/麦克风时回 chooser 换一种）
+    const alt = (FACE_ENABLED && VOICE_ENABLED ? ["face", "voice"] : FACE_ENABLED ? ["face"] : VOICE_ENABLED ? ["voice"] : []);
+    if (method === "face") {
+      const extra = auth.token ? '<input type="hidden" name="t" value="' + escapeAttr(auth.token) + '">' : "";
+      res.end(facePage(next, "", req.headers.host || "", remember, issueFaceChallenge(auth.name), keyId, publicKey, alt, BASE + "/enroll", extra));
+    } else {
+      const ch1 = issueVoiceChallenge(auth.name);
+      res.end(enrollVoicePage(next, "", req.headers.host || "", remember, keyId, publicKey, ch1, auth.via === "ticket" ? auth.token : "", BASE + "/enroll", alt));
+    }
+    return;
+  }
+
+  // 注册页后续轮次的挑战（voice 第 2/3 轮；cookie 或票任一鉴权）
+  if (url.pathname === BASE + "/enroll/challenge" && req.method === "GET") {
+    const auth = enrollAuth(url);
+    if (!auth) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "expired" }));
+      return;
+    }
+    const ch = issueVoiceChallenge(auth.name);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ nonce: ch.nonce, digits: ch.digits }));
+    return;
+  }
+
+  // POST /enroll：混合加密载荷写入 active 模板（现场采集 = 天然首验：样本即
+  // 模板本身，质量门代替 first-verify）。cookie 路径成功即登录（.2fa 会话）。
+  if (url.pathname === BASE + "/enroll" && req.method === "POST") {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const params = new URLSearchParams(body);
+      const next = params.get("next") || DEPLOY || "/";
+      const remember = params.get("remember") === "1";
+      const method = params.get("method") || "";
+      const t = params.get("t") || "";
+      let auth = null;
+      if (t) {
+        const d = verifyEnrollTicket(t);
+        if (d) auth = { via: "ticket", name: d.n, method: d.m, token: t };
+      } else {
+        const c = (req.headers.cookie || "").split(";").map((x) => x.trim()).find((x) => x.startsWith(COOKIE2 + "="));
+        const s2 = c ? verifySession(c.slice(COOKIE2.length + 1), COOKIE2) : null;
+        if (s2) auth = { via: "cookie", name: s2.name, method: "", token: "" };
+      }
+      if (!auth || (auth.via === "ticket" && auth.method !== method)) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(chooserPage(next, [], remember, req.headers.host || "", "Enrollment link expired — start again."));
+        return;
+      }
+      if (auth.via === "cookie" && availableMethods(auth.name, loadUsers()[auth.name]).length) {
+        res.writeHead(403, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(chooserPage(next, [], remember, req.headers.host || "", "This account already has 2FA — verify with an existing method first."));
+        return;
+      }
+      const { keyId, publicKey } = issueRsaKey();
+      const fail = (msg, m) => {
+        res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+        const alt = (FACE_ENABLED && VOICE_ENABLED ? ["face", "voice"] : FACE_ENABLED ? ["face"] : VOICE_ENABLED ? ["voice"] : []);
+        if (m === "face") {
+          res.end(facePage(next, msg, req.headers.host || "", remember, issueFaceChallenge(auth.name), keyId, publicKey, alt, BASE + "/enroll", auth.token ? '<input type="hidden" name="t" value="' + escapeAttr(auth.token) + '">' : ""));
+        } else {
+          const ch1 = issueVoiceChallenge(auth.name);
+          res.end(enrollVoicePage(next, msg, req.headers.host || "", remember, keyId, publicKey, ch1, auth.via === "ticket" ? auth.token : "", BASE + "/enroll", alt));
+        }
+      };
+      // 解密载荷（混合加密，§7.2）
+      const dk = params.get("keyId") || "";
+      const dw = params.get("wrapped") || "";
+      const di = params.get("iv") || "";
+      const dd = params.get("data") || "";
+      let data = null;
+      try {
+        if (dk && dw && di && dd) data = JSON.parse(decryptHybrid(dk, dw, di, dd));
+      } catch {
+        data = null;
+      }
+      if (!data) {
+        fail("Session expired — please reload and try again.", method);
+        return;
+      }
+      const name = auth.name;
+      const tpl = loadTemplates();
+      if (method === "face") {
+        cleanupFaceChallenges();
+        const ch = typeof data.nonce === "string" ? faceChallenges.get(data.nonce) : undefined;
+        if (typeof data.nonce === "string") faceChallenges.delete(data.nonce);
+        const vectors = Array.isArray(data.vectors) ? data.vectors : [];
+        const ok = ch && ch.name === name && ch.expires > Date.now() && data.blinked === true &&
+          vectors.length >= 3 && vectors.length <= 5 &&
+          vectors.every(function (v) { return Array.isArray(v) && v.length === 128 && v.every(function (x) { return typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1.0001; }); });
+        if (!ok) {
+          fail("Capture failed — blink at the camera and retry.", "face");
+          return;
+        }
+        // 质量门：样本两两距离 ≤ 阈值（同一次采集应高度一致）
+        let fq = 0;
+        for (let i = 0; i < vectors.length; i++)
+          for (let j = i + 1; j < vectors.length; j++) {
+            const d = faceDistance([vectors[i]], [vectors[j]]);
+            if (d > fq) fq = d;
+          }
+        if (fq > FACE_THRESHOLD) {
+          fail("Samples inconsistent — recapture in better light.", "face");
+          return;
+        }
+        tpl[name] = tpl[name] || {};
+        tpl[name].face = { status: "active", vectors, threshold: FACE_THRESHOLD, enrolledAt: Date.now() };
+        writeTemplates(tpl);
+      } else if (method === "voice") {
+        cleanupVoiceChallenges();
+        const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+        if (rounds.length !== 3 || !rounds.every(function (r) { return r && typeof r.nonce === "string" && validVoiceVec(r.vector); })) {
+          fail("Capture failed — record all 3 readings.", "voice");
+          return;
+        }
+        for (const r of rounds) {
+          const ch = voiceChallenges.get(r.nonce);
+          voiceChallenges.delete(r.nonce);
+          if (!ch || ch.name !== name || ch.expires < Date.now()) {
+            fail("Challenge expired — start over.", "voice");
+            return;
+          }
+        }
+        const vecs = rounds.map(function (r) { return r.vector; });
+        const q = voiceEnrollQuality(vecs);
+        if (q < 0.85) {
+          fail("Readings inconsistent (" + q.toFixed(2) + ") — recapture in a quieter place.", "voice");
+          return;
+        }
+        tpl[name] = tpl[name] || {};
+        tpl[name].voice = { status: "active", vectors: vecs, threshold: VOICE_THRESHOLD, enrolledAt: Date.now() };
+        writeTemplates(tpl);
+      } else {
+        fail("Unknown method.", method);
+        return;
+      }
+      if (auth.via === "ticket") usedTickets.set(auth.token, Date.now() + 600_000);
+      if (auth.via === "cookie") {
+        // 登录中自助注册：直接完成 2FA 会话
+        setSession(res, name, next, COOKIE, remember ? REMEMBER_TTL_MS : TTL_MS, Date.now());
+      } else {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(enrollDonePage(method));
+      }
+    });
+    return;
+  }
+
+  // face 浏览器资产（白名单严格匹配，防穿越；版本化目录，可中等缓存）
+  if (url.pathname === BASE + "/assets/face-api.js" && req.method === "GET") {
+    try {
+      const buf = readFileSync(ASSETS_DIR + "/face-api.js");
+      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600" });
+      res.end(buf);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    }
+    return;
+  }
+  if (url.pathname.startsWith(BASE + "/assets/models/") && req.method === "GET") {
+    const f = url.pathname.slice((BASE + "/assets/models/").length);
+    if (!MODEL_FILES.includes(f)) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+      return;
+    }
+    try {
+      const buf = readFileSync(ASSETS_DIR + "/" + f);
+      res.writeHead(200, {
+        "Content-Type": f.endsWith(".json") ? "application/json" : "application/octet-stream",
+        "Cache-Control": "public, max-age=3600",
+      });
+      res.end(buf);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    }
     return;
   }
 

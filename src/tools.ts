@@ -17,7 +17,9 @@ import { execFileSync } from "child_process";
 import { platform, arch, tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync } from "fs";
-import { download as justgetDownload } from "justget";
+// justget 打包进单文件（src/vendor/justget/justget.mjs，scripts/build-justget.mjs 生成）——
+// 消除裸导入链（node-fetch 等）：宿主扩展 vendored 时 jiti 从宿主上下文解析裸说明符会失败。
+import { download as justgetDownload } from "./vendor/justget/justget.mjs";
 
 /**
  * Tool resolution + auto-download.

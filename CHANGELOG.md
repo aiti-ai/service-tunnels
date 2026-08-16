@@ -1,3 +1,23 @@
+## 0.3.41 (2026-08-16)
+
+- **feat: open-binding 高层 API（enroll/unenroll/enrolled）**——端口级登记/取消/查询，
+  数据源唯一为 binding 持久化（state.json），消除宿主侧第二登记文件的必要性。
+  - enroll(port, {serviceBasePath})：幂等登记 open vhost；serviceBasePath 传 undefined 保留现值、"" 清除、值覆盖
+  - unenroll(port)、enrolled() → [{port, serviceBasePath?}]
+
+## 0.3.40 (2026-08-16)
+
+- **fix(devDep)**: justget 移入 devDependencies（0.3.39 打包进 dist 后仅构建期需要；
+  缺失会导致全新 clone 后 `npm run build` 失败——build:justget 依赖 node_modules/justget）。
+  运行时仍零依赖。
+## 0.3.39 (2026-08-16)
+
+- **标准零运行时依赖**：justget 打包进单文件（`dist/vendor/justget/justget.mjs`，
+  `scripts/build-justget.mjs` 用 esbuild 生成）——消除 `justget` 裸导入及
+  node-fetch 等传递依赖链。宿主应用 vendored 本包（扩展目录、jiti 加载）时
+  不再依赖宿主 node_modules 解析裸说明符；正常 npm 安装也无需 justget。
+- **feat: 移除 `justget` 运行时依赖**（已打包），`package.json` 零 dependencies。
+
 ## 0.3.38 (2026-08-15)
 
 - **fix: transformResponse 注入路径剥离 accept-encoding**——pipe/forward 之前
@@ -54,6 +74,69 @@
 ## [Unreleased]
 
 ### Added
+- **portal 记住我（可信设备）+ 2FA 方法抽象（P0，biometric-2fa-design.md）**：
+  - 登录页勾选“记住我”→ 完整 2FA 后会话 TTL 7d → 365d（可配
+    `rememberMeTtlDays`；1FA 弱会话不延长）；
+  - **2FA 复验周期** `GRACE = max(rememberTtl/7, 1天)`（`twoFactorGraceDays`
+    可覆盖）：周期内探针直接放行；过期则免密码直跳 2FA 步骤页（会话仍
+    有效时）——cookie payload 的 `.2fa` 布尔升级为 `.2fa:<epochMs>` 时间戳，
+    探针按周期复验，nginx 侧零改动；
+  - **2FA 方法分发表**：`/login/2fa` 按 `method` 字段分发（缺省 totp，向后
+    兼容），多方法时出 chooser 选择页，零方法 + two_factor host 出引导
+    错误页（不再是无意义的 TOTP 输入框）；GET `/login/2fa` 渲染方法页
+    （免密码复验路径入口）；人脸/语音方法在 P1/P2 接入。
+  - portal 表单 schema 增 `sessionTtlDays` / `rememberMeTtlDays` /
+    `twoFactorGraceDays`。
+- **portal 人脸识别 2FA（P1，biometric-2fa-design.md §7）**：
+  - `biometrics: true | ["face"]` 启用（缺省关）；首次 `start()` 下载 ~8.4MB
+    浏览器资产到 `cacheDir/bin/face-models/1.7.15/`（SHA-256 校验；源序：
+    Gitee 自有镜像 justdb-mirrors/face-models → jsdelivr → unpkg；
+    `SERVICE_TUNNELS_FACE_MIRROR` 可覆盖），prepare 保持离线；
+  - 登录页客户端提取 128-d 向量（face-api.js + 3 模型由本站 assets 白名单
+    路由提供），眨眼活体断言（EAR），**混合加密**上传（一次性 AES-256-GCM
+    载荷 + RSA-OAEP 包裹密钥——向量远超 RSA-OAEP 190B 上限）；
+  - 服务端：挑战 nonce 单次消费（5min TTL）、向量形状校验、L2 距离阈值
+    匹配（缺省 0.6，`biometricThresholds.face` / per-user 可调）；
+  - 管理 API：`BiometricManager`（biometricStatus / biometricEnrollFace /
+    biometricVerifyFace / biometricDisable）——**首验门**（pending → 验证
+    成功才 active，对齐 totpPending）；removeUser 联动清理模板；
+  - 锁定更严：`bio-face:<name>` 独立计数，3 次/15min 指数封禁；
+  - 接线：`st.auth.biometric*` 门面 + daemon IPC `auth.biometric.*` +
+    `/api/biometric-enroll-face|verify-face|disable` + user-list 增
+    biometrics 列 + i18n（en/zh）+ portal 表单 schema 增 `biometrics` /
+    `biometricThresholds.face`。
+- **portal 语音识别 2FA + 两条注册路径（P2，biometric-2fa-design.md §8/§9.1）**：
+  - 浏览器 MFCC 提取（radix-2 FFT + mel 滤波器组，页面内纯 JS 零依赖）
+    → 78-d 向量（13 MFCC × Δ+ΔΔ × mean+std）→ 混合加密上传；随机 6 位
+    数字挑战 + nonce 单次消费；余弦相似度阈值（缺省 0.90）；
+  - **注册路径 A（预先设置）**：`biometricEnrollTicket`（HMAC 票，10min、
+    单次使用）→ portal `/enroll` 采集页（facade `biometricEnrollUrl` 直接
+    拼好 URL，管理 UI 开窗即用）；
+  - **注册路径 B（登录时自助）**：two_factor + 零方法账户 → 2FA 选择页
+    "立即设置"入口 → 采集即注册 → 完成即登录；仅零方法账户开放（已有
+    方法者须先过既有因子）；采集耗时长则续签 2FA 票据；
+  - 注册质量门：样本两两余弦 ≥ 0.85（噪声/他人代录拒绝）；face 同理
+    （样本两两 L2 ≤ 阈值）；
+  - 管理 API：`biometricEnrollVoice` / `biometricVerifyVoice`（API 直连
+    仍走 pending 首验门）；voice 锁定与 face 同严（3 次/15min）；
+  - 接线：facade/daemon IPC/ui-api 增 voice + enroll-ticket 端点；内置
+    UI 用户表增 bio 列（face/voice ●○）与 face/voice on/off 按钮
+    （on = 开 portal 采集页）。
+  - 人脸注册同样接入两条路径（facePage 参数化 action，/enroll 复用）。
+- **fix（生物识别完成度审核，2026-08-16）**：
+  - 内置 UI 用户表 `bioDisable` 调用不存在的 `loadUsers` → 改为
+    `loadSiteBlock(site,'users')`（点击后即时刷新）；
+  - 子进程写 templates.json 补 chmod 600（与父进程一致，原子 tmp+rename）；
+  - 注册票消费表改 Map+过期清扫（防无界增长）；
+  - `enrollVoicePage` 补"切换方法"链接（无麦克风时不困死在采集页），
+    face/voice 采集页把全部启用方法传给 altMethods；
+  - portal validate() 校验 biometrics 数组/阈值取值；facade
+    `biometricEnrollUrl` 未启动时显式报错（不再产出死 URL）；
+  - CLI 增 `auth biometric status|disable|enroll-url`（采集需浏览器，
+    CLI 只给入口）；
+  - 新增 MFCC 黄金测试（§15：正弦/白噪声合成信号，验证 78-d 维度、
+    确定性、同源>异频>白噪声的区分度——mean+std MFCC 对噪声敏感是
+    已知 FRR 特性，阈值取相对单调性断言）。
 - **tunnel 静态响应注入（nginx 网关路径）**：`createServiceTunnels({ inject })` /
   `st.expose(port, { inject })` / CLI `--inject-html <fragment>` [--inject-position
   head|prepend]。浏览器 → 隧道边缘 → nginx 网关 → 应用的流量不经过 node proxy，

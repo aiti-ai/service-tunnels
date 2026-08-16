@@ -385,8 +385,11 @@ export class ProxyManager {
   ): Promise<ProxySiteBackend | null> {
     const log = this.#opts.log ?? (() => {});
     if (site === undefined) {
-      // open form: needs an open binding
-      return this.#bindings.has(`${port}:`) ? {} : null;
+      // open form: needs an open binding;携带 binding 的 serviceBasePath——
+      // open vhost 也可以部署在前缀下(如 vite base=/dev/:公共 URL 带 deployBasePath,
+      // 服务自身也 serve 在同一前缀),forward 映射剥前缀后要接回。
+      const b = this.#bindings.get(`${port}:`);
+      return b ? { serviceBasePath: b.serviceBasePath } : null;
     }
     const binding = label !== undefined
       ? this.#bindings.get(`${port}:${label}`)

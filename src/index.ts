@@ -227,6 +227,21 @@ export interface ServiceTunnels {
     restore(bindings: import("./proxy-manager.ts").ProxyBinding[]): void;
     /** Persisted snapshot for state.json. */
     persisted(): import("./proxy-manager.ts").ProxyBinding[];
+    /**
+     * Open-binding enrollment（高层便捷 API：port 级「登记/取消」，数据源唯一为
+     * binding 本身——无需调用方自存任何登记文件）。
+     *
+     * enroll(port, {serviceBasePath}) — 登记/更新 open vhost（label=""、site="default"、
+     *   无认证）：vhost <port>.<suffix> 可达；serviceBasePath 为该端口真实服务的
+     *   base path（转发剥部署前缀后接回，如 vite base=/dev/）——传 undefined 保留
+     *   现值，传 "" 清除，传值则覆盖。幂等（同 port 覆盖写）。
+     * unenroll(port) — 取消该端口的 open 登记（同 port 其他 labeled binding 不受影响）。
+     * enrolled() — 全部 open 登记：[{port, serviceBasePath}]（serviceBasePath 缺省为
+     *   undefined——继承全局的 binding 不返回该字段）。
+     */
+    enroll(port: number, opts?: { serviceBasePath?: string }): void;
+    unenroll(port: number): void;
+    enrolled(): Array<{ port: number; serviceBasePath?: string }>;
   };
   tunnels: {
     /** Declarative configs from configDir/tunnels.json. */
@@ -330,6 +345,24 @@ export interface ServiceTunnels {
     totpStatus(name: string, provider?: string, site?: string): Promise<{ enrolled: boolean; pending: boolean }>;
     /** Activate a pending TOTP enrollment with the user's first code. */
     totpActivate(name: string, code: string, provider?: string, site?: string): Promise<{ activated: boolean }>;
+    /** Provider types exposing biometric 2FA management (portal，P1: face). */
+    biometricProviders(): string[];
+    /** 该用户各生物方法注册态（active 才可登录使用）。 */
+    biometricStatus(name: string, provider?: string, site?: string): Promise<{ face: boolean; voice: boolean }>;
+    /** 注册人脸模板（管理 UI 浏览器采集 128-d 描述子）→ pending，首验转正。 */
+    biometricEnrollFace(name: string, samples: number[][], provider?: string, site?: string): Promise<{ pending: boolean }>;
+    /** 验证人脸向量（pending 首验门）；distance = 两两 L2 距离最小值。 */
+    biometricVerifyFace(name: string, vectors: number[][], provider?: string, site?: string): Promise<{ matched: boolean; distance: number }>;
+    /** 注册语音模板（3 次数字串朗读 → 78-d MFCC 向量；质量门后 pending）。 */
+    biometricEnrollVoice(name: string, utterances: number[][], provider?: string, site?: string): Promise<{ pending: boolean }>;
+    /** 验证语音向量（pending 首验门）；similarity = 两两余弦最大值。 */
+    biometricVerifyVoice(name: string, vectors: number[][], provider?: string, site?: string): Promise<{ matched: boolean; similarity: number }>;
+    /** portal /enroll 采集页一次性注册票（预设置路径；管理 UI 拼采集页 URL）。 */
+    biometricEnrollTicket(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<{ token: string; method: string; expiresInMs: number }>;
+    /** 签票 + 本地采集页完整 URL（管理 UI 直接开窗；预设置路径）。 */
+    biometricEnrollUrl(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<{ token: string; method: string; expiresInMs: number; url: string }>;
+    /** 移除生物模板（P1: face）。 */
+    biometricDisable(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<void>;
     /** Provider types with local token stores (e.g. ["token"]). */
     tokenManagers(): string[];
     /**
@@ -705,6 +738,26 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
       removeBinding: (port: number, label: string) => proxy.removeBinding(port, label),
       restore: (bindings: ProxyBinding[]) => proxy.restore(bindings),
       persisted: () => proxy.persisted(),
+      // Open-binding 高层 API（数据源唯一为 binding 持久化）
+      enroll: (port: number, opts = {}) => {
+        const existing = proxy.bindings().find((b) => b.port === port && b.label === "");
+        const serviceBasePath = opts.serviceBasePath !== undefined
+          ? (opts.serviceBasePath === "" ? undefined : opts.serviceBasePath)
+          : existing?.serviceBasePath;
+        proxy.addBinding({
+          port,
+          label: "",
+          site: "default",
+          provider: "",
+          ...(serviceBasePath !== undefined ? { serviceBasePath } : {}),
+        });
+      },
+      unenroll: (port: number) => {
+        proxy.removeBinding(port, "");
+      },
+      enrolled: () => proxy.bindings()
+        .filter((b) => b.label === "" && b.site === "default" && b.provider === "")
+        .map((b) => ({ port: b.port, ...(b.serviceBasePath !== undefined ? { serviceBasePath: b.serviceBasePath } : {}) })),
     },
     tunnels: (() => {
       const persistState = () => {
@@ -815,6 +868,45 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
             totpActivate(n: string, code: string): Promise<{ activated: boolean }>;
           };
           return mgr.totpActivate(name, code);
+        },
+        biometricProviders: () => registry.biometricProviders(),
+        biometricStatus: async (name: string, provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricStatus(name);
+        },
+        biometricEnrollFace: async (name: string, samples: number[][], provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricEnrollFace(name, samples);
+        },
+        biometricVerifyFace: async (name: string, vectors: number[][], provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricVerifyFace(name, vectors);
+        },
+        biometricEnrollVoice: async (name: string, utterances: number[][], provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricEnrollVoice(name, utterances);
+        },
+        biometricVerifyVoice: async (name: string, vectors: number[][], provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricVerifyVoice(name, vectors);
+        },
+        biometricEnrollTicket: async (name: string, method: "face" | "voice", provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          return mgr.biometricEnrollTicket(name, method);
+        },
+        biometricEnrollUrl: async (name: string, method: "face" | "voice", provider?: string, site?: string) => {
+          // 签票 + 拼本地采集页 URL（127.0.0.1:port + basePath）；管理 UI 直接开窗。
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as
+            import("./auth-provider.ts").BiometricManager & { port: number; basePath: string };
+          if (!mgr.port || mgr.port <= 0) {
+            throw new Error(`portal provider not running — start an expose with portal auth first`);
+          }
+          const t = await mgr.biometricEnrollTicket(name, method);
+          return { ...t, url: `http://127.0.0.1:${mgr.port}${mgr.basePath}/enroll?m=${method}&t=${encodeURIComponent(t.token)}` };
+        },
+        biometricDisable: async (name: string, method: "face" | "voice", provider?: string, site?: string) => {
+          const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
+          await mgr.biometricDisable(name, method);
         },
         providerOrder: () => {
           const KNOWN = ["authelia", "portal", "basic", "token", "oauth2-proxy"];

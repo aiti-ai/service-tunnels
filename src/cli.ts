@@ -32,7 +32,7 @@ function usage(lang: Lang = "en"): void {
   expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
   ssh domain list | create <name> --forward-port <p> [--ssh-port <p>] [--reverse-port <p>] [--host <h>] |
                remove <name> | key list|add|generate|remove | host fingerprints [--domain <d>] [--public-key <k>] [--fingerprint <fp>] [--type ed25519|rsa|ecdsa] [--bits <n>] [--count <n>] [--comment <c>]
-  auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...]
+  auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...] | auth biometric status|disable|enroll-url <user> [--site <s>] [--method face|voice] [--provider portal]
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
@@ -965,6 +965,21 @@ async function main(): Promise<void> {
         jsonOut({ disabled: cmd[3], site });
       } else if (op === "totp" && cmd[2] === "status") {
         jsonOut({ site, ...(await st.auth.totpStatus(cmd[3] ?? "", args.provider, site)) });
+      } else if (op === "biometric" && cmd[2] === "status") {
+        jsonOut({ site, ...(await st.auth.biometricStatus(cmd[3] ?? "", args.provider, site)) });
+      } else if (op === "biometric" && cmd[2] === "disable") {
+        await st.auth.biometricDisable(cmd[3] ?? "", (args.method as "face" | "voice" | undefined) ?? "face", args.provider, site);
+        jsonOut({ disabled: cmd[3], method: args.method ?? "face", site });
+      } else if (op === "biometric" && cmd[2] === "enroll-url") {
+        // 预设置：签票 + 打印本地采集页 URL（浏览器打开即可采集；
+        // enroll 本身需要摄像头/麦克风，CLI 只给入口）
+        const name = cmd[3];
+        const method = (args.method as "face" | "voice" | undefined) ?? "face";
+        if (!name) {
+          console.error("auth biometric enroll-url <name> [--method face|voice] [--provider portal] [--site <s>]");
+          process.exit(2);
+        }
+        jsonOut({ site, ...(await st.auth.biometricEnrollUrl(name, method, args.provider, site)) });
       } else if (op === "totp" && cmd[2] === "code") {
         // 不借助手机 app 生成当前 TOTP 验证码:从用户记录读 secret 或 --secret 直给
         const name = cmd[3] ?? "";

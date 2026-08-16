@@ -173,6 +173,8 @@ export interface AuthUser {
   email?: string;
   /** 2FA enrolled（UI 装配时填充）。 */
   totp?: boolean;
+  /** 生物识别 2FA 注册态（UI 装配时填充；P1: face，P2: voice）。 */
+  biometrics?: { face: boolean; voice: boolean };
 }
 
 /**
@@ -228,6 +230,37 @@ export interface TokenManager {
 
 export function isTokenManager(p: AuthProvider): p is AuthProvider & TokenManager {
   return typeof (p as unknown as TokenManager).listTokens === "function";
+}
+
+/**
+ * Optional capability: provider supports biometric 2FA (P1: face；voice P2
+ * ——接口先收窄到 face，P2 再扩展 enroll/verify voice 方法)。Detect via
+ * `isBiometricManager` — providers without it don't appear in biometric
+ * management listings. 向量只在注册/验证时过手，永不落盘原始媒体
+ * （biometric-2fa-design.md §9）。
+ */
+export interface BiometricManager {
+  /** 该用户各方法的注册态（active 才可登录使用）。 */
+  biometricStatus(name: string): Promise<{ face: boolean; voice: boolean }>;
+  /** 注册人脸模板（管理 UI 浏览器采集的 128-d 描述子样本）：写入 pending，
+   *  首验成功（biometricVerifyFace）才转 active——对齐 totpPending 语义。 */
+  biometricEnrollFace(name: string, samples: number[][]): Promise<{ pending: boolean }>;
+  /** 验证人脸向量；pending 模板首验成功即转 active。distance = 两两 L2 距离
+   *  最小值（≤ threshold 视为同一人）。 */
+  biometricVerifyFace(name: string, vectors: number[][]): Promise<{ matched: boolean; distance: number }>;
+  /** 注册语音模板（3 次数字串朗读 → 78-d MFCC 向量；质量门通过后 pending）。 */
+  biometricEnrollVoice(name: string, utterances: number[][]): Promise<{ pending: boolean }>;
+  /** 验证语音向量（pending 首验门）；similarity = 两两余弦相似度最大值。 */
+  biometricVerifyVoice(name: string, vectors: number[][]): Promise<{ matched: boolean; similarity: number }>;
+  /** portal /enroll 采集页的一次性注册票（预先设置路径）：HMAC 签名、
+   *  10 分钟有效；管理 UI 用返回的 token 拼 portal 采集页 URL。 */
+  biometricEnrollTicket(name: string, method: "face" | "voice"): Promise<{ token: string; method: string; expiresInMs: number }>;
+  /** 移除某方法的模板（voice 在 P2 支持）。 */
+  biometricDisable(name: string, method: "face" | "voice"): Promise<void>;
+}
+
+export function isBiometricManager(p: AuthProvider): p is AuthProvider & BiometricManager {
+  return typeof (p as unknown as BiometricManager).biometricEnrollFace === "function";
 }
 
 export const ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";

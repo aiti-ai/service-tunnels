@@ -320,9 +320,10 @@ export function mapServicePath(url: string, deployBasePath: string, serviceBaseP
     if (p === deploy) p = "/";
     else if (p.startsWith(`${deploy}/`)) p = p.slice(deploy.length);
   }
-  // p 为 "/" 时直接返回 svc(不带尾斜杠)——否则 /dev + / → "/dev/" 触发
-  // Next 的 308 尾斜杠规范化 → 与剥前缀后再次映射形成死循环。
-  const out = svc ? (p === "/" ? svc : `${svc}${p.startsWith("/") ? p : `/${p}`}`) : (p || "/");
+  // p 为 "/" 时返回 svc + "/"(带尾斜杠)——base 应用(vite base=/dev/)对无尾斜杠的
+  // /dev 返回 404("did you mean to visit /dev/")。pi-web 已设
+  // skipTrailingSlashRedirect:true,Next 不再做 308 尾斜杠规范化,无死循环。
+  const out = svc ? (p === "/" ? `${svc}/` : `${svc}${p.startsWith("/") ? p : `/${p}`}`) : (p || "/");
   return out + query;
 }
 
@@ -338,6 +339,9 @@ export async function resolveServiceHost(
 
   const hostname = (input.host ?? "").split(":")[0]!.toLowerCase();
   const suffixSite = !match.label ? (ctx.resolveSuffixSite?.(match.suffix) ?? null) : null;
+  // open vhost 的 per-binding serviceBasePath(如 vite base=/dev/)——else 分支
+  // 填充,末尾 forward 映射优先用它。
+  let openBackend: ProxySiteBackend | null = null;
 
   if (match.label || suffixSite) {
     // labeled / site-domain vhost → site auth backend
@@ -358,9 +362,9 @@ export async function resolveServiceHost(
   } else {
     // open vhost → enrollment + optional global gates
     if (ctx.resolveSite) {
-      const backend = await ctx.resolveSite(match.port, undefined, undefined, hostname);
-      if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled` };
-      const via = await gateBackend(backend, input);
+      openBackend = await ctx.resolveSite(match.port, undefined, undefined, hostname);
+      if (!openBackend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled` };
+      const via = await gateBackend(openBackend, input);
       if (via) return via;
     }
     if (ctx.auth) {
@@ -377,7 +381,8 @@ export async function resolveServiceHost(
     }
   }
 
-  const path = mapServicePath(input.url ?? "/", ctx.basePath, ctx.serviceBasePath ?? "");
+  // open vhost 的 per-binding serviceBasePath(如 vite base=/dev/)优先于全局。
+  const path = mapServicePath(input.url ?? "/", ctx.basePath, openBackend?.serviceBasePath ?? ctx.serviceBasePath ?? "");
   return { kind: "forward", target: proxyTarget(match.port, path) };
 }
 

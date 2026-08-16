@@ -317,6 +317,7 @@ const methods = new Map<string, Handler>([
   }],
   ["auth.user.managers", () => authRegistry.userManagers()],
   ["auth.totp.providers", () => authRegistry.totpProviders()],
+  ["auth.biometric.providers", () => authRegistry.biometricProviders()],
   ["auth.none.allowed", () => resolveAllowAuthNone(configDir)],
 
   ["auth.totp.enroll", (params) => {
@@ -354,6 +355,48 @@ const methods = new Map<string, Handler>([
       totpStatus(name: string): Promise<{ enrolled: boolean }>;
     };
     return mgr.totpStatus(p.name ?? "");
+  }],
+  ["auth.biometric.status", (params) => {
+    const p = params as { name?: string; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricStatus(p.name ?? "");
+  }],
+  ["auth.biometric.enroll-face", (params) => {
+    const p = params as { name?: string; samples?: number[][]; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricEnrollFace(p.name ?? "", Array.isArray(p.samples) ? p.samples : []);
+  }],
+  ["auth.biometric.verify-face", (params) => {
+    const p = params as { name?: string; vectors?: number[][]; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricVerifyFace(p.name ?? "", Array.isArray(p.vectors) ? p.vectors : []);
+  }],
+  ["auth.biometric.enroll-voice", (params) => {
+    const p = params as { name?: string; utterances?: number[][]; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricEnrollVoice(p.name ?? "", Array.isArray(p.utterances) ? p.utterances : []);
+  }],
+  ["auth.biometric.verify-voice", (params) => {
+    const p = params as { name?: string; vectors?: number[][]; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricVerifyVoice(p.name ?? "", Array.isArray(p.vectors) ? p.vectors : []);
+  }],
+  ["auth.biometric.enroll-ticket", (params) => {
+    const p = params as { name?: string; method?: "face" | "voice"; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricEnrollTicket(p.name ?? "", p.method ?? "face");
+  }],
+  ["auth.biometric.disable", (params) => {
+    const p = params as { name?: string; method?: "face" | "voice"; provider?: string; site?: string };
+    validateUserName(p?.name);
+    const mgr = authRegistry.userManager(p.provider ?? "portal", p.site) as unknown as import("./auth-provider.ts").BiometricManager;
+    return mgr.biometricDisable(p.name ?? "", p.method ?? "face").then(() => ({ ok: true }));
   }],
   ["auth.user.list", (params) => {
     const p = (params as { provider?: string; site?: string } | undefined) ?? {};

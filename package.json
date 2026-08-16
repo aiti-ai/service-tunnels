@@ -1,6 +1,6 @@
 {
   "name": "service-tunnels",
-  "version": "0.3.38",
+  "version": "0.3.41",
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
@@ -29,10 +29,11 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/copy-vendor.mjs",
-    "prepack": "npm run build",
+    "build": "npm run build:justget && tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/copy-vendor.mjs",
+    "prepack": "npm run build:justget && npm run build",
     "test": "node --test --test-force-exit \"test/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:justget": "node scripts/build-justget.mjs"
   },
   "keywords": [
     "tunnel",
@@ -67,11 +68,10 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.1.2",
-    "typescript": "^5.8.3"
+    "esbuild": "^0.28.2",
+    "typescript": "^5.8.3",
+    "justget": "^0.1.6"
   },
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "dependencies": {
-    "justget": "^0.1.6"
-  }
+  "types": "./dist/index.d.ts"
 }

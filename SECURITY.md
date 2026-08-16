@@ -70,6 +70,9 @@
 | 12 | **登录防爆破**：按 IP 滑动窗口限流（5 次/分钟）+ 指数封禁 + 持久化 | `src/providers/portal.ts` |
 | 13 | **传输加密**：登录密码 RSA-OAEP 前端加密，明文不出浏览器 | `src/providers/portal.ts` |
 | 14 | **2FA**：TOTP（RFC 6238）可选启用，pending 激活机制防止 API 静默替换用户 2FA | `src/providers/portal.ts` |
+| 14a | **记住我（可信设备）**：勾选后会话 TTL 365d（可配）；2FA 复验周期 = TTL/7（最小 1 天）——过期免密码直跳 2FA 步骤页；1FA 弱会话不延长 | `src/providers/portal.ts` |
+| 14b | **人脸 2FA（P1）**：客户端提取 128-d 向量（原始画面不出设备）；**混合加密**上传（一次性 AES-256-GCM 载荷 + RSA-OAEP 包裹密钥）；挑战 nonce 单次消费；眨眼断言（客户端证据，v1 残余风险见 §3.7）；锁定更严（3 次/15min）；模板 pending 首验门 + 与用户删除联动；资产 SHA-256 校验、静态路由白名单 | `src/providers/portal.ts` |
+| 14c | **语音 2FA（P2）**：浏览器 MFCC 78-d 提取（纯 JS，零依赖）；随机数字挑战 + nonce 单次消费；注册质量门（样本两两余弦 ≥ 0.85）；与 face 同严锁定；**两条注册路径**：管理 HMAC 票（单次使用，10min）与登录时自助（仅零方法账户——已有方法者须先过既有因子） | `src/providers/portal.ts` |
 | 15 | **服务绑定**：portal/authelia/redis/nginx 全部只绑定 127.0.0.1 | `src/providers/portal.ts` 等 |
 | 16 | **凭据目录加固**：config/cache 目录 0600（递归 harden），密钥只在 configDir，**state.json 永不写入 secret** | `src/config.ts` `hardenDir`；`src/state.ts` |
 
@@ -130,6 +133,25 @@ EDR / 网关反隧道策略拦截——这与程序名无关，是用户显式�
 - **本项目尚未经过独立安全审计**。在审计完成前，请勿在不可信多租户环境
   中部署。
 
+### 3.7 生物识别 2FA（人脸/语音，P1/P2）的已知边界
+- **生物特征不是秘密**：模板泄露的补救是重新注册（re-enroll），不是改密
+  码。模板只存特征向量（templates.json，0600），永不存原始画面/录音。
+- **活体断言是客户端证据（v1）**：眨眼检测在浏览器侧完成、服务端仅信任
+  payload 标记——持有受害者向量的定向攻击者可伪造（与消费级"照片解锁"
+  同级威胁）。缓解：更严锁定（3 次/15min，指数升级）+ 审计 + 生物识别定
+  位为便利备胎（TOTP 仍是强选项）。服务端可复核活体（服务端识别模式）
+  列为后续加固（docs/biometric-2fa-design.md §11）。
+- **语音不校验读出内容（v1）**：随机数字挑战不防"持有受害者任意语音
+  录音"的定向重放（无 ASR）；仅防顺手拿固定短语录音。缓解同上（锁定/
+  审计/便利定位）；vosk-browser 内容校验列为后续加固。
+- **登录时自助注册的边界**：仅对零方法账户开放（密码 + 现场采集即注册
+  成功）——密码窃贼可借此自助加因子。接受该窗口（否则零方法账户在
+  two_factor host 完全无法登录）；已有方法者必须先过既有因子。
+- **误纳（FAR）**：face 默认 0.6（dlib/face-api 官方推荐）、voice 默认 0.90
+  余弦；失败即锁定，误纳暴露窗口受锁定制约。
+- **记住我长会话**：365d 会话被盗 → 更长利用窗口；HttpOnly + SameSite=
+  Strict + https 下 Secure；会话撤销列表列为后续加固。
+
 ---
 
 ## 4. 漏洞报告流程（Reporting）
@@ -180,6 +202,7 @@ EDR / 网关反隧道策略拦截——这与程序名无关，是用户显式�
 | nginx -t 预校验 | `src/gateway.ts` |
 | authelia config validate | `src/authelia.ts` |
 | portal 口令/会话/限流/2FA/RSA-OAEP | `src/providers/portal.ts` |
+| 生物识别 2FA：混合加密 / nonce 单次消费 / 锁定 / 注册票 / 资产白名单 | `src/providers/portal.ts` |
 | prototype pollution 防护 | `src/expose.ts` |
 | 孤儿进程清理 | `src/guardian.ts` `src/cleanup.ts` |
 | 工具下载原子性 | `src/tools.ts` |
