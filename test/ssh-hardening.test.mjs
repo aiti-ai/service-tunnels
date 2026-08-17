@@ -155,14 +155,16 @@ test("domain: key files are 0600 and the store dir is 0700", () => {
   try {
     const dir = join(base, "d");
     const d = SshDomain.create("d", dir);
-    assert.equal(statSync(dir).mode & 0o777, 0o700, "store dir must be 0700");
+    // POSIX permission bits; Windows has no such semantics — existence/readability only
+    const permCheck = process.platform !== "win32";
+    if (permCheck) assert.equal(statSync(dir).mode & 0o777, 0o700, "store dir must be 0700");
     for (const f of ["host_ed25519_key", "host_rsa_key", "host_ecdsa_key", "authorized_keys"]) {
       const p = join(dir, f);
-      if (existsSync(p)) assert.equal(statSync(p).mode & 0o777, 0o600, `${f} must be 0600`);
+      if (existsSync(p) && permCheck) assert.equal(statSync(p).mode & 0o777, 0o600, `${f} must be 0600`);
     }
     // adding a key keeps 0600
     d.addKey(generateKeyPairSync("ed25519", { comment: "u" }).public);
-    assert.equal(statSync(d.authorizedKeysPath).mode & 0o777, 0o600, "authorized_keys stays 0600 after add");
+    if (permCheck) assert.equal(statSync(d.authorizedKeysPath).mode & 0o777, 0o600, "authorized_keys stays 0600 after add");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

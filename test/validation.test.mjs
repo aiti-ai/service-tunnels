@@ -21,6 +21,23 @@ function tempDirs() {
 function fakeTool(base, name, output, envVar) {
   const dir = join(base, "bin");
   mkdirSync(dir, { recursive: true });
+  if (process.platform === "win32") {
+    // .cmd shim → node helper (node is on PATH in the test env); argv/env
+    // recorded with the same file contract as the POSIX script.
+    const helper = join(dir, `${name}-helper.cjs`);
+    const rec = [
+      'const fs = require("fs");',
+      `fs.writeFileSync(${JSON.stringify(join(dir, `rec-${name}-argv`))}, process.argv.slice(2).join("\\n") + "\\n");`,
+    ];
+    if (envVar) {
+      rec.push(`fs.writeFileSync(${JSON.stringify(join(dir, `rec-${name}-${envVar}`))}, process.env[${JSON.stringify(envVar)}] ?? "");`);
+    }
+    rec.push(`console.log(${JSON.stringify(output)});`, "setInterval(() => {}, 1000);");
+    writeFileSync(helper, rec.join("\n") + "\n", "utf8");
+    const bin = join(dir, `${name}.cmd`);
+    writeFileSync(bin, `@echo off\r\nnode "${helper}" %*\r\n`, "utf8");
+    return bin;
+  }
   const bin = join(dir, name);
   const lines = [`printf '%s\\n' "$@" > '${dir}/rec-${name}-argv'`];
   if (envVar) lines.push(`printf '%s' "$${envVar}" > '${dir}/rec-${name}-${envVar}'`);

@@ -199,6 +199,14 @@ function platformSupported(def: ToolDef): boolean {
 /** Which <name> → true when the tool resolves on PATH. */
 export function findOnPath(name: string): string | null {
   try {
+    if (process.platform === "win32") {
+      // `where` returns native Windows paths (C:\…\x.exe) and knows the
+      // PATHEXT extensions (.exe/.cmd/.bat). `which` (git-bash) would return
+      // POSIX-style paths (/d/…) that Node's fs can't use.
+      const out = execFileSync("where.exe", [name], { encoding: "utf8" });
+      const hit = out.split(/\r?\n/).find((l) => l.trim());
+      return hit?.trim() || null;
+    }
     const found = execFileSync("which", [name], { encoding: "utf8" }).trim();
     return found || null;
   } catch {
@@ -526,25 +534,30 @@ async function ensureNpmTool(def: ToolDef, opts: ToolRegistryOptions): Promise<s
   if (existsSync(dest)) return dest;
   const pkg = def.npmPackage ?? def.name;
   const registry = def.npmRegistry ?? "https://registry.npmmirror.com";
+  // npm is npm.cmd on Windows (a bare "npm" spawn ENOENTs outside a shell).
+  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
   try {
-    execFileSync("npm", ["install", "--prefix", join(opts.cacheDir, "npm"), pkg, "--registry", registry], {
+    execFileSync(npmCmd, ["install", "--prefix", join(opts.cacheDir, "npm"), pkg, "--registry", registry], {
       stdio: "ignore",
       timeout: 120_000,
     });
   } catch {
     // fall back to official registry
-    execFileSync("npm", ["install", "--prefix", join(opts.cacheDir, "npm"), pkg], { stdio: "ignore", timeout: 120_000 });
+    execFileSync(npmCmd, ["install", "--prefix", join(opts.cacheDir, "npm"), pkg], { stdio: "ignore", timeout: 120_000 });
   }
   // npm bins often differ from the tool name (localtunnel ships `lt`).
   // Walk def.commands (alias order) then fall back to def.name; first hit wins.
   const binNames = [...(def.commands ?? []), def.name];
   let bin = "";
   for (const n of binNames) {
-    const cand = join(opts.cacheDir, "npm", "node_modules", ".bin", n);
-    if (existsSync(cand)) {
-      bin = cand;
-      break;
+    for (const suffix of process.platform === "win32" ? [".cmd", ".exe", ""] : [""]) {
+      const cand = join(opts.cacheDir, "npm", "node_modules", ".bin", n + suffix);
+      if (existsSync(cand)) {
+        bin = cand;
+        break;
+      }
     }
+    if (bin) break;
   }
   if (!bin) throw new ToolError(`${def.name}: npm install produced no bin (looked for ${binNames.join(", ")})`);
   // link into cacheDir/bin so resolution is uniform (symlink on POSIX, copy on

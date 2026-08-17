@@ -33,9 +33,13 @@ test("TODO-2 presets: save/list/get/remove + 敏感字段加密落盘", { timeou
     assert.match(raw, /enc:v1:/, "敏感字段以 enc:v1: 密文存储");
     assert.match(raw, /"domain": "alice\.ngrok-free\.app"/, "非敏感字段明文落盘");
 
-    // 密钥文件 0600
-    const keyStat = statSync(join(base, "cache", "presets.key"));
-    assert.equal(keyStat.mode & 0o777, 0o600, "presets.key 0600");
+    // 密钥文件 0600（POSIX 权限位；Windows 无该语义，跳过）
+    if (process.platform !== "win32") {
+      const keyStat = statSync(join(base, "cache", "presets.key"));
+      assert.equal(keyStat.mode & 0o777, 0o600, "presets.key 0600");
+    } else {
+      assert.ok(readFileSync(join(base, "cache", "presets.key"), "utf8").length > 0, "presets.key 存在且可读");
+    }
 
     // 覆盖更新（同 type+name）
     st.presets.save("tunnel", "ngrok", "我的ngrok", { domain: "bob.ngrok-free.app", authtoken: "tok_new" });

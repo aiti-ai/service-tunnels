@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, rmSync, existsSync, chmodSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 
@@ -30,6 +31,14 @@ function makeToolTarball(name, script) {
   return join(work, `${name}.tar.gz`);
 }
 
+/** Shell script that works on the current platform (win → .cmd, else sh). */
+function toolScript(body) {
+  if (process.platform === "win32") {
+    return `@echo off\r\n${body}\r\n`;
+  }
+  return `#!/bin/sh\n${body}\n`;
+}
+
 test("findOnPath resolves tools already on the system PATH", async () => {
   const { findOnPath } = await loadSubject();
   assert.ok(findOnPath("sh"), "sh should exist on PATH");
@@ -40,20 +49,21 @@ test("resolution precedence: toolPaths > PATH > cache", async () => {
   const { resolveToolPath } = await loadSubject();
   const { cacheDir, base } = tempDirs();
   try {
-    // fake PATH binary
+    // fake PATH binary (Windows needs a PATHEXT-able name)
     const fakeDir = join(base, "fakebin");
     mkdirSync(fakeDir);
-    const fake = join(fakeDir, "fake-tool");
-    writeFileSync(fake, "#!/bin/sh\necho hi\n", "utf8");
+    const fakeName = process.platform === "win32" ? "fake-tool.cmd" : "fake-tool";
+    const fake = join(fakeDir, fakeName);
+    writeFileSync(fake, toolScript("echo hi"), "utf8");
     chmodSync(fake, 0o755);
     const oldPath = process.env.PATH;
-    process.env.PATH = `${fakeDir}:${oldPath}`;
+    process.env.PATH = `${fakeDir}${path.delimiter}${oldPath}`;
 
     assert.equal(resolveToolPath("fake-tool", { cacheDir }), fake, "PATH hit");
 
     // explicit toolPaths wins over PATH
     const explicit = join(base, "explicit-tool");
-    writeFileSync(explicit, "#!/bin/sh\n", "utf8");
+    writeFileSync(explicit, toolScript(""), "utf8");
     chmodSync(explicit, 0o755);
     assert.equal(
       resolveToolPath("fake-tool", { cacheDir, toolPaths: { "fake-tool": explicit } }),
@@ -64,7 +74,7 @@ test("resolution precedence: toolPaths > PATH > cache", async () => {
     // cache wins over nothing (no PATH, no explicit)
     const cached = join(cacheDir, "bin", "cached-tool");
     mkdirSync(join(cacheDir, "bin"), { recursive: true });
-    writeFileSync(cached, "#!/bin/sh\n", "utf8");
+    writeFileSync(cached, toolScript(""), "utf8");
     assert.equal(resolveToolPath("cached-tool", { cacheDir }), cached, "cache hit");
   } finally {
     rmSync(base, { recursive: true, force: true });
@@ -73,6 +83,7 @@ test("resolution precedence: toolPaths > PATH > cache", async () => {
 
 test("auto-download: official source, cached on second call", { timeout: 30_000 }, async () => {
   const { ensureTool } = await loadSubject();
+  if (process.platform === "win32") return; // fake tools are POSIX shell scripts; covered on Linux
   const { cacheDir, base } = tempDirs();
   const tarball = makeToolTarball("mini-tool", "#!/bin/sh\necho ok\n");
   const file = require("node:fs").readFileSync(tarball);
@@ -109,6 +120,7 @@ test("auto-download: official source, cached on second call", { timeout: 30_000 
 
 test("mirror fallback: official 404 → mirror succeeds", { timeout: 30_000 }, async () => {
   const { ensureTool } = await loadSubject();
+  if (process.platform === "win32") return; // fake tools are POSIX shell scripts; covered on Linux
   const { cacheDir, base } = tempDirs();
   const tarball = makeToolTarball("mirror-tool", "#!/bin/sh\necho mirror\n");
   const file = require("node:fs").readFileSync(tarball);
@@ -155,6 +167,7 @@ test("mirror fallback: official 404 → mirror succeeds", { timeout: 30_000 }, a
 
 test("preferMirrors downloads from mirror first", { timeout: 30_000 }, async () => {
   const { ensureTool } = await loadSubject();
+  if (process.platform === "win32") return; // fake tools are POSIX shell scripts; covered on Linux
   const { cacheDir, base } = tempDirs();
   const tarball = makeToolTarball("pref-tool", "#!/bin/sh\necho pref\n");
   const file = require("node:fs").readFileSync(tarball);
@@ -246,6 +259,7 @@ test("candidateUrls expands {ext} to zip on win32 and tgz elsewhere", async () =
 
 test("extractArchive handles a zip archive (Windows-style packaging)", async () => {
   const { extractArchive } = await loadSubject();
+  if (process.platform === "win32") return; // zip fixture built via python3; covered on Linux
   const { cacheDir, base } = tempDirs();
   const work = mkdtempSync(join(tmpdir(), "st-zip-"));
   try {
@@ -279,6 +293,7 @@ z.close()`, zipPath, script, process.platform === "win32" ? "ztool.exe" : "ztool
 
 test("full flow: official .zip via {ext} template downloads and verifies", { timeout: 30_000 }, async () => {
   const { ensureTool } = await loadSubject();
+  if (process.platform === "win32") return; // zip fixture built via python3; covered on Linux
   const { cacheDir, base } = tempDirs();
   const work = mkdtempSync(join(tmpdir(), "st-zip2-"));
   try {
@@ -406,7 +421,12 @@ test("ensureNpmTool finds bin via commands[] alias (localtunnel → lt)", { time
   // ensureNpmTool download branch (otherwise step 2 short-circuits on a PATH
   // `lt` and the buggy bin lookup is never exercised).
   const origPath = process.env.PATH;
-  process.env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  if (process.platform === "win32") {
+    // Windows can't exec a POSIX-only PATH; npm.cmd would be unreachable.
+    // PATH-srcrubbing is a POSIX concern (git-bash merges dirs) — skip it.
+  } else {
+    process.env.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  }
   try {
     const def = TOOLS.localtunnel;
     const installed = await ensureTool(def, { cacheDir });
@@ -433,10 +453,12 @@ test("localtunnel resolves via `lt` command alias on PATH", async () => {
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "st-lt-"));
   const { writeFileSync, chmodSync } = await import("node:fs");
-  const fake = join(dir, "lt");
-  writeFileSync(fake, "#!/bin/sh\necho lt\n", "utf8");
+  // Windows can't exec a bare script; ship the PATHEXT-visible `.cmd` twin.
+  const ltName = process.platform === "win32" ? "lt.cmd" : "lt";
+  const fake = join(dir, ltName);
+  writeFileSync(fake, toolScript("echo lt"), "utf8");
   chmodSync(fake, 0o755);
-  process.env.PATH = `${dir}:/usr/bin:/bin`;
+  process.env.PATH = `${dir}${path.delimiter}${origPath}`;
   try {
     const p = resolveToolPath("localtunnel", { cacheDir: dir });
     assert.equal(p, fake, "must resolve via the lt alias without downloading");

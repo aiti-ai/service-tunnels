@@ -152,15 +152,17 @@ test("expose --auth basic end-to-end with real nginx", { timeout: 40_000 }, asyn
   const { InternalRegistry } = await import("../src/internal.ts");
   const { createServer: httpServer } = await import("node:http");
   const { execFileSync } = await import("node:child_process");
-  // require nginx; skip otherwise
+  // require nginx; skip otherwise (Windows boxes don't ship nginx)
   let nginxBin = "";
-  for (const c of ["nginx", "/usr/sbin/nginx"]) {
-    try {
-      execFileSync("which", [c], { stdio: "ignore" });
-      nginxBin = c;
-      break;
-    } catch {
-      if (c.includes("/") && c === "/usr/sbin/nginx") nginxBin = c;
+  if (process.platform !== "win32") {
+    for (const c of ["nginx", "/usr/sbin/nginx"]) {
+      try {
+        execFileSync("which", [c], { stdio: "ignore" });
+        nginxBin = c;
+        break;
+      } catch {
+        // not found
+      }
     }
   }
   if (!nginxBin) {

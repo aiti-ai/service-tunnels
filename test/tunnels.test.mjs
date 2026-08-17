@@ -117,6 +117,28 @@ async function waitSshUrl(tm, name, ms = 5_000, retries = 1) {
 function fakeTool(base, name, output) {
   const dir = join(base, "bin");
   mkdirSync(dir, { recursive: true });
+  if (process.platform === "win32") {
+    // Windows can't exec a bare sh script: emit a .cmd shim that calls a node
+    // helper (node is guaranteed on PATH in the test env). The helper records
+    // argv one-per-line (same contract as the POSIX script), prints the URL
+    // and idles. spawn() picks the .cmd up via the PATHEXT fallback in
+    // src/tunnels.ts.
+    const helper = join(dir, `${name}-helper.cjs`);
+    writeFileSync(
+      helper,
+      [
+        'const fs = require("fs");',
+        `const args = process.argv.slice(2);`,
+        `fs.writeFileSync(${JSON.stringify(join(dir, `args-${name}`))}, args.join("\\n") + "\\n");`,
+        `console.log(${JSON.stringify(output)});`,
+        "setInterval(() => {}, 1000);",
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    const bin = join(dir, `${name}.cmd`);
+    writeFileSync(bin, `@echo off\r\nnode "${helper}" %*\r\n`, "utf8");
+    return bin;
+  }
   const bin = join(dir, name);
   // argv file is written BEFORE the URL line, so once a test sees the URL
   // parsed it can read the recorded args safely.
@@ -765,7 +787,10 @@ test("custom command tunnel: ST_TUNNEL_URL marker declares the URL (Windows-frie
 test("custom command tunnel: non-zero exit revokes declared URL (no false success)", async () => {
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fail = "echo ST_TUNNEL_URL:https://abc.loca.lt/; exit 3";
+  // `;` is a literal on cmd (not a separator) — use `&` there. POSIX shells
+  // treat both fine, but keep POSIX `;` as-is for the original semantics.
+  const sep = process.platform === "win32" ? "&" : ";";
+  process.env.SERVICE_TUNNELS_TUNNEL_COMMAND_fail = `echo ST_TUNNEL_URL:https://abc.loca.lt/ ${sep} exit 3`;
   try {
     const tm = new TunnelManager({ cacheDir, resolveTool: async () => "" });
     tm.add({ name: "f", type: "fail", target: 4000 });

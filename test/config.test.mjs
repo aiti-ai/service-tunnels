@@ -7,13 +7,28 @@ async function loadSubject() {
   return import("../src/config.ts");
 }
 
+/** Platform-appropriate default dirs (mirror src/config.ts XDG mapping). */
+function expectedDefaults() {
+  if (process.platform === "win32") {
+    return {
+      configDir: join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "service-tunnels"),
+      cacheDir: join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "service-tunnels"),
+    };
+  }
+  return {
+    configDir: join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "service-tunnels"),
+    cacheDir: join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "service-tunnels"),
+  };
+}
+
 test("resolves default config/cache dirs", async () => {
   const { resolveDirs, defaultConfigDir, defaultCacheDir } = await loadSubject();
   const dirs = resolveDirs({});
   assert.equal(dirs.configDir, defaultConfigDir());
   assert.equal(dirs.cacheDir, defaultCacheDir());
-  assert.equal(dirs.configDir, join(homedir(), ".config", "service-tunnels"));
-  assert.equal(dirs.cacheDir, join(homedir(), ".cache", "service-tunnels"));
+  const exp = expectedDefaults();
+  assert.equal(dirs.configDir, exp.configDir);
+  assert.equal(dirs.cacheDir, exp.cacheDir);
 });
 
 test("env vars override defaults", async () => {
@@ -36,7 +51,7 @@ test("constructor args beat env vars", async () => {
   try {
     const dirs = resolveDirs({ configDir: "/tmp/opt-config" });
     assert.equal(dirs.configDir, "/tmp/opt-config");
-    assert.equal(dirs.cacheDir, join(homedir(), ".cache", "service-tunnels"));
+    assert.equal(dirs.cacheDir, expectedDefaults().cacheDir);
   } finally {
     delete process.env.SERVICE_TUNNELS_CONFIG;
   }
@@ -45,7 +60,7 @@ test("constructor args beat env vars", async () => {
 test("empty constructor values fall back to env/defaults", async () => {
   const { resolveDirs } = await loadSubject();
   const dirs = resolveDirs({ configDir: "  " });
-  assert.equal(dirs.configDir, join(homedir(), ".config", "service-tunnels"));
+  assert.equal(dirs.configDir, expectedDefaults().configDir);
 });
 
 test("cachePaths exposes sub-directories + state/daemon files", async () => {

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "child_process";
 import { promises as dns } from "node:dns";
-import { mkdirSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
 import { withSchemaI18nKeys } from "./i18n.ts";
@@ -395,9 +395,28 @@ export class TunnelManager {
     s.error = undefined;
     s.url = null;
 
-    const child = spec.shell
-      ? spawn(spec.bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] })
-      : spawn(spec.bin, spec.args, {
+    // Windows: a .cmd/.bat shim (or a bare name that only exists with a
+    // PATHEXT suffix) must go through a shell — a plain spawn can't exec it.
+    // Real tools resolve to .exe and keep the direct (non-shell) spawn.
+    let bin = spec.bin;
+    let useShell = spec.shell;
+    if (!useShell && process.platform === "win32") {
+      if (!existsSync(bin)) {
+        for (const ext of [".cmd", ".bat"]) {
+          if (existsSync(bin + ext)) {
+            bin = bin + ext;
+            useShell = true;
+            break;
+          }
+        }
+      } else if (/\.(cmd|bat)$/i.test(bin)) {
+        useShell = true;
+      }
+    }
+
+    const child = useShell
+      ? spawn(bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] })
+      : spawn(bin, spec.args, {
           env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...spec.env, ...cfg.env },
           detached: true, // own process group → group kill
           stdio: ["ignore", "pipe", "pipe"],

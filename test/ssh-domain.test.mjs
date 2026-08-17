@@ -15,7 +15,9 @@ test("domain: host keys auto-generated (ed25519+rsa+ecdsa), 0600, fingerprints p
     for (const f of ["host_ed25519_key", "host_rsa_key", "host_ecdsa_key"]) {
       const p = join(dir, f);
       assert.ok(existsSync(p), `${f} must exist`);
-      assert.equal(statSync(p).mode & 0o777, 0o600, `${f} must be 0600`);
+      if (process.platform !== "win32") {
+        assert.equal(statSync(p).mode & 0o777, 0o600, `${f} must be 0600`);
+      }
       // host key must be parseable + usable by system ssh-keygen
       const out = execFileSync("ssh-keygen", ["-y", "-f", p], { encoding: "utf8" }).trim();
       assert.match(out, /^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256)/);

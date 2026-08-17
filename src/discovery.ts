@@ -728,10 +728,15 @@ function getProcessUsername(pid: number): string | null {
   }
   if (process.platform === "win32") {
     try {
+      // Get-CimInstance returns a CimInstance which has no GetOwner() method
+      // (that's a WMI ManagementObject API). Use Invoke-CimMethod instead:
+      //   $p = Get-CimInstance Win32_Process -Filter "ProcessId = X"
+      //   $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner
+      //   $o.User
       const cmd =
-        'Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ' +
+        '$p = Get-CimInstance Win32_Process -Filter "ProcessId = ' +
         pid +
-        ' } | ForEach-Object { $_.GetOwner().User }';
+        '"; if ($p) { (Invoke-CimMethod -InputObject $p -MethodName GetOwner).User }';
       const out = execFileSync(
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-Command", cmd],
