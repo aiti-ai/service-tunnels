@@ -461,6 +461,19 @@ http {
   access_log ${nginxRoot}/access.log;
   client_max_body_size 0;
   proxy_buffering off;
+  # nginx 四类临时文件（响应缓冲/请求体缓冲/fastcgi/uwsgi/scgi）编译默认都指向
+  # /var/lib/nginx/*（只有系统 root nginx 可写）——我们以普通用户跑，不指自己
+  # 的目录会在 [crit] Permission denied 处直接断流/500：
+  #   proxy_temp:      上游响应超内存 buffer 时落盘（大文件 + 慢客户端如隧道
+  #                    edge 流控必现：6.4MB 模型稳定截断在 ~2.5-3MB）
+  #   client_body_temp: 请求体超 client_body_buffer(默认 8k/16k) 时落盘（大
+  #                    POST 必现 500：face 验证 ~12KB 加密向量表单）
+  #   fastcgi/uwsgi/scgi_temp: 本网关不用，但编译默认路径同病，一并指过来。
+  proxy_temp_path ${nginxRoot}/proxy_temp;
+  client_body_temp_path ${nginxRoot}/client_body_temp;
+  fastcgi_temp_path ${nginxRoot}/fastcgi_temp;
+  uwsgi_temp_path ${nginxRoot}/uwsgi_temp;
+  scgi_temp_path ${nginxRoot}/scgi_temp;
   # public tunnel hostnames can be long (trycloudflare / ngrok-free-app);
   # the default 64-byte bucket overflows with several of them.
   server_names_hash_bucket_size 128;
@@ -621,6 +634,9 @@ export class GatewayController {
   async writeConfig(): Promise<void> {
     mkdirSync(this.#nginxRoot, { recursive: true });
     mkdirSync(join(this.#nginxRoot, "logs"), { recursive: true });
+    for (const d of ["proxy_temp", "client_body_temp", "fastcgi_temp", "uwsgi_temp", "scgi_temp"]) {
+      mkdirSync(join(this.#nginxRoot, d), { recursive: true });
+    }
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     const cfg = generateGatewayNginx({
       nginxPort: this.#port,
