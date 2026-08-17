@@ -419,7 +419,13 @@ export class TunnelManager {
     let child: ChildProcess;
     if (spec.shell) {
       // user-supplied command string (custom command tunnels)
-      child = spawn(bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(bin, {
+        shell: true,
+        // Windows: detached + shell breaks stdio pipes (see winCmd branch);
+        // taskkill /T in stop() reaps the tree there.
+        ...(process.platform === "win32" ? {} : { detached: true }),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
     } else if (winCmd) {
       // .cmd tool shim: cmd.exe /c with verbatim quoting (Node would
       // otherwise re-escape the command line and break the quotes).
