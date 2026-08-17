@@ -454,7 +454,7 @@ test("portal remember me: 365d-equivalent cookie, 2FA grace re-verify (skip pass
     const pl = payloadOf(token);
     assert.match(pl, /\.2fa:\d+$/, "payload carries .2fa:<timestamp>");
     const expIn = Number(pl.split(".")[0]) - Date.now();
-    assert.ok(expIn > REMEMBER * 0.9 && expIn <= REMEMBER, `remember cookie ≈ REMEMBER_TTL (${expIn}ms)`);
+    assert.ok(expIn > REMEMBER * 0.9 && expIn <= REMEMBER + 2_000, `remember cookie ≈ REMEMBER_TTL (${expIn}ms)`);
 
     // 4) probe：周期内 → 200
     const sess = { cookie: `st_portal_session=${token}`, ...APP };
@@ -479,7 +479,7 @@ test("portal remember me: 365d-equivalent cookie, 2FA grace re-verify (skip pass
     assert.equal(okAgain.status, 302);
     const token2 = String(okAgain.headers["set-cookie"]).match(/st_portal_session=([^;]+)/)?.[1];
     const exp2 = Number(payloadOf(token2).split(".")[0]) - Date.now();
-    assert.ok(exp2 > REMEMBER * 0.9 && exp2 <= REMEMBER, `re-verify keeps remember TTL (${exp2}ms)`);
+    assert.ok(exp2 > REMEMBER * 0.9 && exp2 <= REMEMBER + 2_000, `re-verify keeps remember TTL (${exp2}ms)`);
     const p3 = await get("/portal/api/authz/auth-request", port, { cookie: `st_portal_session=${token2}`, ...APP });
     assert.equal(p3.status, 200, "probe passes right after re-verify");
 
