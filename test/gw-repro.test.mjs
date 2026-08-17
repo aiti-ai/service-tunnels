@@ -34,7 +34,9 @@ test("gw-repro", { timeout: 60_000 }, async () => {
   const nullFile = join(base, "null");
   writeFileSync(nullFile, "");
 
+  const dbgLog = join(base, "ssh-debug.log");
   const p = spawn("ssh", [
+    "-vvv", "-E", dbgLog,
     "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullFile,
     "-o", "ExitOnForwardFailure=yes",
     "-i", keyFile,
@@ -62,5 +64,7 @@ test("gw-repro", { timeout: 60_000 }, async () => {
   await gw.close();
   echo.close();
   rmSync(base, { recursive: true, force: true });
+  const dbg = require("node:fs").readFileSync(dbgLog, "utf8");
+  console.error("[REPRO] debug log tail:\n" + dbg.split("\n").filter(Boolean).slice(-25).join("\n"));
   assert.ok(up, "forward must come up");
 });
