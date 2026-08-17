@@ -465,7 +465,6 @@ export class TunnelManager {
       // for ssh-family tunnels there; URL parsing uses stdout only and errors
       // surface via the non-zero exit code anyway.
       const winSshStderr = process.platform === "win32" && (cfg.type === "ssh" || cfg.type === "serveo") ? ("inherit" as const) : ("pipe" as const);
-      console.error("[DBG-SPAWN]", JSON.stringify({ bin, args: spec.args, stdio: ["ignore", "pipe", winSshStderr], type: cfg.type }));
       child = spawn(bin, spec.args, {
         env: baseEnv,
         detached: true, // own process group → group kill
