@@ -32,7 +32,7 @@ writeFileSync(nullFile, "");
 const localPort = 43150 + Math.floor(Math.random() * 50);
 
 const p = spawn("ssh", [
-  "-v", "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullFile,
+  "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullFile,
   "-o", "ExitOnForwardFailure=yes", "-i", keyFile,
   "-L", `127.0.0.1:${localPort}:127.0.0.1:${forwardPort}`,
   "-p", String(gwPort), "t@127.0.0.1",
