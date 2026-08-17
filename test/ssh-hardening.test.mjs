@@ -67,7 +67,6 @@ function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
 }
 
 test("gateway: repeated auth failures from one source lock the source out", { timeout: 60_000 }, async () => {
-  if (process.platform === "win32") return; // built-in gateway e2e unstable on Windows; covered on Linux
   const echoPort = await freePort();
   const echo = netServer((s) => s.on("data", (d) => s.write(d)));
   await new Promise((r) => echo.listen(echoPort, "127.0.0.1", r));
@@ -116,7 +115,6 @@ test("gateway: repeated auth failures from one source lock the source out", { ti
 });
 
 test("gateway: unauthenticated connections are dropped after authTimeoutMs", { timeout: 30_000 }, async () => {
-  if (process.platform === "win32") return; // built-in gateway e2e unstable on Windows
   const echoPort = await freePort();
   const echo = netServer();
   await new Promise((r) => echo.listen(echoPort, "127.0.0.1", r));

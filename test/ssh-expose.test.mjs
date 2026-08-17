@@ -47,7 +47,6 @@ srv.listen(Number(entry), "127.0.0.1", () => console.log("ST_TUNNEL_URL:127.0.0.
 `;
 
 test("expose --ssh-gateway: tcp tunnel target becomes the SSH gateway port", { timeout: 90_000 }, async () => {
-  if (process.platform === "win32") return; // built-in gateway e2e unstable on Windows; covered on Linux
   const { startDaemon, stopDaemon, requestDaemon } = await import("../src/daemon.ts");
   const { Socket } = await import("node:net");
 

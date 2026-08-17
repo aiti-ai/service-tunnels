@@ -79,7 +79,6 @@ test("vendored parseKey: rejects garbage, accepts valid public key", () => {
 });
 
 test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", async () => {
-  if (process.platform === "win32") return; // built-in gateway e2e unstable under node --test workers on Windows; covered on Linux
   const forwardPort = await pickFreePort();
   const localPort1 = await pickFreePort();
   const localPort2 = await pickFreePort();
@@ -192,7 +191,6 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
 });
 
 test("gateway -R: reverse forwarding reaches client's local service, bogus bindPort ignored", async () => {
-  if (process.platform === "win32") return; // same as gateway -L
   const forwardPort = await pickFreePort();
   const reversePort = await pickFreePort();
   const localSrvPort = await pickFreePort();

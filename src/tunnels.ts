@@ -304,6 +304,11 @@ function sshSpec(opts: {
     "-o", "TCPKeepAlive=yes",
     // 转发端口绑定失败立即退出(而非静默继续)
     "-o", "ExitOnForwardFailure=yes",
+    // Windows OpenSSH 在 stderr 非控制台(daemon/测试重定向)时, banner 失败
+    // 路径(Connection refused 等)会永久挂起——即使 stderr inherit 到同样
+    // 重定向的父进程也不救。LogLevel=QUIET 抑制 stderr 输出, 失败路径正常
+    // 退出(实测 refused 从挂起→2s 退出), URL 合成窗口逻辑恢复正确性。
+    ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []),
   );
   if (opts.port) args.push("-p", String(opts.port));
   args.push(opts.dest, ...(opts.extra ?? []));
