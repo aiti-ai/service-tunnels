@@ -241,7 +241,7 @@ export function isTokenManager(p: AuthProvider): p is AuthProvider & TokenManage
  */
 export interface BiometricManager {
   /** 该用户各方法的注册态（active 才可登录使用）。 */
-  biometricStatus(name: string): Promise<{ face: boolean; voice: boolean }>;
+  biometricStatus(name: string): Promise<{ face: boolean; facePending: boolean; voice: boolean; voicePending: boolean }>;
   /** 注册人脸模板（管理 UI 浏览器采集的 128-d 描述子样本）：写入 pending，
    *  首验成功（biometricVerifyFace）才转 active——对齐 totpPending 语义。 */
   biometricEnrollFace(name: string, samples: number[][]): Promise<{ pending: boolean }>;

@@ -369,7 +369,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
 
   /** 下载/修复 face 浏览器资产（biometric-2fa-design.md §7.5）：存在且 SHA-256
    *  匹配则跳过；否则按镜像 → jsdelivr → unpkg 顺序下载，逐文件校验。 */
-  async #ensureFaceAssets(): Promise<void> {
+  async ensureFaceAssets(): Promise<void> {
     const dir = faceAssetsDir(this.#ctx.cacheDir);
     mkdirSync(dir, { recursive: true });
     for (const a of FACE_ASSETS) {
@@ -421,7 +421,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     await this.prepare();
     // face 资产在真正开始服务前就绪（prepare 保持离线——库调用方可先准备
     // 配置/脚本，不触发网络；下载只发生在 start）
-    if (this.#bioFace) await this.#ensureFaceAssets();
+    if (this.#bioFace) await this.ensureFaceAssets();
     for (let attempt = 0; ; attempt++) {
       if (!this.#port) this.#port = await this.#ctx.pickPort();
       const p = spawnNode(this.#ctx.nodePath, [this.#serverFile], {
@@ -451,6 +451,15 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
       this.#ctx.registerPid("portal", p.pid ?? 0);
       p.stdout?.on("data", (d) => this.#ctx.log(`[portal] ${String(d).trim()}`));
       p.stderr?.on("data", (d) => this.#ctx.log(`[portal] ${String(d).trim()}`));
+      // 进程退出（含被 kill）→ 清实例引用，避免僵尸状态（#proc.exitCode 对
+      // SIGKILL 保持 null → status().running 误判 true → start() 永不重建）。
+      p.once("exit", (code, signal) => {
+        if (this.#proc === p) {
+          this.#proc = null;
+          this.#port = 0;
+        }
+        this.#ctx.log(`portal: exited (code=${code ?? "null"} signal=${signal ?? "null"})`);
+      });
       try {
         await waitTcp(this.#port, 10_000);
         // confirm it is OUR portal (401 on the auth probe) — a squatter on
@@ -620,16 +629,23 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     execFileSync("mv", [file, this.#templatesFile], { stdio: "ignore" });
   }
 
-  async biometricStatus(name: string): Promise<{ face: boolean; voice: boolean }> {
+  async biometricStatus(name: string): Promise<{ face: boolean; facePending: boolean; voice: boolean; voicePending: boolean }> {
     const tpl = await this.#readTemplates();
     const t = tpl[name];
-    return { face: t?.face?.status === "active", voice: t?.voice?.status === "active" };
+    return {
+      face: t?.face?.status === "active",
+      facePending: t?.face?.status === "pending",
+      voice: t?.voice?.status === "active",
+      voicePending: t?.voice?.status === "pending",
+    };
   }
 
   /** 注册人脸模板：写入 pending（首验门——未验证前登录不可用，对齐
    *  totpPending 语义）。samples 来自管理界面浏览器采集（128-d 描述子）。 */
   async biometricEnrollFace(name: string, samples: number[][]): Promise<{ pending: boolean }> {
-    if (!this.#bioFace) throw new Error("face biometrics not enabled on this portal (portal opts biometrics)");
+    // 管理端直写模板（数据层）——不检查 #bioFace：能力开关属于门户运行配置，
+    // 管理侧预设置不应依赖「先以 biometrics 开一次公开」。模板 pending，
+    // 门户以 biometrics 启动后即可用于登录验证。
     validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.has(name)) throw new Error(`user ${name} not registered`);
@@ -670,7 +686,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
   /** 注册语音模板（P2）：3 次朗读（数字串挑战，每次不同）→ 78-d 向量 →
    *  质量门（两两余弦 ≥ VOICE_ENROLL_MIN_PAIR_SIM）→ pending 首验门。 */
   async biometricEnrollVoice(name: string, utterances: number[][]): Promise<{ pending: boolean }> {
-    if (!this.#bioVoice) throw new Error("voice biometrics not enabled on this portal (portal opts biometrics)");
+    // 管理端直写模板（数据层）——不检查 #bioVoice，同 biometricEnrollFace。
     validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.has(name)) throw new Error(`user ${name} not registered`);
@@ -709,8 +725,9 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
    *  有效。管理 UI 拿到 url 后直接开页面，采集/加密/资产全在 portal 一侧。 */
   async biometricEnrollTicket(name: string, method: "face" | "voice"): Promise<{ token: string; method: string; expiresInMs: number }> {
     if (method !== "face" && method !== "voice") throw new Error(`biometric method ${method} not supported`);
-    if (method === "face" && !this.#bioFace) throw new Error("face biometrics not enabled on this portal");
-    if (method === "voice" && !this.#bioVoice) throw new Error("voice biometrics not enabled on this portal");
+    // 签票只依赖 secret + 用户库（数据层）——不检查 #bioFace/#bioVoice：
+    // 能力开关属于门户运行配置，管理侧预设置不应依赖「先以 biometrics 开一次公开」。
+    // 若门户未启用该方法，采集页打开时会给出明确提示（子进程侧校验）。
     validateUserName(name);
     const rows = await this.#readDb();
     if (!rows.has(name)) throw new Error(`user ${name} not registered`);
@@ -1269,15 +1286,18 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function totpPage(next, error, host, remember = false) {
+function totpPage(next, error, host, remember = false, altMethods = []) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const alt = altMethods && altMethods.length > 1
+    ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
+    : "";
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Two-factor</title>'
     + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
     + 'form{background:#fff;padding:2.5rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:22rem}'
     + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .6rem}'
     + '@media(max-width:480px){form,#busy .card{padding:1.5rem 1.25rem}}'
     + 'p.meta{font-size:.72rem;color:#888;margin:0 0 1rem;line-height:1.6}p.meta b{color:#555}'
-    + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px;letter-spacing:.35em;text-align:center}'
+    + 'input{width:100%;box-sizing:border-box;padding:.55rem;border:1px solid #d0d3da;border-radius:6px;letter-spacing:.35em;text-align:center}a.alt{display:inline-block;margin-top:.8rem;font-size:.85rem;color:#2d6cdf;text-align:center}'
     + 'button{margin-top:1.2rem;width:100%;padding:.6rem;background:#2d6cdf;color:#fff;border:0;border-radius:6px;cursor:pointer}'
     + '#busy{position:fixed;inset:0;background:#f4f5f7;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:50;padding:1rem}'
     + '#busy .card{background:#fff;padding:2.5rem 2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:22rem;text-align:center}'
@@ -1292,7 +1312,9 @@ function totpPage(next, error, host, remember = false) {
     + '<input type="hidden" name="method" value="totp">'
     + (remember ? '<input type="hidden" name="remember" value="1">' : "") + err
     + '<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\\d{6}" required autofocus>'
-    + '<button type="submit">Verify</button></form>'
+    + '<button type="submit">Verify</button>'
+    + alt
+    + '</form>'
     + '<div id="busy"><div class="card"><div class="spin"></div><p class="t">Verifying…</p><p>Please wait</p></div></div>'
     // 只收数字、满 6 位自动提交（submit 事件仍触发 spinner 过渡层；
     // 按钮保留作为无 JS 兜底）。TOTP 固定 6 位纯数字（RFC 6238 默认）。
@@ -1518,7 +1540,7 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '@media(max-width:480px){main{padding:1.5rem 1.25rem}}</style>'
     + '</head><body><main>'
     + '<h1>Face verification</h1>'
-    + '<p class="hint">Look at the camera and blink once.</p>'
+    + '<p class="hint">Look at the camera and open your mouth three times to verify.</p>'
     + (SITE || host ? '<p class="meta">Site: <b>' + SITE + '</b><br>Domain: <b>' + escapeAttr(host || "") + '</b></p>' : "")
     + '<div id="cam"><video id="v" autoplay muted playsinline></video></div>'
     + '<p id="st" class="st">Loading…</p>'
@@ -1531,14 +1553,14 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '</form><div id="busy"><div class="spin"></div><p>Verifying…</p></div></main>'
     + '<script>'
     + 'var A=' + JSON.stringify(BASE) + ',NONCE=' + JSON.stringify(nonce) + ',PUB=' + JSON.stringify(publicKey) + ',KEY_ID=' + JSON.stringify(keyId) + ';'
-    + 'var vectors=[],eyeClosed=false,blinked=false,done=false;'
+    + 'var vectors=[],prevClosed=false,mouthCount=0,base=[],done=false;'
     + 'function st(t){document.getElementById("st").textContent=t;}'
     + 'function dot(){var d=document.querySelectorAll("#dots i");for(var i=0;i<d.length;i++)d[i].className=i<vectors.length?"on":"";}'
     + 'function b2u(b){var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}'
     + 'function u2b(u){var s="";for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s);}'
-    + 'function ear(p){function d(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}return (d(p[1],p[5])+d(p[2],p[4]))/(2*d(p[0],p[3]));}'
+    + 'function mar(p){function d(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}return (d(p[3],p[11])+d(p[5],p[9]))/(2*d(p[1],p[7]));}'
     + 'async function submitFace(){done=true;document.getElementById("busy").style.display="flex";'
-    + 'var payload=JSON.stringify({nonce:NONCE,vectors:vectors,blinked:blinked});'
+    + 'var payload=JSON.stringify({nonce:NONCE,vectors:vectors,blinked:true});'
     + 'try{'
     + 'var aes=crypto.getRandomValues(new Uint8Array(32));'
     + 'var iv=crypto.getRandomValues(new Uint8Array(12));'
@@ -1555,17 +1577,22 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '}'
     + 'async function loop(){'
     + 'if(done)return;'
+    + 'var v=document.getElementById("v");'
+    + 'if(v.readyState<2||!v.videoWidth){setTimeout(loop,120);return;}'
     + 'try{'
-    + 'var det=await faceapi.detectSingleFace(document.getElementById("v"),new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.5})).withFaceLandmarks().withFaceDescriptor();'
+    + 'var det=await faceapi.detectSingleFace(v,new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:0.5})).withFaceLandmarks().withFaceDescriptor();'
     + 'if(det){'
-    + 'var e=(ear(det.landmarks.getLeftEye())+ear(det.landmarks.getRightEye()))/2;'
-    + 'if(e<0.22)eyeClosed=true;else if(eyeClosed)blinked=true;'
-    + 'if(blinked&&vectors.length<3){vectors.push(Array.from(det.descriptor));dot();}'
-    + 'st(blinked?(vectors.length>=3?"Submitting…":"Captured "+vectors.length+" of 3"):"Blink once to continue");'
-    + 'if(blinked&&vectors.length>=3){submitFace();return;}'
+    + 'var m=mar(det.landmarks.getMouth());'
+    + 'base.push(m);if(base.length>30)base.shift();'
+    + 'var b=base.slice().sort(function(x,y){return x-y;});var q=b[Math.floor(b.length*0.3)]||0.4;var th=Math.max(0.4,q+0.15);'
+    + 'var open=m>=th;'
+    + 'if(open&&!prevClosed){mouthCount++;vectors.push(Array.from(det.descriptor));dot();}'
+    + 'prevClosed=open;'
+    + 'st(mouthCount?(mouthCount>=3?"Submitting…":"Captured "+mouthCount+" of 3"):"Open your mouth three times");'
+    + 'if(mouthCount>=3){submitFace();return;}'
     + '}else st("No face detected — center your face");'
     + '}catch(err){}'
-    + 'setTimeout(loop,150);'
+    + 'setTimeout(loop,60);'
     + '}'
     + '(async function(){'
     + 'try{'
@@ -1874,7 +1901,7 @@ createServer((req, res) => {
         const em = FACE_ENABLED && VOICE_ENABLED ? ["face", "voice"] : FACE_ENABLED ? ["face"] : VOICE_ENABLED ? ["voice"] : [];
         res.end(chooserPage(next, [], remember, req.headers.host || "", em.length ? "" : "2FA is required for this host, but this account has no 2FA method enrolled.", em));
       } else if (methods.length === 1 && methods[0] === "totp") {
-        res.end(totpPage(next, "", req.headers.host || "", remember));
+        res.end(totpPage(next, "", req.headers.host || "", remember, methods));
       } else if (methods.length === 1 && methods[0] === "face") {
         const { keyId, publicKey } = issueRsaKey();
         res.end(facePage(next, "", req.headers.host || "", remember, issueFaceChallenge(name), keyId, publicKey, methods));
@@ -1914,7 +1941,7 @@ createServer((req, res) => {
     }
     const method = methods.includes(m) ? m : (methods.length === 1 ? methods[0] : "");
     if (method === "totp") {
-      res.end(totpPage(next, "", req.headers.host || "", remember));
+      res.end(totpPage(next, "", req.headers.host || "", remember, methods));
     } else if (method === "face") {
       const { keyId, publicKey } = issueRsaKey();
       res.end(facePage(next, "", req.headers.host || "", remember, issueFaceChallenge(sess2.name), keyId, publicKey, methods));
@@ -1946,7 +1973,7 @@ createServer((req, res) => {
       const name = sess2 ? sess2.name : null;
       if (!name) {
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(totpPage(next, "Session expired — please sign in again.", req.headers.host || ""));
+        res.end(totpPage(next, "Session expired — please sign in again.", req.headers.host || "", false, []));
         return;
       }
       if (method === "face") {
@@ -2001,7 +2028,7 @@ createServer((req, res) => {
           const { keyId: k2, publicKey: p2 } = issueRsaKey();
           res.end(facePage(
             next,
-            !vecOk ? "Verification failed — blink at the camera and retry." : !face ? "No active face template for this account." : "Face not recognized (distance " + d.toFixed(2) + " > " + th + ").",
+            !vecOk ? "Verification failed — open your mouth at the camera and retry." : !face ? "No active face template for this account." : "Face not recognized (distance " + d.toFixed(2) + " > " + th + ").",
             req.headers.host || "", remember, issueFaceChallenge(name), k2, p2, availableMethods(name, loadUsers()[name]),
           ));
           return;
@@ -2079,7 +2106,7 @@ createServer((req, res) => {
       if (!rec || !rec.totpSecret || !verifyTotp(rec.totpSecret, params.get("code") || "")) {
         recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
-        res.end(totpPage(next, "Invalid code.", req.headers.host || "", remember));
+        res.end(totpPage(next, "Invalid code.", req.headers.host || "", remember, availableMethods(name, rec)));
         return;
       }
       clearFailures(name, ip);
@@ -2232,7 +2259,7 @@ createServer((req, res) => {
           vectors.length >= 3 && vectors.length <= 5 &&
           vectors.every(function (v) { return Array.isArray(v) && v.length === 128 && v.every(function (x) { return typeof x === "number" && Number.isFinite(x) && Math.abs(x) <= 1.0001; }); });
         if (!ok) {
-          fail("Capture failed — blink at the camera and retry.", "face");
+          fail("Capture failed — open your mouth at the camera and retry.", "face");
           return;
         }
         // 质量门：样本两两距离 ≤ 阈值（同一次采集应高度一致）
@@ -2293,7 +2320,7 @@ createServer((req, res) => {
   if (url.pathname === BASE + "/assets/face-api.js" && req.method === "GET") {
     try {
       const buf = readFileSync(ASSETS_DIR + "/face-api.js");
-      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600" });
+      res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=3600", "Content-Length": String(buf.length) });
       res.end(buf);
     } catch {
       res.writeHead(404, { "Content-Type": "text/plain" });
@@ -2313,6 +2340,7 @@ createServer((req, res) => {
       res.writeHead(200, {
         "Content-Type": f.endsWith(".json") ? "application/json" : "application/octet-stream",
         "Cache-Control": "public, max-age=3600",
+        "Content-Length": String(buf.length),
       });
       res.end(buf);
     } catch {

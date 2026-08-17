@@ -347,8 +347,8 @@ export interface ServiceTunnels {
     totpActivate(name: string, code: string, provider?: string, site?: string): Promise<{ activated: boolean }>;
     /** Provider types exposing biometric 2FA management (portal，P1: face). */
     biometricProviders(): string[];
-    /** 该用户各生物方法注册态（active 才可登录使用）。 */
-    biometricStatus(name: string, provider?: string, site?: string): Promise<{ face: boolean; voice: boolean }>;
+    /** 该用户各生物方法注册态（active=可用；*Pending=模板待首验转正，UI 显示“待验证”）。 */
+    biometricStatus(name: string, provider?: string, site?: string): Promise<{ face: boolean; facePending: boolean; voice: boolean; voicePending: boolean }>;
     /** 注册人脸模板（管理 UI 浏览器采集 128-d 描述子）→ pending，首验转正。 */
     biometricEnrollFace(name: string, samples: number[][], provider?: string, site?: string): Promise<{ pending: boolean }>;
     /** 验证人脸向量（pending 首验门）；distance = 两两 L2 距离最小值。 */
@@ -360,7 +360,7 @@ export interface ServiceTunnels {
     /** portal /enroll 采集页一次性注册票（预设置路径；管理 UI 拼采集页 URL）。 */
     biometricEnrollTicket(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<{ token: string; method: string; expiresInMs: number }>;
     /** 签票 + 本地采集页完整 URL（管理 UI 直接开窗；预设置路径）。 */
-    biometricEnrollUrl(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<{ token: string; method: string; expiresInMs: number; url: string }>;
+    biometricEnrollUrl(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<{ token: string; method: string; expiresInMs: number; url: string | null }>;
     /** 移除生物模板（P1: face）。 */
     biometricDisable(name: string, method: "face" | "voice", provider?: string, site?: string): Promise<void>;
     /** Provider types with local token stores (e.g. ["token"]). */
@@ -870,6 +870,17 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           return mgr.totpActivate(name, code);
         },
         biometricProviders: () => registry.biometricProviders(),
+        /** 管理端支撑：确保 face 浏览器资产（face-api.js + 模型，~8.4MB）已下载；
+         *  返回资产目录 + 文件清单（管理 UI 的采集页加载用，serve 走宿主）。 */
+        biometricAssetsEnsure: async (): Promise<{ dir: string; files: string[] }> => {
+          const { faceAssetsDir, FACE_ASSETS } = await import("./providers/portal.ts");
+          const dir = faceAssetsDir(dirs.cacheDir);
+          const { mkdirSync } = await import("node:fs");
+          mkdirSync(dir, { recursive: true });
+          const inst = registry.create("portal", { biometrics: true } as never, "default") as unknown as { ensureFaceAssets?: () => Promise<void> };
+          await inst.ensureFaceAssets?.();
+          return { dir, files: FACE_ASSETS.map((a: { file: string }) => a.file) };
+        },
         biometricStatus: async (name: string, provider?: string, site?: string) => {
           const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;
           return mgr.biometricStatus(name);
@@ -895,14 +906,53 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           return mgr.biometricEnrollTicket(name, method);
         },
         biometricEnrollUrl: async (name: string, method: "face" | "voice", provider?: string, site?: string) => {
-          // 签票 + 拼本地采集页 URL（127.0.0.1:port + basePath）；管理 UI 直接开窗。
-          const mgr = registry.userManager(provider ?? "portal", site) as unknown as
-            import("./auth-provider.ts").BiometricManager & { port: number; basePath: string };
-          if (!mgr.port || mgr.port <= 0) {
-            throw new Error(`portal provider not running — start an expose with portal auth first`);
+          // 管理侧「开启人脸/语音」= 一步直达：门户没跑（或没开 biometrics）
+          // 时按需拉起——销毁缓存实例 → 以 biometrics:true 重建 → start()
+          // （首次下载 face 资产 ~8.4MB）→ 签票 + 采集页 URL。
+          // 签票本身只依赖 secret + 用户库；拉起门户只为浏览器采集页服务。
+          let mgr = registry.userManager(provider ?? "portal", site) as unknown as
+            import("./auth-provider.ts").BiometricManager & { port?: number; basePath?: string };
+          const port0 = mgr.port ?? 0;
+          if (!port0 || port0 <= 0) {
+            // 按需拉起：沿用该站点的全部 provider 配置（sites.json providerParams
+            // + deployBasePath——与 expose.ts 同一合并规则），叠加 biometrics:true
+            // 重建实例并启动（首次下载 face 资产 ~8.4MB）。
+            const pType = provider ?? "portal";
+            const sitesCfg: Record<string, { name: string; providerParams?: Record<string, unknown>; policy?: string }> = readSites(dirs.configDir) as never;
+            const siteCfg = sitesCfg?.[site ?? "default"];
+            const { unflattenParams: unflat } = await import("./expose.ts");
+            await registry.evict(pType, site);
+            const recreated = registry.create(
+              pType,
+              {
+                ...unflat(siteCfg?.providerParams ?? {}),
+                biometrics: true,
+                deployBasePath: proxy.basePath || undefined,
+                policy: siteCfg?.policy,
+              } as never,
+              site,
+            );
+            mgr = recreated as unknown as typeof mgr;
+            // basePath 决策链与 expose.ts 一致：portal 的 forward-auth 网关必须有
+            // 非空 basePath（server 按 BASE+path 路由，空串会落到 SPA fallback →
+            // authz 探针 404）。默认取 provider 自述随机名。
+            const pAny = recreated as unknown as {
+              basePath?: string; defaultBasePath?: () => string;
+              capabilities?: { nestedBasePath?: boolean };
+              setBasePath?: (p: string) => Promise<void> | void;
+            };
+            if (!pAny.basePath) {
+              const bp = pAny.defaultBasePath?.() ?? `/${pType}`;
+              const nested = pAny.capabilities?.nestedBasePath === true;
+              const deploy = proxy.basePath || "";
+              const merged = nested && deploy ? deploy.replace(/\/+$/, "") + bp : bp;
+              await pAny.setBasePath?.(merged);
+            }
+            await (recreated as unknown as { start: () => Promise<unknown> }).start();
           }
           const t = await mgr.biometricEnrollTicket(name, method);
-          return { ...t, url: `http://127.0.0.1:${mgr.port}${mgr.basePath}/enroll?m=${method}&t=${encodeURIComponent(t.token)}` };
+          const port = (mgr as { port?: number }).port ?? 0;
+          return { ...t, url: `http://127.0.0.1:${port}${(mgr as { basePath?: string }).basePath ?? ""}/enroll?m=${method}&t=${encodeURIComponent(t.token)}` };
         },
         biometricDisable: async (name: string, method: "face" | "voice", provider?: string, site?: string) => {
           const mgr = registry.userManager(provider ?? "portal", site) as unknown as import("./auth-provider.ts").BiometricManager;

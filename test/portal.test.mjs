@@ -551,7 +551,7 @@ test("portal biometric face: templates store (enroll→pending→verify→active
   const face = synthVec(42);
 
   // 未注册 → face:false；验证 → throw
-  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, facePending: false, voice: false, voicePending: false });
   await assert.rejects(() => provider.biometricVerifyFace("cara", [face]));
 
   // 样本校验：坏形状拒绝
@@ -561,20 +561,22 @@ test("portal biometric face: templates store (enroll→pending→verify→active
 
   // 注册 → pending（首验门：未验证前 status face=false）
   await provider.biometricEnrollFace("cara", [face, jitterVec(face)]);
-  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, facePending: true, voice: false, voicePending: false });
   assert.equal((await provider.listUsers()).find((u) => u.name === "cara")?.biometrics?.face, false);
 
   // 错误向量（远距离）→ 不匹配、仍 pending
   const far = await provider.biometricVerifyFace("cara", [synthVec(777)]);
   assert.equal(far.matched, false);
   assert.ok(far.distance > 1, `far distance ≈ √2, got ${far.distance}`);
-  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, facePending: true, voice: false, voicePending: false });
 
   // 正确向量（同源抖动）→ 匹配 + pending→active
   const ok = await provider.biometricVerifyFace("cara", [jitterVec(face)]);
   assert.equal(ok.matched, true);
   assert.ok(ok.distance < 0.05, `same-person distance tiny, got ${ok.distance}`);
-  assert.deepEqual(await provider.biometricStatus("cara"), { face: true, voice: false });
+  { const st = await provider.biometricStatus("cara");
+  assert.equal(st.face, true); assert.equal(st.facePending, false);
+  assert.equal(st.voice, false); assert.equal(st.voicePending, false); }
   assert.equal((await provider.listUsers()).find((u) => u.name === "cara")?.biometrics?.face, true);
 
   // templates.json 权限 + 无原始媒体（只有数字向量）
@@ -584,7 +586,7 @@ test("portal biometric face: templates store (enroll→pending→verify→active
 
   // disable → 回到未注册
   await provider.biometricDisable("cara", "face");
-  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("cara"), { face: false, facePending: false, voice: false, voicePending: false });
   await assert.rejects(() => provider.biometricDisable("cara", "face"));
 
   // removeUser 清理孤儿模板
@@ -806,7 +808,9 @@ test("portal biometric voice: parent API (enroll quality gate → pending → ve
     { user: { name: "admin", password: "pw" }, basePath: "/portal" },
   );
   await off.addUser("vera", "vera-pw");
-  await assert.rejects(() => off.biometricEnrollVoice("vera", [v, v, v]), /not enabled/);
+  // 管理端直写模板不检查门户 biometrics 运行开关（数据层预设置，2025 行为变更）——
+  // off 实例 enroll 现在成功写 pending；门户未启用方法时登录验证侧给出明确提示。
+  await off.biometricEnrollVoice("vera", [v, v, v]);
 
   // 形状校验
   await assert.rejects(() => provider.biometricEnrollVoice("vera", [[0.1, 0.2]]));
@@ -817,15 +821,17 @@ test("portal biometric voice: parent API (enroll quality gate → pending → ve
 
   // 正常：同源 3 样本 → pending → 远样本验证不匹配（不转正）→ 近样本匹配转正
   await provider.biometricEnrollVoice("vera", [v, jitterVoice(v), jitterVoice(v)]);
-  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, facePending: false, voice: false, voicePending: true });
   const far = await provider.biometricVerifyVoice("vera", [synthVoice(999)]);
   assert.equal(far.matched, false);
   assert.ok(far.similarity < 0.5);
-  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, facePending: false, voice: false, voicePending: true });
   const ok = await provider.biometricVerifyVoice("vera", [jitterVoice(v)]);
   assert.equal(ok.matched, true);
   assert.ok(ok.similarity > 0.95, `same-voice similarity, got ${ok.similarity}`);
-  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, voice: true });
+  { const st = await provider.biometricStatus("vera");
+  assert.equal(st.face, false); assert.equal(st.facePending, false);
+  assert.equal(st.voice, true); assert.equal(st.voicePending, false); }
 
   // 注册票：未启用方法拒绝；启用后签发 HMAC 票（10min）
   const t = await provider.biometricEnrollTicket("vera", "voice");
@@ -836,7 +842,7 @@ test("portal biometric voice: parent API (enroll quality gate → pending → ve
 
   // disable
   await provider.biometricDisable("vera", "voice");
-  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, voice: false });
+  assert.deepEqual(await provider.biometricStatus("vera"), { face: false, facePending: false, voice: false, voicePending: false });
 });
 
 test("portal biometric voice: login flow + enroll paths (login-time cookie & admin ticket)", { timeout: 60_000 }, async () => {
@@ -954,7 +960,9 @@ test("portal biometric voice: login flow + enroll paths (login-time cookie & adm
     assert.match(Buffer.from(tok1.split(".")[0], "base64url").toString(), /\.2fa:\d+$/);
     const probe1 = await get("/portal/api/authz/auth-request", port, { cookie: `st_portal_session=${tok1}`, ...APP });
     assert.equal(probe1.status, 200);
-    assert.deepEqual(await provider.biometricStatus("wendy"), { face: false, voice: true }, "template active via portal enroll");
+    { const st = await provider.biometricStatus("wendy");
+  assert.equal(st.voice, true, "template active via portal enroll");
+  assert.equal(st.face, false); }
 
     // 已有方法后 cookie 路径再注册 → 403（防密码窃贼自助加因子）
     const s2 = await postForm("/portal/login", port, { username: "wendy", password: "wendy-pw", next: "/app" }, APP);
@@ -1029,7 +1037,9 @@ test("portal biometric voice: login flow + enroll paths (login-time cookie & adm
     }, APP);
     assert.equal(fpost.status, 200);
     assert.match(fpost.body, /Face 2FA activated/);
-    assert.deepEqual(await provider.biometricStatus("zac"), { face: true, voice: false });
+    { const st = await provider.biometricStatus("zac");
+    assert.equal(st.face, true); assert.equal(st.facePending, false);
+    assert.equal(st.voice, false); assert.equal(st.voicePending, false); }
 
     // 票单次使用：重放同票 GET → 403
     const fp2 = await get(`/portal/enroll?m=face&t=${encodeURIComponent(tToken)}`, port, APP);

@@ -178,11 +178,24 @@ export class AuthRegistry {
     const key = this.#key(type, site);
     const cached = this.#instances.get(key);
     if (cached) return cached;
+    void key;
     const factory = this.#factories.get(type);
     if (!factory) throw new Error(`unknown auth provider: ${type} (available: ${this.list().join(", ")})`);
     const instance = factory(this.#ctx, { ...opts, ...this.#siteOpts(type, site) } as Record<string, unknown>);
     this.#instances.set(key, instance);
     return instance;
+  }
+
+  /** 销毁站点 provider 的缓存实例（停运行中的进程；下次 create 用新 opts 重建）。
+   *  供管理侧按需变更 provider 运行配置（如开启 biometrics 后重启门户）。 */
+  async evict(type: string, site = "default"): Promise<void> {
+    const key = this.#key(type, site);
+    const inst = this.#instances.get(key);
+    if (!inst) return;
+    this.#instances.delete(key);
+    try {
+      await (inst as unknown as { stop?: () => Promise<unknown> }).stop?.();
+    } catch { /* 停失败也照常移除（进程可能已死） */ }
   }
 
   /** Whether any provider instance of this site is running (site status). */
@@ -274,7 +287,7 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
       default: "one_factor",
       options: [
         { value: "one_factor", label: "One factor (password only)" },
-        { value: "two_factor", label: "Two factors (password + TOTP)" },
+        { value: "two_factor", label: "Two factors (password + TOTP / face / voice)" },
         { value: "deny", label: "Deny all" },
       ],
     },
@@ -282,6 +295,17 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
   basic: [],
   token: [],
   portal: [
+    {
+      key: "policy",
+      label: "Policy (2FA requirement)",
+      default: "two_factor",
+      options: [
+        { value: "one_factor", label: "One factor (password only)" },
+        { value: "two_factor", label: "Two factors (password + TOTP / face / voice)" },
+        { value: "deny", label: "Deny all" },
+      ],
+      description: "Global 2FA requirement: two_factor enforces TOTP (or biometrics) after password",
+    },
     {
       key: "basePath",
       label: "Base path",
@@ -313,7 +337,7 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
       key: "biometrics",
       label: "Face/Voice 2FA",
       type: "boolean",
-      default: false,
+      default: true,
       description: "Enable face/voice 2FA (face downloads ~8.4MB browser assets on first start; enrollment via portal /enroll page)",
     },
     {

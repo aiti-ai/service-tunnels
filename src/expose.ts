@@ -21,7 +21,21 @@ function getDefaultAuthProvider(): string {
 
 /** "oidc.issuerUrl" → { oidc: { issuerUrl } } — schema-driven form params
  *  arrive flat; provider options are nested. */
-function unflattenParams(params: Record<string, unknown>): Record<string, unknown> {
+/** "true"/"false" → boolean；纯数字字符串 → number（schema 表单参数以字符串到达，
+ *  而 provider opts 需要真实类型：portal biometrics === true / TTL number 等）。 */
+export function coerceParamValue(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  const t = v.trim();
+  if (/^-?\d+(\.\d+)?$/.test(t)) {
+    const n = Number(t);
+    if (Number.isFinite(n)) return n;
+  }
+  return v;
+}
+
+export function unflattenParams(params: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(params)) {
     const parts = key.split(".");
@@ -38,7 +52,7 @@ function unflattenParams(params: Record<string, unknown>): Record<string, unknow
       cur = cur[k] as Record<string, unknown>;
     }
     if (ok && parts[parts.length - 1] !== "__proto__" && parts[parts.length - 1] !== "constructor") {
-      cur[parts[parts.length - 1]!] = value;
+      cur[parts[parts.length - 1]!] = coerceParamValue(value);
     }
   }
   return out;
