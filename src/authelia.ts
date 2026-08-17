@@ -183,9 +183,20 @@ export class AutheliaProvider implements AuthProvider {
   #run(bin: string, args: string[], opts: Parameters<typeof execFileSync>[2] = {}): ReturnType<typeof execFileSync> {
     if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
       const quoted = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
-      return execFileSync("cmd.exe", ["/d", "/s", "/c", `"${bin}" ${args.map(quoted).join(" ")}`], opts);
+      // spawnSync + windowsVerbatimArguments passes the pre-quoted cmd line
+      // through untouched — execFileSync would re-quote it (nested quotes
+      // break cmd's /c parsing).
+      const { spawnSync } = require("child_process") as typeof import("child_process");
+      const r = spawnSync("cmd.exe", ["/d", "/s", "/c", `"${bin}" ${args.map(quoted).join(" ")}`], {
+        ...opts,
+        windowsVerbatimArguments: true,
+      });
+      if (r.status !== 0 || r.error) {
+        throw new Error(`authelia command failed (${r.status ?? r.error?.message}): ${bin} ${args.join(" ")}`);
+      }
+      return r.stdout as ReturnType<typeof execFileSync>;
     }
-    return this.#run(bin, args, opts);
+    return execFileSync(bin, args, opts);
   }
 
   /** Spawn authelia; .cmd shims (win32 test fakes) need cmd.exe routing. */
