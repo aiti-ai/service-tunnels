@@ -428,14 +428,22 @@ export class TunnelManager {
       child = spawn("cmd.exe", ["/d", "/s", "/c", cmdLine], {
         windowsVerbatimArguments: true,
         env: baseEnv,
-        detached: true, // own process group → group kill
+        // Windows detached would hand the cmd a new console and DETACH the
+        // stdio pipes (URL never reaches us). Tree reaping is done by
+        // taskkill /T in stop(); POSIX keeps the process group via detached.
+        ...(process.platform === "win32" ? {} : { detached: true }), // own process group → group kill
         stdio: ["ignore", "pipe", "pipe"],
       });
     } else {
+      // Windows OpenSSH hangs forever when its stderr is a pipe (the banner-
+      // exchange failure path never terminates the process). Inherit stderr
+      // for ssh-family tunnels there; URL parsing uses stdout only and errors
+      // surface via the non-zero exit code anyway.
+      const winSshStderr = process.platform === "win32" && (cfg.type === "ssh" || cfg.type === "serveo") ? ("inherit" as const) : ("pipe" as const);
       child = spawn(bin, spec.args, {
         env: baseEnv,
         detached: true, // own process group → group kill
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", winSshStderr],
       });
     }
     s.child = child;

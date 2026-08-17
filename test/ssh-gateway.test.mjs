@@ -145,14 +145,14 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
   try {
     // 1. correct key → roundtrip through -L (target port in the request is the
     //    fixed port; a different target port must ALSO land on the fixed one).
-    sshProc = spawn("ssh", sshArgs(localPort1, keyFile), { stdio: ["ignore", "ignore", "pipe"] });
+    sshProc = spawn("ssh", sshArgs(localPort1, keyFile), { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
     assert.ok(await waitLocal(localPort1), "correct key: local forward must come up");
     assert.equal(await echoThrough(localPort1, "hello-via-ssh"), "hello-via-ssh");
     sshProc.kill();
     sshProc = null;
 
     // 2. wrong key → no working forward
-    sshProc = spawn("ssh", sshArgs(localPort2, wrongFile), { stdio: ["ignore", "ignore", "pipe"] });
+    sshProc = spawn("ssh", sshArgs(localPort2, wrongFile), { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
     await new Promise((r) => setTimeout(r, 1200));
     const up2 = await waitLocal(localPort2, 1000);
     assert.equal(up2, false, "wrong key must not bring up a forward");
@@ -168,7 +168,7 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort3}:127.0.0.1:${forwardPort + 500}`, // bogus target
       "-p", String(gwPort), "t@127.0.0.1",
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    ], { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
     assert.ok(await waitLocal(localPort3), "pinned: local forward must come up");
     assert.equal(await echoThrough(localPort3, "pinned"), "pinned", "bogus target port must still hit fixed service");
     ssh3.kill();
@@ -219,7 +219,7 @@ test("gateway -R: reverse forwarding reaches client's local service, bogus bindP
     "-i", keyFile,
     "-R", `9999:127.0.0.1:${localSrvPort}`, // bogus bind port on the server side
     "-p", String(gwPort), "t@127.0.0.1",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
 
   try {
     // Wait until the gateway's reversePort listener is up (it's a net server

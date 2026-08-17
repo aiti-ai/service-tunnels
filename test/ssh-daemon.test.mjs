@@ -111,7 +111,7 @@ test("daemon ssh.* IPC: domain create/keys/forwarding via real ssh client", { ti
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort}:127.0.0.1:${fwd.port}`,
       "-p", String(created.port), "t@127.0.0.1",
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    ], { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
 
     // wait for the local forward, then roundtrip
     const { Socket } = await import("node:net");

@@ -117,7 +117,7 @@ test("expose --ssh-gateway: tcp tunnel target becomes the SSH gateway port", { t
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort}:127.0.0.1:${echoPort}`,
       "-p", String(gwPort), "u@127.0.0.1",
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    ], { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
     let up = false;
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 100));

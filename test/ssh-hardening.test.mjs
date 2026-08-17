@@ -40,15 +40,18 @@ async function freePort() {
 
 function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
   return new Promise((resolve) => {
+    // Windows OpenSSH hangs when stderr is a pipe — inherit it there.
+    // The auth-failure signal is the non-zero exit code either way.
+    const stderrMode = process.platform === "win32" ? "inherit" : "pipe";
     const child = spawn("ssh", [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
       "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
       "-i", keyFile, "-p", String(gwPort), "x@127.0.0.1",
       // request a session (shell) — gateway must REJECT it; the ssh command
       // exits with non-zero. Success here means "session was refused".
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    ], { stdio: ["ignore", "ignore", stderrMode] });
     let out = "";
-    child.stderr.on("data", (c) => (out += c));
+    if (stderrMode === "pipe") child.stderr.on("data", (c) => (out += c));
     child.on("close", (code) => resolve({ code, out }));
     setTimeout(() => { child.kill(); resolve({ code: null, out }); }, timeoutMs);
   });
@@ -78,7 +81,9 @@ test("gateway: repeated auth failures from one source lock the source out", { ti
     // First failures: ssh exits with "Permission denied" (auth failed).
     const first = await sshLogin(gwPort, keyFile);
     assert.notEqual(first.code, 0, "unauthenticated key must be rejected");
-    assert.match(first.out, /Permission denied|No supported authentication|denied/i);
+    if (process.platform !== "win32") {
+      assert.match(first.out, /Permission denied|No supported authentication|denied/i);
+    }
 
     const second = await sshLogin(gwPort, keyFile);
     assert.notEqual(second.code, 0);
