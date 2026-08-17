@@ -49,13 +49,12 @@ const p = spawn("ssh", [
   "-o", "ExitOnForwardFailure=yes", "-i", keyFile,
   "-L", `127.0.0.1:${localPort}:127.0.0.1:${forwardPort}`,
   "-p", String(gwPort), "t@127.0.0.1",
-], { stdio: ["ignore", "ignore", "pipe"] });
-let err = "";
-p.stderr.on("data", (d) => (err += d));
+], { stdio: ["ignore", "ignore", "inherit"] });
+
+
 await new Promise((r) => setTimeout(r, 6000));
 log("ssh exited:", p.exitCode !== null);
-log("--- stderr (full, last 40) ---");
-log(err.split("\n").filter(Boolean).slice(-40).join("\n"));
+
 try { p.kill(); } catch {}
 try { execFileSync("taskkill", ["/PID", String(p.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
 await gw.close();
