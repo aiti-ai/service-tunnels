@@ -190,6 +190,8 @@ export interface UserManager {
   addUser(name: string, password: string, displayName?: string, email?: string): Promise<void>;
   /** Change a user's password. */
   setUserPassword(name: string, password: string): Promise<void>;
+  /** Update a user's display name (nickname) — password/totp/biometrics untouched. */
+  setDisplayName(name: string, displayName: string): Promise<void>;
   /** Remove a user. */
   removeUser(name: string): Promise<void>;
 }

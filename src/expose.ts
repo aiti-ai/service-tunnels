@@ -110,6 +110,10 @@ export interface ExposeOptions {
    * 注：edge-auth 隧道（ngrok edge-oidc 等跳过本地网关）与 tcp/ssh 裸隧道不适用。
    */
   inject?: string | GatewayInject;
+  /** 注入「登录信息按钮」（悬浮 FAB：登录用户名 + 退出登录，可拖动四边停靠）。
+   *  默认 false（显式开启）；仅 portal/authelia/basic 认证通道生效（token/
+   *  none 无会话语义——忽略并 log）。 */
+  loginInfoButton?: boolean;
   /**
    * User's wildcard-DNS base domain (e.g. "example.com") — overrides
    * config service-tunnels.json `baseDomain`. expose also returns a PORTLESS
@@ -759,6 +763,9 @@ async function exposeTunnel(
         ? ""
         : (provider.loginRedirect?.(providerBasePath, publicScheme)
           ?? `${publicScheme}://$http_host${providerBasePath}/login?next=$request_uri`);
+    if (opts.loginInfoButton && (authMode === "token" as string)) {
+      log(`expose ${port}: loginInfoButton ignored for ${authMode} auth (no session semantics)`);
+    }
     try {
       await gateway.registerHost(publicHost, port, {
         authPort,
@@ -776,6 +783,8 @@ async function exposeTunnel(
         ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
         // 静态响应注入（仅主页面导航的 text/html；XHR/fetch/子资源不注入）
         ...(opts.inject ? { inject: opts.inject } : {}),
+        // 登录信息按钮（FAB：用户名 + 退出登录）——token/none 由 gateway 忽略
+        ...(opts.loginInfoButton ? { loginInfoButton: true } : {}),
       });
     } catch (err) {
       // unsafe host — tear down the tunnel so nothing is left half-registered

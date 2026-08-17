@@ -1,5 +1,6 @@
 import { spawn, execFileSync, type ChildProcess } from "child_process";
 import { createHash } from "crypto";
+import { loginFabScript, loginFabFile, FAB_JS_PATH } from "./user-fab.ts";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
@@ -64,6 +65,10 @@ export interface GatewayHost {
    *   addition 模块，缺失时 registerHost 报错）。
    */
   inject?: string | GatewayInject;
+  /** 注入「登录信息按钮」（悬浮 FAB：显示登录用户名 + 退出登录，可拖动四边
+   *  停靠）。默认 false（显式开启）；仅 auth != "none"/"token" 时生效
+   *  （无会话语义不注入）。与用户自定义 inject 并存（拼接：自定义在前）。 */
+  loginInfoButton?: boolean;
 }
 
 /** 静态响应注入（nginx sub_filter / add_before_body 实现）。 */
@@ -302,6 +307,64 @@ export function generateHostNginx(
 `;
             })()
           : "");
+  // ── 登录信息按钮（loginInfoButton）：拼接 fab 注入 + 回显 location ──
+  // 仅 fwd-auth（portal/authelia）与 basic 生效——token/none 无会话语义。
+  // token 显式开启时忽略（CLI 层应已提示，这里 fail-quiet 不炸配置）。
+  const fabOn = h.loginInfoButton === true && (isFwd || authMode === "basic");
+  // cfg（basic/logoutUrl）在 writeHostFile 写 JS 文件时处理——注入的只是外链引用
+  // fab 注入与自定义 inject 拼接（自定义在前）；无自定义 inject 时 fab 单独成注入
+  let injectRaw: string | GatewayInject | null = h.inject ?? null;
+  if (fabOn && injectRaw == null) injectRaw = { html: loginFabScript(), position: "head" };
+  else if (fabOn) {
+    const inj = normalizeInject(injectRaw);
+    if (inj) {
+      const fabHtml = loginFabScript();
+      injectRaw = inj.position === "head"
+        ? { ...inj, html: inj.html + fabHtml }
+        : { ...inj, html: fabHtml + inj.html }; // prepend：fab 放最前（浏览器允许 <script> 先于内容）
+    }
+  }
+  // 回显端点：__st_auth__ —— fwd-auth proxy 到 authz?who=1；basic 空文件+头
+  let whoServer = "";
+  if (fabOn) {
+    // fab JS 静态文件 serve（浏览器可拉：无敏感数据，纯组件代码 + 静态常量）
+    whoServer = `    location = ${FAB_JS_PATH} {
+      alias ${nginxRoot}/fabjs/__st_fab__.js;
+      default_type application/javascript;
+      add_header Cache-Control "no-store" always;
+    }
+
+`;
+    if (isFwd) {
+      whoServer += `    # 登录信息按钮数据源：已认证请求回显用户名（JSON，portal；authelia 透传头）
+    location = /__st_auth__ {
+      auth_request /${authzPath};
+      proxy_pass http://127.0.0.1:${authPort}/${authzPath}?who=1;
+      proxy_pass_request_body off;
+      proxy_set_header Content-Length "";
+      proxy_set_header Host $host;
+      proxy_set_header Cookie $http_cookie;
+      add_header X-St-Auth-User $upstream_http_x_st_auth_user always;
+      add_header Cache-Control "no-store" always;
+    }
+
+`;
+    } else {
+      // basic：空体 200 + 用户名头
+      whoServer += `    # 登录信息按钮数据源（basic）：空体 200 + 用户名头
+    location = /__st_auth__ {
+      auth_basic "service-tunnels${h.site ? " " + h.site : ""}";
+      auth_basic_user_file ${htpasswdFile};
+      root ${nginxRoot}/empty;
+      add_header Content-Type "application/json" always;
+      add_header X-St-Auth-User $remote_user always;
+      add_header Cache-Control "no-store" always;
+    }
+
+`;
+    }
+  }
+
   // ── 静态响应注入（tunnel nginx 路径，类似 proxy 的 transformResponse）──
   // 只作用于 text/html 且仅主页面导航（Sec-Fetch-Mode: navigate /
   // nested-navigate 或老客户端无该头；XHR/fetch/子资源请求不注入）——避免
@@ -311,7 +374,7 @@ export function generateHostNginx(
   // 注入指令放在 location / 与 bypass 白名单 location（nginx location /
   // 是前缀匹配——/target.html、/a/b/c 等所有直接导航页面都会命中并注入；
   // provider 登录页/authz/setup 不注入）。
-  const inject = normalizeInject(h.inject);
+  const inject = normalizeInject(injectRaw);
   let injectMap = ""; // http 级（conf.d 文件是 http include，map 可放）
   let injectServer = ""; // server 级（prepend 的内部 location）
   let injectLoc = ""; // location / 级（sub_filter / add_before_body）
@@ -408,7 +471,7 @@ ${injectLoc}    }
     access_log ${nginxRoot}/logs/${h.host}.access.log;
     error_log ${nginxRoot}/logs/${h.host}.error.log warn;
 
-${injectServer}${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
+${injectServer}${whoServer}${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
 ${authLine}
 ${injectLoc}      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};${h.scheme === "https" ? `
       proxy_ssl_verify off;
@@ -637,6 +700,9 @@ export class GatewayController {
     for (const d of ["proxy_temp", "client_body_temp", "fastcgi_temp", "uwsgi_temp", "scgi_temp"]) {
       mkdirSync(join(this.#nginxRoot, d), { recursive: true });
     }
+    // 登录信息按钮（basic 模式回显端点）：空文件作 200 响应体
+    mkdirSync(join(this.#nginxRoot, "empty"), { recursive: true });
+    writeFileSync(join(this.#nginxRoot, "empty", "__st_auth__"), "", "utf8");
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     const cfg = generateGatewayNginx({
       nginxPort: this.#port,
@@ -718,6 +784,16 @@ export class GatewayController {
       mkdirSync(join(this.#nginxRoot, "inject"), { recursive: true });
       writeFileSync(join(this.#nginxRoot, "inject", `__st_inj_${h.host}.html`), inj.html, "utf8");
     }
+    // 登录信息按钮：fab JS 写静态文件（map 参数长度限制 → 外链；见 user-fab.ts）。
+    // cfg：basic 标记 + authelia 风格 logoutUrl（basePath/logout；portal 的
+    // 回显 JSON 自带 logoutUrl 会覆盖静态值）。
+    if (h.loginInfoButton === true) {
+      mkdirSync(join(this.#nginxRoot, "fabjs"), { recursive: true });
+      const cfg: { logoutUrl?: string; basic?: boolean } = {};
+      if ((h.authMode ?? this.#authMode) === "basic") cfg.basic = true;
+      else if (h.basePath) cfg.logoutUrl = `${h.basePath}/logout`;
+      writeFileSync(join(this.#nginxRoot, "fabjs", "__st_fab__.js"), loginFabFile(cfg), "utf8");
+    }
   }
 
   /** Validate a public host BEFORE it reaches any file path or nginx config.
@@ -744,7 +820,7 @@ export class GatewayController {
   async registerHost(
     host: string,
     port: number,
-    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string; inject?: string | GatewayInject },
+    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string; inject?: string | GatewayInject; loginInfoButton?: boolean },
   ): Promise<void> {
     const safe = this.#sanitizeHost(host);
     const inject = normalizeInject(auth?.inject);
@@ -777,6 +853,7 @@ export class GatewayController {
       bypassPaths: auth?.bypassPaths,
       site: auth?.site,
       inject: inject ?? undefined,
+      loginInfoButton: auth?.loginInfoButton,
     });
     mkdirSync(join(this.#nginxRoot, "conf.d"), { recursive: true });
     this.#writeHostFile(this.#hosts.get(safe)!);

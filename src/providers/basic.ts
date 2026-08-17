@@ -252,6 +252,11 @@ export class BasicAuthProvider implements AuthProvider, UserManager {
     this.#ctx.log(`basic: password updated for ${name}`);
   }
 
+  async setDisplayName(_name: string, _displayName: string): Promise<void> {
+    // htpasswd 无 displayName 存储（listUsers 的 displayName === name）
+    throw new Error("basic auth provider does not support display names");
+  }
+
   async removeUser(name: string): Promise<void> {
     validateUserName(name);
     const rows = await this.#readDb();

@@ -593,6 +593,18 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     this.#ctx.log(`portal: password updated for ${name}`);
   }
 
+  async setDisplayName(name: string, displayName: string): Promise<void> {
+    validateUserName(name);
+    const dn = displayName.trim();
+    if (!dn || dn.length > 64) throw new Error("displayName required (max 64 chars)");
+    const rows = await this.#readDb();
+    const rec = rows.get(name);
+    if (!rec) throw new Error(`user ${name} not registered`);
+    rec.displayName = dn;
+    await this.#writeDb(rows);
+    this.#ctx.log(`portal: displayName updated for ${name}`);
+  }
+
   async removeUser(name: string): Promise<void> {
     validateUserName(name);
     const rows = await this.#readDb();
@@ -1765,10 +1777,20 @@ function enrollDonePage(method) {
     + '<p>You can close this tab and sign in with your ' + (method === "face" ? "face" : "voice") + '.</p></main></body></html>';
 }
 
+/** 登录后跳转目标白名单：仅本站相对路径（以 / 开头且非 // 协议相对）。
+ *  next 来自 URL 参数——不校验则 https://portal/login?next=https://evil.com
+ *  登录成功即开放跳转（钓鱼）。 */
+function safeNext(next) {
+  // charCode 判断避免模板转义（server.mjs 生成走模板字符串，字面反斜杠会被
+  // 转义破坏）：拒绝协议相对（//）与 Windows 变体（/\\）开头的跳转。
+  if (typeof next !== "string" || next.charCodeAt(0) !== 47 || next.charCodeAt(1) === 47 || next.charCodeAt(1) === 92) return DEPLOY || "/";
+  return next;
+}
+
 function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0) {
   const token = issueSession(name, cookieName, ttl, twoFactorAt);
   res.writeHead(302, {
-    Location: next || "/",
+    Location: safeNext(next),
     "Set-Cookie": cookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
       + (SECURE ? "; Secure" : ""),
   });
@@ -1803,8 +1825,37 @@ createServer((req, res) => {
       res.end("2fa required");
       return;
     }
+    // ?who=1：登录信息按钮数据源（JSON 回显本会话用户名/displayName/provider
+    // /登出 URL——用户名不进注入 HTML（防 XSS），由按钮 JS 运行时取此端点）。
+    if (url.searchParams.get("who") === "1") {
+      const users = loadUsers();
+      const rec = users[sess.name];
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({
+        user: sess.name,
+        displayName: (rec && rec.displayName) || sess.name,
+        provider: "portal",
+        logoutUrl: BASE + "/logout?next=" + encodeURIComponent(url.searchParams.get("next") || DEPLOY || "/"),
+      }));
+      return;
+    }
     res.writeHead(200, { "X-St-Auth-User": sess.name });
     res.end("ok");
+    return;
+  }
+
+  // 登出（登录信息按钮「退出登录」目标）：清主会话 + 2FA 中间票，回登录页。
+  // GET 可接受（登出只作用于请求者自己的会话，业界通行如 authelia）。
+  if (url.pathname === BASE + "/logout" && req.method === "GET") {
+    const next = url.searchParams.get("next") || DEPLOY || "/";
+    res.writeHead(302, {
+      Location: BASE + "/login?next=" + encodeURIComponent(next),
+      "Set-Cookie": [
+        COOKIE + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + (SECURE ? "; Secure" : ""),
+        COOKIE2 + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + (SECURE ? "; Secure" : ""),
+      ].join(", "),
+    });
+    res.end();
     return;
   }
 
@@ -1828,7 +1879,7 @@ createServer((req, res) => {
           res.end();
           return;
         }
-        res.writeHead(302, { Location: next });
+        res.writeHead(302, { Location: safeNext(next) });
         res.end();
         return;
       }

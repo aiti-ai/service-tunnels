@@ -310,6 +310,13 @@ export interface ServiceTunnels {
       provider?: string | string[],
       site?: string,
     ): Promise<string[]>;
+    /** 更新用户显示名（nickname）——不动密码/TOTP/生物模板。 */
+    setDisplayName(
+      name: string,
+      displayName: string,
+      provider?: string | string[],
+      site?: string,
+    ): Promise<string[]>;
     /** Remove a user across `provider` (default "all"). */
     removeUser(name: string, provider?: string | string[], site?: string): Promise<string[]>;
     /** Provider types with local user databases (e.g. ["authelia","basic"]). */
@@ -1002,6 +1009,22 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
             }
           }
           if (!done.length) throw new Error(`user ${name} not registered`);
+          return done;
+        },
+        setDisplayName: async (name: string, displayName: string, provider?: string | string[], site?: string) => {
+          const targets = resolveUserTargets(registry, provider);
+          const done: string[] = [];
+          for (const t of targets) {
+            try {
+              await registry.userManager(t, site).setDisplayName(name, displayName);
+              done.push(t);
+            } catch (err) {
+              // basic 等不支持 displayName 的 provider → 跳过（"not support"）；
+              // 用户不存在 → 跳过（可能只在另一 provider）
+              if (!(err instanceof Error) || !/not (found|registered)|no such user|not support/i.test(err.message)) throw err;
+            }
+          }
+          if (!done.length) throw new Error(`no provider supports display names for user ${name}`);
           return done;
         },
         removeUser: async (name: string, provider?: string | string[], site?: string) => {
