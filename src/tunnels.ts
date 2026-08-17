@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, type ChildProcess, execFileSync } from "child_process";
 import { promises as dns } from "node:dns";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -511,6 +511,19 @@ export class TunnelManager {
     if (!child) return;
     const pid = child.pid;
     const groupKill = (sig: NodeJS.Signals) => {
+      if (process.platform === "win32") {
+        // Windows has no negative-PID kill; process.kill(-pid) throws and
+        // child.kill() only terminates the shell, leaving grandchildren
+        // (e.g. a node helper under a .cmd shim) orphaned — which keeps the
+        // stdio pipes open and the event loop alive. taskkill /T reaps the
+        // whole tree.
+        try {
+          execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+        } catch {
+          // already gone
+        }
+        return;
+      }
       try {
         if (pid) process.kill(-pid, sig);
       } catch {
