@@ -111,6 +111,7 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
 
   const sshArgs = (localPort, key) => [
     "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
+      ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []), // Windows ssh 无控制台 stderr 时 banner 路径挂起, QUIET 抑制
     "-o", "ExitOnForwardFailure=yes",
     "-i", key,
     "-L", `127.0.0.1:${localPort}:127.0.0.1:${forwardPort}`,
@@ -174,6 +175,7 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
     const localPort3 = await pickFreePort();
     const ssh3 = spawn("ssh", [
       "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
+      ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []), // Windows ssh 无控制台 stderr 时 banner 路径挂起, QUIET 抑制
       "-o", "ExitOnForwardFailure=yes",
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort3}:127.0.0.1:${forwardPort + 500}`, // bogus target
@@ -225,6 +227,7 @@ test("gateway -R: reverse forwarding reaches client's local service, bogus bindP
   // ignore it and bind reversePort instead.
   const ssh = spawn("ssh", [
     "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
+      ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []), // Windows ssh 无控制台 stderr 时 banner 路径挂起, QUIET 抑制
     "-o", "ExitOnForwardFailure=yes",
     "-i", keyFile,
     "-R", `9999:127.0.0.1:${localSrvPort}`, // bogus bind port on the server side

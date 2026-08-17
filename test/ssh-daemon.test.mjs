@@ -115,6 +115,7 @@ test("daemon ssh.* IPC: domain create/keys/forwarding via real ssh client", { ti
     const localPort = (await bindHttpServer()).port;
     sshProc = spawn("ssh", [
       "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
+      ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []), // Windows ssh 无控制台 stderr 时 banner 路径挂起, QUIET 抑制
       "-o", "ExitOnForwardFailure=yes",
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort}:127.0.0.1:${fwd.port}`,

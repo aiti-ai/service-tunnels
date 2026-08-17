@@ -55,6 +55,7 @@ function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
     const child = spawn("ssh", [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
       "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
+      ...(process.platform === "win32" ? ["-o", "LogLevel=QUIET"] : []), // Windows ssh 无控制台 stderr 时 banner 路径挂起, QUIET 抑制
       "-i", keyFile, "-p", String(gwPort), "x@127.0.0.1",
       // request a session (shell) — gateway must REJECT it; the ssh command
       // exits with non-zero. Success here means "session was refused".
