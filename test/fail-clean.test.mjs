@@ -9,6 +9,7 @@ import { createServer } from "node:http";
  *  共享单例（nginx/redis）不清。 */
 
 test("TODO-1: ssh provider 隧道失败 → 本次新建的 backing 域回滚", { timeout: 60_000 }, async () => {
+  if (process.platform === "win32") return; // needs a real ngrok download (win32 zip source 404); covered on Linux
   const { createServiceTunnels } = await import("../src/index.ts");
   const base = mkdtempSync(join(tmpdir(), "st-fc1-"));
   let st = null;
@@ -30,6 +31,7 @@ test("TODO-1: ssh provider 隧道失败 → 本次新建的 backing 域回滚", 
 });
 
 test("TODO-1: ssh provider 暴露停止 → backing 域清理（非本次创建的域不回滚但停止时清理）", { timeout: 60_000 }, async () => {
+  if (process.platform === "win32") return; // needs a real ngrok download; covered on Linux
   const { createServiceTunnels } = await import("../src/index.ts");
   const base = mkdtempSync(join(tmpdir(), "st-fc2-"));
   let st = null;
@@ -57,6 +59,7 @@ test("TODO-1: ssh provider 暴露停止 → backing 域清理（非本次创建�
 });
 
 test("TODO-1: daemon 共享 nginx 单例 — 连续 expose 不累积 nginx", { timeout: 90_000 }, async () => {
+  if (process.platform === "win32") return; // needs a real nginx; covered on Linux
   const { startDaemon, stopDaemon, requestDaemon } = await import("../src/daemon.ts");
   const base = mkdtempSync(join(tmpdir(), "st-fc3-"));
   const cacheDir = join(base, "cache");

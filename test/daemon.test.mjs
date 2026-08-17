@@ -37,7 +37,12 @@ test("start → IPC ping → stop lifecycle", { timeout: 30_000 }, async () => {
       await new Promise((r) => setTimeout(r, 100));
     }
     assert.ok(state?.daemon?.ipc, "state.json should record daemon ipc");
-    assert.ok(state.daemon.ipc.startsWith("unix://"), `ipc=${state.daemon.ipc}`);
+    // unix socket on POSIX, TCP on Windows (no unix sockets there)
+    if (process.platform === "win32") {
+      assert.match(state.daemon.ipc, /^tcp:\/\/127\.0\.0\.1:/, `ipc=${state.daemon.ipc}`);
+    } else {
+      assert.ok(state.daemon.ipc.startsWith("unix://"), `ipc=${state.daemon.ipc}`);
+    }
 
     // status reflects the running daemon
     const status = daemonStatus(cacheDir);

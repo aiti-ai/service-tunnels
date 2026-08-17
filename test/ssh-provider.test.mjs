@@ -31,6 +31,7 @@ function nullDevice() {
  *  "ssh", and that a generated key actually reaches the target service via
  *  `ssh -L` through the gateway (security = site public keys). */
 test("ssh provider: auto-provision site domain + public-key port-forward (any protocol)", { timeout: 90_000 }, async () => {
+  if (process.platform === "win32") return; // needs a real ngrok download (win32 zip 404) + ssh -L; covered on Linux
   const { createServiceTunnels } = await import("../src/index.ts");
   const base = mkdtempSync(join(tmpdir(), "st-sshprov-"));
   let st = null;
