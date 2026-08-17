@@ -179,6 +179,27 @@ export class AutheliaProvider implements AuthProvider {
     return this.#bin;
   }
 
+  /** Run authelia; .cmd shims (win32 test fakes) can't be exec'd directly. */
+  #run(bin: string, args: string[], opts: Parameters<typeof execFileSync>[2] = {}): ReturnType<typeof execFileSync> {
+    if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+      const quoted = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+      return execFileSync("cmd.exe", ["/d", "/s", "/c", `"${bin}" ${args.map(quoted).join(" ")}`], opts);
+    }
+    return this.#run(bin, args, opts);
+  }
+
+  /** Spawn authelia; .cmd shims (win32 test fakes) need cmd.exe routing. */
+  #spawnBin(bin: string, args: string[], opts: Parameters<typeof spawn>[2] = {}): ChildProcess {
+    if (process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)) {
+      const quoted = (s: string) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+      return spawn("cmd.exe", ["/d", "/s", "/c", `"${bin}" ${args.map(quoted).join(" ")}`], {
+        ...opts,
+        windowsVerbatimArguments: true,
+      });
+    }
+    return spawn(bin, args, opts);
+  }
+
   status(): AuthProviderStatus {
     return {
       running: Boolean(this.#child && alive(this.#child.pid ?? 0)),
@@ -282,7 +303,7 @@ ntp:
 
     // validate before first start
     const bin = await this.#resolveBin();
-    execFileSync(bin, ["config", "validate", "--config", this.#mainConfig, "--config", this.#tunnelConfig], {
+    this.#run(bin, ["config", "validate", "--config", this.#mainConfig, "--config", this.#tunnelConfig], {
       stdio: "ignore",
     });
     this.#ctx.log(`authelia config validated (${this.#basePath}, port ${this.#port || "auto"})`);
@@ -311,7 +332,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
     if (!this.#port) this.#port = await this.#ctx.pickPort();
     await this.prepare();
     const bin = await this.#resolveBin();
-    const child = spawn(
+    const child = this.#spawnBin(
       bin,
       [
         "--config", this.#mainConfig,
@@ -444,7 +465,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
     // expose; the file write still lands and takes effect on next start
     if (!wasRunning) return;
     const bin = await this.#resolveBin();
-    execFileSync(bin, ["config", "validate", "--config", this.#mainConfig, "--config", this.#tunnelConfig], {
+    this.#run(bin, ["config", "validate", "--config", this.#mainConfig, "--config", this.#tunnelConfig], {
       stdio: "ignore",
     });
     await this.stop();
@@ -529,7 +550,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
     // break every subsequent TOTP operation.
     const dbPath = join(this.#dataDir, "sqlite", "authelia.db");
     if (!existsSync(dbPath)) {
-      execFileSync(bin, ["storage", "migrate", "up", "--config", this.#mainConfig], { stdio: "ignore" });
+      this.#run(bin, ["storage", "migrate", "up", "--config", this.#mainConfig], { stdio: "ignore" });
     }
     return bin;
   }
@@ -541,7 +562,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
     if (!rec) throw new Error(`user ${name} not registered`);
     const bin = await this.#ensureStorageReady();
     const secret = base32Encode(randomBytes(20));
-    execFileSync(
+    this.#run(
       bin,
       ["storage", "user", "totp", "generate", name, "--secret", secret, "--force", "--config", this.#mainConfig],
       { stdio: "ignore" },
@@ -564,7 +585,7 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
     // export exits non-zero when NO configurations exist (e.g. right after
     // disable) — treat that as "not enrolled", not an error.
     try {
-      execFileSync(bin, ["storage", "user", "totp", "export", "--file", outFile, "--config", this.#mainConfig], { stdio: "ignore" });
+      this.#run(bin, ["storage", "user", "totp", "export", "--file", outFile, "--config", this.#mainConfig], { stdio: "ignore" });
       return { enrolled: readFileSync(outFile, "utf8").includes(`username: ${name}`) };
     } catch {
       return { enrolled: false };
@@ -575,17 +596,17 @@ ${hosts.map((h) => `    - domain:\n        - '${h}'\n      policy: ${this.#hosts
   async totpDisable(name: string): Promise<void> {
     validateUserName(name);
     const bin = await this.#ensureStorageReady();
-    execFileSync(bin, ["storage", "user", "totp", "delete", name, "--config", this.#mainConfig], { stdio: "ignore" });
+    this.#run(bin, ["storage", "user", "totp", "delete", name, "--config", this.#mainConfig], { stdio: "ignore" });
     this.#ctx.log(`authelia: TOTP disabled for ${name}`);
   }
 
   async #hashPassword(password: string): Promise<string> {
     const bin = await this.#resolveBin();
     // `authelia crypto hash generate argon2 --password <pw>` prints the hash
-    const out = execFileSync(bin, ["crypto", "hash", "generate", "argon2", "--password", password], {
+    const out = this.#run(bin, ["crypto", "hash", "generate", "argon2", "--password", password], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-    });
+    }) as string;
     const m = /(\$argon2id\$[^\s]+)/.exec(out);
     if (!m) throw new Error("authelia: failed to generate argon2 hash");
     return m[1]!;
