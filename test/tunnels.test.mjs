@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { after } from "node:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, delimiter as pathDelimiter } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -263,7 +263,7 @@ test("serveo: builds ssh argv for the serveo.net hosted service", { timeout: 15_
   const origPath = process.env.PATH;
   try {
     fakeTool(base, "ssh", "Forwarding HTTP traffic from https://abc.serveo.net");
-    process.env.PATH = `${join(base, "bin")}:${process.env.PATH}`;
+    process.env.PATH = `${join(base, "bin")}${pathDelimiter}${process.env.PATH}`;
     const argvFile = join(base, "bin", "args-ssh");
     const tm = new TunnelManager({ cacheDir, resolveTool: async () => "" });
     tm.add({ name: "s", type: "serveo", target: 8901 });
@@ -536,7 +536,9 @@ test("bore: builds `bore local` argv + synthesizes url from 'listening at host:p
     const dl = Date.now() + 5_000;
     while (Date.now() < dl && !tm.get("b")?.url) await new Promise((r) => setTimeout(r, 50));
     assert.equal(tm.get("b")?.url, "http://localhost:3999");
-    const argv = readFileSync(argvFile, "utf8").trim().split("\n");
+    // cmd `echo %%a>>` writes CRLF lines — strip \r so argv parses identically
+    // on both platforms.
+    const argv = readFileSync(argvFile, "utf8").replace(/\r/g, "").trim().split("\n");
     assert.equal(argv[0], "local");
     assert.equal(argv[1], "4180", "bore: local port = target");
     assert.equal(argv[argv.indexOf("--to") + 1], "tunnel.local:7835", "bore: --to <server>");
