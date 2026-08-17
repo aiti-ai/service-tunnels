@@ -23,6 +23,34 @@ function tempDirs() {
 function fakeBin(base, name, script) {
   const dir = join(base, "bin");
   mkdirSync(dir, { recursive: true });
+  if (process.platform === "win32") {
+    // sh 脚本在 Windows 不可执行——生成语义等价的 .cmd + node helper:
+    // --version / config validate / crypto hash 立即输出; 服务器模式从
+    // --config 文件读端口 TCP 监听保活(等价 sh 的 python3 内嵌服务器)。
+    const helper = join(dir, `${name}-helper.cjs`);
+    writeFileSync(
+      helper,
+      [
+        'const args = process.argv.slice(2);',
+        'if (args[0] === "--version") { console.log("authelia v4.39.20"); process.exit(0); }',
+        'if (args[0] === "config" && args[1] === "validate") process.exit(0);',
+        'if (args[0] === "crypto") { console.log("Password Hash: $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$abcdef"); process.exit(0); }',
+        'const fs = require("fs"), net = require("net");',
+        'const ci = args.indexOf("--config");',
+        'const confPath = ci >= 0 ? args[ci + 1] : null;',
+        'let port = 9091;',
+        'try { const conf = fs.readFileSync(confPath, "utf8"); const m = conf.match(/tcp:\\/\\/127\\.0\\.0\\.1:(\\d+)/); if (m) port = +m[1]; } catch {}',
+        'const srv = net.createServer(() => {});',
+        'srv.on("error", () => {});',
+        'srv.listen(port, "127.0.0.1", () => { srv.once("connection", () => {}); });',
+        'setInterval(() => {}, 1000);',
+      ].join("\n") + "\n",
+      "utf8",
+    );
+    const bin = join(dir, `${name}.cmd`);
+    writeFileSync(bin, `@echo off\r\nnode "${helper}" %*\r\n`, "utf8");
+    return bin;
+  }
   const p = join(dir, name);
   writeFileSync(p, script, "utf8");
   chmodSync(p, 0o755);
@@ -47,8 +75,6 @@ function startFakeAutheliaServer(port) {
 }
 
 test("authelia: config generation + argon2 hash + registerHost rewrites config-tunnels.yml", { timeout: 30_000 }, async () => {
-  // fake authelia 是 sh 脚本 + python3 内嵌服务器，Windows 无法承载——逻辑已在 Linux 覆盖。
-  if (process.platform === "win32") return;
   const { AutheliaProvider } = await loadAuthelia();
   const { cacheDir, configDir, base } = tempDirs();
 
@@ -223,7 +249,6 @@ test("redis: green start reports a port and stops", { timeout: 30_000 }, async (
 });
 
 test("authelia user management: add/list/set-password/remove", { timeout: 40_000 }, async () => {
-  if (process.platform === "win32") return; // sh fake，Windows 不可执行
   const { AutheliaProvider } = await loadAuthelia();
   const { cacheDir, configDir, base } = tempDirs();
 
