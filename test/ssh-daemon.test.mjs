@@ -116,7 +116,8 @@ test("daemon ssh.* IPC: domain create/keys/forwarding via real ssh client", { ti
     // wait for the local forward, then roundtrip
     const { Socket } = await import("node:net");
     let fwdUp = false;
-    for (let i = 0; i < 60; i++) {
+    const fwdAttempts = process.platform === "win32" ? 120 : 60; // Windows OpenSSH cold-start is slow
+    for (let i = 0; i < fwdAttempts; i++) {
       await new Promise((r) => setTimeout(r, 100));
       try {
         const s = new Socket();

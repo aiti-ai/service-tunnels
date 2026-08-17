@@ -119,7 +119,8 @@ test("expose --ssh-gateway: tcp tunnel target becomes the SSH gateway port", { t
       "-p", String(gwPort), "u@127.0.0.1",
     ], { stdio: process.platform === "win32" ? ["ignore", "ignore", "inherit"] : ["ignore", "ignore", "pipe"] });
     let up = false;
-    for (let i = 0; i < 60; i++) {
+    const upAttempts = process.platform === "win32" ? 120 : 60; // Windows OpenSSH cold-start is slow
+    for (let i = 0; i < upAttempts; i++) {
       await new Promise((r) => setTimeout(r, 100));
       try {
         const s = new Socket();

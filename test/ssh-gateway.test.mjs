@@ -110,7 +110,9 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
     "t@127.0.0.1",
   ];
 
-  async function waitLocal(localPort, ms = 5000) {
+  async function waitLocal(localPort, ms) {
+    // Windows OpenSSH cold-start is ~3-4s; give it room.
+    if (ms === undefined) ms = process.platform === "win32" ? 15_000 : 5_000;
     const t0 = Date.now();
     const { Socket } = await import("node:net");
     while (Date.now() - t0 < ms) {
@@ -225,12 +227,13 @@ test("gateway -R: reverse forwarding reaches client's local service, bogus bindP
     // Wait until the gateway's reversePort listener is up (it's a net server
     // inside the gateway process; probe it).
     const { Socket: ProbeSocket } = await import("node:net");
+    const probeMs = process.platform === "win32" ? 15_000 : 5_000;
     await new Promise((resolve, reject) => {
       const t0 = Date.now();
       (function probe() {
         const s = new ProbeSocket();
         s.once("connect", () => { s.destroy(); resolve(); });
-        s.once("error", () => { s.destroy(); if (Date.now() - t0 > 5000) reject(new Error("reversePort never up")); else setTimeout(probe, 100); });
+        s.once("error", () => { s.destroy(); if (Date.now() - t0 > probeMs) reject(new Error("reversePort never up")); else setTimeout(probe, 100); });
         s.connect(reversePort, "127.0.0.1");
       })();
     });

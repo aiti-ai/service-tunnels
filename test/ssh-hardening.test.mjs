@@ -40,6 +40,7 @@ async function freePort() {
 
 function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
   return new Promise((resolve) => {
+    if (timeoutMs === 8000 && process.platform === "win32") timeoutMs = 15_000; // Windows OpenSSH cold-start is slow
     // Windows OpenSSH hangs when stderr is a pipe — inherit it there.
     // The auth-failure signal is the non-zero exit code either way.
     const stderrMode = process.platform === "win32" ? "inherit" : "pipe";

@@ -86,7 +86,8 @@ test("ssh provider: auto-provision site domain + public-key port-forward (any pr
 
     // wait for the local forward listener to open before requesting
     let ready = false;
-    for (let i = 0; i < 40 && !ready; i++) {
+    const readyAttempts = process.platform === "win32" ? 80 : 40; // Windows OpenSSH cold-start is slow
+    for (let i = 0; i < readyAttempts && !ready; i++) {
       await new Promise((r) => setTimeout(r, 150));
       await new Promise((resolve) => {
         const sock = netConnect(localPort, "127.0.0.1");
