@@ -211,7 +211,8 @@ test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", {
   // 固定高端口(42981+):freePort() 在并发测试下可能被立即复用导致 -R 绑定失败。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const sshBin = process.platform === "win32" ? "ssh" : execFileSync("which", ["ssh"], { encoding: "utf8" }).trim(); // which returns git-bash /c/... paths on Windows (unspawnable)
+
   const user = userInfo().username;
   const { port: target, srv: server } = await bindHttpServer((req, res) => res.end("SSH_FWD_OK"), 42981);
   try {
@@ -555,7 +556,8 @@ test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { time
   // 并发 freePort 竞态导致 -R 绑定失败。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const sshBin = process.platform === "win32" ? "ssh" : execFileSync("which", ["ssh"], { encoding: "utf8" }).trim(); // which returns git-bash /c/... paths on Windows (unspawnable)
+
   const user = userInfo().username;
   const { port: target, srv: server } = await bindHttpServer((req, res) => res.end("SYNTH_OK"), 42984);
   try {
@@ -583,7 +585,8 @@ test("ssh: real connection refused does NOT report a URL; stop revokes it", { ti
   // 合成窗口要盖过它,否则 URL 在 ssh 尚未退出时被误报。
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();
-  const sshBin = execFileSync("which", ["ssh"], { encoding: "utf8" }).trim();
+  const sshBin = process.platform === "win32" ? "ssh" : execFileSync("which", ["ssh"], { encoding: "utf8" }).trim(); // which returns git-bash /c/... paths on Windows (unspawnable)
+
   const user = userInfo().username;
   const synthDelay = process.platform === "win32" ? 6_000 : 500;
   const waitMs = process.platform === "win32" ? 20_000 : 5_000;
