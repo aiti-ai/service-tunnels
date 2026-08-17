@@ -278,6 +278,9 @@ test("start is idempotent; unknown tunnel throws", { timeout: 20_000 }, async ()
     assert.equal(second.running, true);
 
     await assert.rejects(tm.start("missing"), /unknown tunnel/);
+    // the fake cloudflared (sleep 120) is still running — stop it before the
+    // temp dir goes away, else it lingers orphaned until its sleep ends.
+    await tm.stopAll();
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

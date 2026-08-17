@@ -81,6 +81,24 @@ export function startDaemon(
   const existing = daemonStatus(cacheDir);
   if (existing.running) return existing;
 
+  // A daemon that is alive but unreachable (its IPC socket file was deleted,
+  // e.g. a temp dir cleaned while it still ran) reports as not-running here;
+  // reap it by pid BEFORE spawning a replacement so broken instances never
+  // accumulate (their helper tree dies with them).
+  const stale = readState(cachePaths(cacheDir).stateFile).daemon;
+  if (stale?.pid != null && pidAlive(stale.pid)) {
+    try {
+      process.kill(stale.pid, "SIGTERM");
+    } catch {}
+    const dl = Date.now() + 2_000;
+    while (Date.now() < dl && pidAlive(stale.pid)) {
+      spawnSync("sleep", ["0.05"], { stdio: "ignore" });
+    }
+    try {
+      if (pidAlive(stale.pid)) process.kill(stale.pid, "SIGKILL");
+    } catch {}
+  }
+
   ensureMarker(); // scope cleanup to this instance (daemon inherits it)
   const { stateFile, daemonSock } = cachePaths(cacheDir);
   const configDir = opts.configDir ?? join(dirname(cacheDir), "config");
@@ -171,27 +189,47 @@ export async function requestDaemon<T>(
   }
 }
 
-/** Stop the daemon: graceful shutdown via IPC, SIGTERM fallback. */
+/** Stop the daemon: graceful shutdown via IPC, pid fallback when the IPC
+ *  socket/state is gone, role-helper reaping by persisted marker. */
 export async function stopDaemon(cacheDir: string): Promise<boolean> {
-  const status = daemonStatus(cacheDir);
-  if (!status.running || status.pid == null) return false;
-  const ok = await requestDaemon<{ ok: boolean }>(cacheDir, "shutdown", undefined, 3_000);
-  if (!ok && pidAlive(status.pid)) {
-    try {
-      process.kill(status.pid, "SIGTERM");
-    } catch {
-      // already gone
+  const { stateFile } = cachePaths(cacheDir);
+  const state = readState(stateFile);
+  const d = state.daemon;
+  const pid = d?.pid ?? null;
+  const hadLive = pid != null && pidAlive(pid);
+  if (hadLive) {
+    // Graceful IPC shutdown first (works while the state + socket aren't
+    // deleted). If it fails (socket file already cleaned), fall back to a
+    // direct SIGTERM — pidAlive is authoritative, not the socket file.
+    const viaIpc = await requestDaemon(cacheDir, "shutdown", undefined, 3_000);
+    if (!viaIpc) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already gone
+      }
+    }
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && pidAlive(pid)) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    if (pidAlive(pid)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
     }
   }
-  // Wait briefly for the daemon to exit and clean state.json.
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && daemonStatus(cacheDir).running) {
-    spawnSync("sleep", ["0.1"], { stdio: "ignore" });
-  }
   // Safety net: if the daemon was SIGKILLed before its own cleanup finished,
-  // kill any remaining framework helpers by role marker (this instance's).
-  await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "");
-  return !daemonStatus(cacheDir).running;
+  // kill any remaining framework helpers by role marker. Prefer the marker we
+  // persisted at daemon start (state.json is often the ONLY record left after
+  // a temp dir was partially cleaned); fall back to our own env.
+  const marker = process.env.SERVICE_TUNNELS_MARKER ?? d?.marker ?? "";
+  await killRoleProcesses("SIGTERM", 300, marker);
+  // true only when a live daemon existed and is gone now; false when there
+  // was nothing to stop (nothing had a daemon since… same as before).
+  return hadLive && !pidAlive(pid);
 }
 
 /** Convenience: discover ports through the daemon (CLI mode). */

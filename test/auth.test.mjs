@@ -177,7 +177,10 @@ test("gateway: start/stop lifecycle with a real nginx binary", { timeout: 30_000
     assert.equal(port, 4180);
     assert.equal(internal.some((x) => x.role === "nginx"), true);
     // host list survives
-    assert.deepEqual(gw.hosts(), [{ host: "demo.ngrok-free.app", port: 5173 }]);
+    const registeredHosts = gw.hosts();
+    assert.equal(registeredHosts.length, 1);
+    assert.equal(registeredHosts[0].host, "demo.ngrok-free.app");
+    assert.equal(registeredHosts[0].port, 5173);
     // actual HTTP round trip through the gateway
     const res = await new Promise((resolve, reject) => {
       const req = httpRequest(

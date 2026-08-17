@@ -522,6 +522,12 @@ test("CLI: tunnel add surfaces validation errors and sets dangerous for command"
     assert.notEqual(nameBad.code, 0);
     assert.match(nameBad.stderr + nameBad.stdout, /invalid tunnel name/);
   } finally {
+    // CLI tunnel add auto-starts a long-lived daemon (daemon owns tunnels)
+    // — stop it explicitly, otherwise every run leaks a daemon+guardian+nginx
+    // tree (state.json/socket get removed by rmSync below while the detached
+    // daemon keeps running, forever unreachable).
+    const { stopDaemon } = await import("../src/daemon.ts");
+    await stopDaemon(cacheDir).catch(() => {});
     rmSync(base, { recursive: true, force: true });
   }
 });

@@ -177,8 +177,18 @@ export function generateHostNginx(
   h: GatewayHost,
   defaults: { nginxPort: number; nginxRoot: string; authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string },
 ): string {
-  const authMode = h.authMode ?? defaults.authMode ?? "forward-auth";
+  const authModeRaw = h.authMode ?? defaults.authMode ?? "forward-auth";
   const authPort = h.authPort ?? defaults.authPort ?? 0;
+  // A forward-auth/oauth2/token host with no auth backend (authPort 0 /
+  // absent) would emit `proxy_pass http://127.0.0.1:0/...` — an invalid
+  // upstream that `nginx -t` rejects. Runtime flows always resolve a real
+  // provider port first; a missing backend downgrades to plain proxy so the
+  // config stays valid (gateway lifecycle without an auth server). "basic"
+  // uses an htpasswd file, not authPort, so it is unaffected.
+  const authMode =
+    (authModeRaw === "forward-auth" || authModeRaw === "oauth2-proxy" || authModeRaw === "token") && !authPort
+      ? "none"
+      : authModeRaw;
   const basePath = h.basePath ?? defaults.basePath ?? "/authelia";
   const htpasswdFile = h.htpasswdFile ?? defaults.htpasswdFile ?? "";
   const nginxPort = defaults.nginxPort;

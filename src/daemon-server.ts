@@ -25,7 +25,7 @@ import { readConfigFile, writeConfigFile, resolveBaseDomains, resolveAllowAuthNo
 import { TunnelManager, tunnelParamSchemas, tunnelMetas, TUNNEL_SCHEMAS_VERSION, type TunnelConfig } from "./tunnels.ts";
 import { validateTunnelConfig, validateTunnelName, validatePort, validateServer, validateUserName } from "./validation.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
-import { registerPid } from "./pid-registry.ts";
+import { registerPid, registrationFilePath } from "./pid-registry.ts";
 import { ensureTool, TOOLS } from "./tools.ts";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
@@ -743,9 +743,10 @@ const methods = new Map<string, Handler>([
     "shutdown",
     async () => {
       // kill every framework helper we spawned (nginx/authelia/redis/tunnels
-      // carry SERVICE_TUNNELS_ROLE) so nothing becomes an orphan
+      // carry SERVICE_TUNNELS_ROLE) so nothing becomes an orphan. nginx strips
+      // its inherited env, so also match by PPID/direct-child + per-PPID path.
       await tunnels.stopAll();
-      await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "");
+      await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "", process.pid, `nginx-${process.pid}`);
       setTimeout(() => process.exit(0), 100);
       return { ok: true };
     },
@@ -1025,8 +1026,13 @@ function authelia(): AutheliaProvider {
 const server = createServer(serveSocket);
 const ipc = await listen();
 // watch ourselves: if this daemon is ever SIGKILLed, the guardian reaps the
-// role-marked helpers (nginx/authelia/redis/tunnels) we spawned
-spawnGuardian(process.pid);
+// role-marked helpers (nginx/authelia/redis/tunnels) we spawned. Pass our
+// registration file + cacheDir so the guardian's pid-registry and stale-dir
+// sweep work (parity with the library-mode spawn in index.ts).
+spawnGuardian(process.pid, {
+  registrationFile: registrationFilePath(cacheDir, process.pid),
+  cacheDir,
+});
 writeState(stateFile, {
   ...readState(stateFile),
   daemon: {
@@ -1035,6 +1041,9 @@ writeState(stateFile, {
     // Windows TCP IPC has no filesystem peer gate — the per-instance secret
     // (state.json is 0600) authenticates every request.
     ...(ipc.secret ? { ipcSecret: ipc.secret } : {}),
+    // Persist our cleanup marker: stopDaemon falls back to it when the IPC
+    // socket/state file is gone and the caller doesn't inherit our env.
+    marker: process.env.SERVICE_TUNNELS_MARKER ?? "",
   },
 });
 console.log(`daemon ready ${ipc.path}`);
@@ -1048,7 +1057,9 @@ process.once("exit", () => {
 });
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.once(sig, () => {
-    killRoleProcessesSync(process.env.SERVICE_TUNNELS_MARKER ?? ""); // safety net even on hard kills
+    // safety net even on hard kills; nginx matches by direct-child/PPID path
+    // (it strips its inherited env)
+    killRoleProcessesSync(process.env.SERVICE_TUNNELS_MARKER ?? "", process.pid, `nginx-${process.pid}`);
     process.exit(0);
   });
 }

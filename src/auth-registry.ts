@@ -215,10 +215,14 @@ export class AuthRegistry {
 
   /** Stop every cached provider instance (shutdown). Idempotent. */
   async stopAll(): Promise<void> {
+    // Stop EVERY instance — the registry keys are type#site, so a
+    // site-scoped portal (`portal#host`) is a distinct process from the
+    // default one. Deduping by type only would stop the first portal and
+    // silently leak every other per-site provider server.
     const seen = new Set<string>();
-    for (const [, p] of this.#instances) {
-      if (seen.has(p.type)) continue;
-      seen.add(p.type);
+    for (const [key, p] of this.#instances) {
+      if (seen.has(key)) continue;
+      seen.add(key);
       try {
         await p.stop();
       } catch {

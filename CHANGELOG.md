@@ -1,3 +1,21 @@
+## 0.3.62 (2026-08-17)
+
+- **fix(cleanup): 测试残留进程泄漏根治——daemon/guardian/nginx/portal 清理链条补齐**。
+  此前 e2e 测试多次运行后会在宿主 cgroup 下堆积上百个孤儿进程（16 套
+  daemon+guardian、30+ nginx、portal server，拉高 pi-web 服务内存/任务数）。
+  - fix(daemon-server): state.json 持久化 daemon marker；shutdown/信号处理器对
+    killRoleProcesses 传 parentPid + `nginx-<pid>` 路径（nginx 剥离继承 env，原只靠
+    guardian 兜底）；spawnGuardian 补齐 registrationFile/cacheDir（与库模式对齐）。
+  - fix(daemon.ts): stopDaemon 不再依赖 IPC socket 文件存在——state.json 有 pid 即
+    SIGTERM/SIGKILL，marker 从 state.json 兜底；startDaemon 遇到"socket 已删但进程
+    存活"的失联 daemon 先回收再重建，防止实例叠加。
+  - fix(auth-registry): stopAll 去重键从 type 改为实例 key(type#site)——原实现
+    `portal#host` 等 site 专属认证服务器永不停止。
+  - fix(gateway): 无 auth 后端(authPort=0)时前向认证/oauth2/token 配置降级为无认证
+    直通，避免生成 `proxy_pass http://127.0.0.1:0/...` 非法上游导致 nginx -t 失败。
+  - test: CLI 测试补 stopDaemon teardown；plugins expose e2e 按 nginx.pid 停网关；
+    tunnels idempotent 测试补 stopAll——全量测试跑完 0 残留进程。
+
 ## 0.3.41 (2026-08-16)
 
 - **feat: open-binding 高层 API（enroll/unenroll/enrolled）**——端口级登记/取消/查询，

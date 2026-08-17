@@ -11,6 +11,11 @@ export interface DaemonState {
   /** Per-instance random secret for Windows TCP IPC (no filesystem peer gate
    *  on TCP). POSIX unix sockets (0600) don't need it. state.json is 0600. */
   ipcSecret?: string;
+  /** Cleanup marker of the daemon instance. Persisted so a later stopDaemon
+   *  can reap the daemon's role helpers by marker even when the IPC socket
+   *  file is gone (temp dir partially cleaned) and the caller doesn't run in
+   *  the daemon's environment. state.json is 0600 — no secret leak. */
+  marker?: string;
 }
 
 export interface InternalPortState {

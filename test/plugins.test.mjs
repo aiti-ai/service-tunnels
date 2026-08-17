@@ -253,6 +253,27 @@ test("expose --auth basic end-to-end with real nginx", { timeout: 40_000 }, asyn
     await tm.stopAll();
     app.close();
   } finally {
+    // expose() spawns the gateway nginx as OUR child (no st instance /
+    // guardian to reap it) — stop it by pid file, else every run leaks an
+    // orphaned nginx master that lingers after the test process exits.
+    try {
+      const { readdirSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const tmp = join(cacheDir, "tmp");
+      for (const d of readdirSync(tmp)) {
+        const m = /^nginx-(\d+)$/.exec(d);
+        if (!m) continue;
+        const pidFile = join(tmp, d, "nginx.pid");
+        try {
+          const pid = Number(readFileSync(pidFile, "utf8").trim());
+          if (pid > 0) process.kill(pid, "SIGTERM");
+        } catch {
+          // already gone
+        }
+      }
+    } catch {
+      // tmp dir already cleaned — nothing to stop
+    }
     rmSync(base, { recursive: true, force: true });
   }
 });
