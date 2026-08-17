@@ -42,7 +42,7 @@ const p = spawn("ssh", [
 p.on("exit", (c, sig) => log("ssh exit:", c, "sig:", sig));
 await new Promise((r) => setTimeout(r, 5000));
 log("exited:", p.exitCode !== null);
-const err = require("fs").readFileSync(errFile, "utf8");
+const { readFileSync } = await import("fs"); const err = readFileSync(errFile, "utf8");
 log("--- stderr file (last 40) ---");
 log(err.split("\n").filter(Boolean).slice(-40).join("\n"));
 try { p.kill(); } catch {}
