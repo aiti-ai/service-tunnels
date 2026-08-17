@@ -1,5 +1,5 @@
-// Diagnose gateway on Windows: capture ssh stderr to FILE (not pipe)
-import { mkdtempSync, rmSync, writeFileSync, openSync } from "fs";
+// Diagnose gateway on Windows: stderr inherit (as production does for ssh)
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir, userInfo } from "os";
 import { join } from "path";
 import { createServer as netServer } from "net";
@@ -8,7 +8,7 @@ import { generateKeyPairSync, parseKey } from "../src/ssh/vendor.ts";
 import { SshGateway } from "../src/ssh/gateway.ts";
 
 const log = (...a) => console.error("[DBG]", ...a);
-const base = mkdtempSync(join(tmpdir(), "st-gwdbg3-"));
+const base = mkdtempSync(join(tmpdir(), "st-gwdbg4-"));
 const forwardPort = 43100 + Math.floor(Math.random() * 100);
 const echo = netServer((s) => s.on("data", (d) => s.write(d)));
 await new Promise((r) => echo.listen(forwardPort, "127.0.0.1", r));
@@ -30,21 +30,25 @@ execFileSync("icacls", [keyFile, "/inheritance:r", "/grant:r", `${userInfo().use
 const nullFile = join(base, "null");
 writeFileSync(nullFile, "");
 const localPort = 43150 + Math.floor(Math.random() * 50);
-const errFile = join(base, "ssh-err.txt");
-const errFd = openSync(errFile, "w");
 
 const p = spawn("ssh", [
-  "-vvv", "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullFile,
+  "-v", "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullFile,
   "-o", "ExitOnForwardFailure=yes", "-i", keyFile,
   "-L", `127.0.0.1:${localPort}:127.0.0.1:${forwardPort}`,
   "-p", String(gwPort), "t@127.0.0.1",
-], { stdio: ["ignore", "ignore", errFd] });
-p.on("exit", (c, sig) => log("ssh exit:", c, "sig:", sig));
-await new Promise((r) => setTimeout(r, 5000));
+], { stdio: ["ignore", "ignore", "inherit"] });
+p.on("exit", (c) => log("ssh exit code:", c));
+await new Promise((r) => setTimeout(r, 4000));
 log("exited:", p.exitCode !== null);
-const { readFileSync } = await import("fs"); const err = readFileSync(errFile, "utf8");
-log("--- stderr file (last 40) ---");
-log(err.split("\n").filter(Boolean).slice(-40).join("\n"));
+try {
+  const { connect } = await import("net");
+  const s = connect(localPort, "127.0.0.1");
+  await new Promise((res, rej) => { s.once("connect", res); s.once("error", rej); });
+  s.destroy();
+  log("LOCAL FORWARD OK");
+} catch (e) {
+  log("LOCAL FORWARD FAIL:", e.message);
+}
 try { p.kill(); } catch {}
 try { execFileSync("taskkill", ["/PID", String(p.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
 await gw.close();
