@@ -21,7 +21,15 @@ function lockKey(p) {
 
 /** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
 function nullDevice() {
-  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+  // Windows has no /dev/null: point at an EXISTING empty file — OpenSSH on
+  // Windows stalls trying to create a missing known_hosts path (accept-new
+  // writes it even with -o StrictHostKeyChecking=no on the command line).
+  if (process.platform === "win32") {
+    const p = join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`);
+    writeFileSync(p, "", "utf8");
+    return p;
+  }
+  return "/dev/null";
 }
 // A tiny "public entry" relay: listens on ENTRY, pipes to TARGET (mimics what
 // ngrok/frpc/ssh -R do for a raw TCP tunnel). Prints ST_TUNNEL_URL:<entry> so
