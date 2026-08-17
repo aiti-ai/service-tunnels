@@ -1,4 +1,4 @@
-import { spawn, execFileSync, type ChildProcess } from "child_process";
+import { spawn, spawnSync, execFileSync, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
@@ -186,7 +186,6 @@ export class AutheliaProvider implements AuthProvider {
       // spawnSync + windowsVerbatimArguments passes the pre-quoted cmd line
       // through untouched — execFileSync would re-quote it (nested quotes
       // break cmd's /c parsing).
-      const { spawnSync } = require("child_process") as typeof import("child_process");
       const r = spawnSync("cmd.exe", ["/d", "/s", "/c", `"${bin}" ${args.map(quoted).join(" ")}`], {
         ...opts,
         windowsVerbatimArguments: true,
