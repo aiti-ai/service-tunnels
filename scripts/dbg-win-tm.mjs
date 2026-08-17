@@ -20,7 +20,7 @@ const cmdBin = join(dir, "ngrok.cmd");
 writeFileSync(cmdBin, "@echo off\r\nnode \"" + helper + "\" %*\r\n");
 console.log("fake bin:", cmdBin);
 
-const { TunnelManager } = await import("./src/tunnels.ts");
+const { TunnelManager } = await import("../src/tunnels.ts");
 const tm = new TunnelManager({
   cacheDir: join(base, "cache"),
   resolveTool: async (name) => join(dir, name),
