@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createServer as netServer } from "node:net";
 import { spawn } from "node:child_process";
 
+/** Restrict a private key: chmod 0600 on POSIX, icacls on Windows. */
+function lockKey(p) {
+  if (process.platform === "win32") {
+    try {
+      spawn.sync("icacls", [p, "/inheritance:r", "/grant:r", `${userInfo().username}:R`], { stdio: "ignore" });
+    } catch {
+      // best effort
+    }
+  } else {
+    chmodSync(p, 0o600);
+  }
+}
+
+/** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
+function nullDevice() {
+  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+}
 async function loadSubject() {
   return import("../src/daemon.ts");
 }
@@ -86,9 +103,10 @@ test("daemon ssh.* IPC: domain create/keys/forwarding via real ssh client", { ti
     const keyFile = join(base, "m4.key");
     writeFileSync(keyFile, keys[0].privateKey);
     chmodSync(keyFile, 0o600);
+    lockKey(keyFile);
     const localPort = (await bindHttpServer()).port;
     sshProc = spawn("ssh", [
-      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
       "-o", "ExitOnForwardFailure=yes",
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort}:127.0.0.1:${fwd.port}`,

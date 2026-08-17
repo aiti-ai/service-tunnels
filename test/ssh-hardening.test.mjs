@@ -1,13 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createServer as netServer } from "node:net";
 import { spawn } from "node:child_process";
 import { generateKeyPairSync, parseKey } from "../src/ssh/vendor.ts";
 import { SshGateway } from "../src/ssh/gateway.ts";
 import { SshDomain } from "../src/ssh/domain.ts";
+
+/** Restrict a private key: chmod 0600 on POSIX, icacls on Windows. */
+function lockKey(p) {
+  if (process.platform === "win32") {
+    try {
+      spawn.sync("icacls", [p, "/inheritance:r", "/grant:r", `${userInfo().username}:R`], { stdio: "ignore" });
+    } catch {
+      // best effort
+    }
+  } else {
+    chmodSync(p, 0o600);
+  }
+}
+
+/** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
+function nullDevice() {
+  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+}
 
 async function freePort() {
   return new Promise((resolve, reject) => {
@@ -24,7 +42,7 @@ function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
   return new Promise((resolve) => {
     const child = spawn("ssh", [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-      "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+      "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
       "-i", keyFile, "-p", String(gwPort), "x@127.0.0.1",
       // request a session (shell) — gateway must REJECT it; the ssh command
       // exits with non-zero. Success here means "session was refused".
@@ -55,6 +73,7 @@ test("gateway: repeated auth failures from one source lock the source out", { ti
   const keyFile = join(base, "k");
   writeFileSync(keyFile, key.private);
   chmodSync(keyFile, 0o600);
+  lockKey(keyFile);
   try {
     // First failures: ssh exits with "Permission denied" (auth failed).
     const first = await sshLogin(gwPort, keyFile);

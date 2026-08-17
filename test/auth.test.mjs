@@ -47,6 +47,8 @@ function startFakeAutheliaServer(port) {
 }
 
 test("authelia: config generation + argon2 hash + registerHost rewrites config-tunnels.yml", { timeout: 30_000 }, async () => {
+  // fake authelia 是 sh 脚本 + python3 内嵌服务器，Windows 无法承载——逻辑已在 Linux 覆盖。
+  if (process.platform === "win32") return;
   const { AutheliaProvider } = await loadAuthelia();
   const { cacheDir, configDir, base } = tempDirs();
 
@@ -221,6 +223,7 @@ test("redis: green start reports a port and stops", { timeout: 30_000 }, async (
 });
 
 test("authelia user management: add/list/set-password/remove", { timeout: 40_000 }, async () => {
+  if (process.platform === "win32") return; // sh fake，Windows 不可执行
   const { AutheliaProvider } = await loadAuthelia();
   const { cacheDir, configDir, base } = tempDirs();
 

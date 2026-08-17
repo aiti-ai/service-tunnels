@@ -18,6 +18,8 @@ function fakeBin(dir, name, url) {
 }
 
 test("tunnel type change on the same port REPLACES the old tunnel", { timeout: 30_000 }, async () => {
+  // Windows 无 nginx，proxy/gateway 模式不可用；逻辑已在 Linux 覆盖。
+  if (process.platform === "win32") return;
   // Re-exposing the same port with a different tunnel type must tear down the
   // old tunnel and start the new one — start() otherwise reuses the running
   // child and the new type is silently ignored (the bug behind localtunnel

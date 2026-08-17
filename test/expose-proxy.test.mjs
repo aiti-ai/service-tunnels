@@ -133,6 +133,7 @@ test("expose --mode proxy: enrollment (D4) + portal auth on a local vhost", { ti
 });
 
 test("expose --mode proxy --auth none: open binding; --mode both: local + tunnel share the site", { timeout: 40_000 }, async () => {
+  if (process.platform === "win32") return; // 需要 nginx
   const base = mkdtempSync(join(tmpdir(), "st-proxy-both-"));
   const configDir = join(base, "config");
   const cacheDir = join(base, "cache");
@@ -195,6 +196,7 @@ test("expose --mode proxy --auth none: open binding; --mode both: local + tunnel
 });
 
 test("expose --mode proxy with baseDomain: portless base URL + base-domain suffix served", { timeout: 40_000 }, async () => {
+  if (process.platform === "win32") return; // 需要 nginx
   const base = mkdtempSync(join(tmpdir(), "st-proxy-base-"));
   const configDir = join(base, "config");
   const cacheDir = join(base, "cache");

@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createServer as netServer } from "node:net";
 import { spawn } from "node:child_process";
 
+/** Restrict a private key: chmod 0600 on POSIX, icacls on Windows. */
+function lockKey(p) {
+  if (process.platform === "win32") {
+    try {
+      spawn.sync("icacls", [p, "/inheritance:r", "/grant:r", `${userInfo().username}:R`], { stdio: "ignore" });
+    } catch {
+      // best effort
+    }
+  } else {
+    chmodSync(p, 0o600);
+  }
+}
+
+/** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
+function nullDevice() {
+  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+}
 // A tiny "public entry" relay: listens on ENTRY, pipes to TARGET (mimics what
 // ngrok/frpc/ssh -R do for a raw TCP tunnel). Prints ST_TUNNEL_URL:<entry> so
 // the tunnel manager can synthesize a URL.
@@ -56,6 +73,7 @@ test("expose --ssh-gateway: tcp tunnel target becomes the SSH gateway port", { t
     const keyFile = join(base, "m6.key");
     writeFileSync(keyFile, keys[0].privateKey);
     chmodSync(keyFile, 0o600);
+    lockKey(keyFile);
 
     // expose with --ssh-gateway: relay (entry) → SSH gateway port
     const entryPort = 41000 + Math.floor(Math.random() * 2000);
@@ -94,7 +112,7 @@ test("expose --ssh-gateway: tcp tunnel target becomes the SSH gateway port", { t
       srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
     });
     sshProc = spawn("ssh", [
-      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
       "-o", "ExitOnForwardFailure=yes",
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort}:127.0.0.1:${echoPort}`,

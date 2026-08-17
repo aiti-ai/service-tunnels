@@ -1,11 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createServer, request as httpRequest } from "node:http";
 import { execFile } from "node:child_process";
 import { connect as netConnect } from "node:net";
+
+/** Restrict a private key: chmod 0600 on POSIX, icacls on Windows. */
+function lockKey(p) {
+  if (process.platform === "win32") {
+    try {
+      execFile.sync("icacls", [p, "/inheritance:r", "/grant:r", `${userInfo().username}:R`], { stdio: "ignore" });
+    } catch {
+      // best effort
+    }
+  } else {
+    chmodSync(p, 0o600);
+  }
+}
+
+/** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
+function nullDevice() {
+  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+}
 
 /** M0b-ssh: provider "ssh" = site-scoped public-key auth for ANY protocol.
  *  Verifies: auto-provision of the site's backing ssh domain (port auto-
@@ -56,11 +74,12 @@ test("ssh provider: auto-provision site domain + public-key port-forward (any pr
     const keyFile = join(base, "id_test");
     writeFileSync(keyFile, kp.privateKey, { mode: 0o600 });
     chmodSync(keyFile, 0o600);
+    lockKey(keyFile);
 
     const localPort = 20000 + Math.floor(Math.random() * 40000);
     const sshClient = execFile("ssh", [
       "-i", keyFile, "-p", String(domain.port), "-L", `${localPort}:127.0.0.1:${port}`,
-      "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ExitOnForwardFailure=yes",
+      "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(), "-o", "ExitOnForwardFailure=yes",
       "-o", "ConnectTimeout=8", "-N", "sshuser@127.0.0.1",
     ], { stdio: "ignore" });
 

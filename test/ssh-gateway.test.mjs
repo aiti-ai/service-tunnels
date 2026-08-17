@@ -1,12 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { createServer as netServer } from "node:net";
 import { execFileSync, spawn } from "node:child_process";
 import { generateKeyPairSync, parseKey } from "../src/ssh/vendor.ts";
 import { SshGateway } from "../src/ssh/gateway.ts";
+
+/** Restrict a private-key file: chmod 0600 on POSIX, icacls on Windows
+ *  (chmod is a no-op there and OpenSSH rejects over-permissive keys). */
+function lockKey(p) {
+  if (process.platform === "win32") {
+    try {
+      execFileSync("icacls", [p, "/inheritance:r", "/grant:r", `${userInfo().username}:R`], { stdio: "ignore" });
+    } catch {
+      // best effort — some CI sandboxes forbid icacls
+    }
+  } else {
+    chmodSync(p, 0o600);
+  }
+}
+
+/** A path usable as UserKnownHostsFile (Windows has no /dev/null). */
+function nullDevice() {
+  return process.platform === "win32" ? join(tmpdir(), `st-null-${process.pid}-${Math.random().toString(36).slice(2)}`) : "/dev/null";
+}
 
 /** Bind a TCP listener on an ephemeral port and return { port, close }. */
 function bindHttpServer() {
@@ -79,9 +98,11 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
   writeFileSync(wrongFile, wrongKey.private);
   chmodSync(keyFile, 0o600);
   chmodSync(wrongFile, 0o600);
+  lockKey(keyFile);
+  lockKey(wrongFile);
 
   const sshArgs = (localPort, key) => [
-    "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+    "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
     "-o", "ExitOnForwardFailure=yes",
     "-i", key,
     "-L", `127.0.0.1:${localPort}:127.0.0.1:${forwardPort}`,
@@ -142,7 +163,7 @@ test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", as
     //    service (the -L dest is ignored by the gateway).
     const localPort3 = await pickFreePort();
     const ssh3 = spawn("ssh", [
-      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+      "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
       "-o", "ExitOnForwardFailure=yes",
       "-i", keyFile,
       "-L", `127.0.0.1:${localPort3}:127.0.0.1:${forwardPort + 500}`, // bogus target
@@ -188,11 +209,12 @@ test("gateway -R: reverse forwarding reaches client's local service, bogus bindP
   const keyFile = join(base, "k");
   writeFileSync(keyFile, userKey.private);
   chmodSync(keyFile, 0o600);
+  lockKey(keyFile);
 
   // Request remote forwarding with a BOGUS bind port (9999) — gateway must
   // ignore it and bind reversePort instead.
   const ssh = spawn("ssh", [
-    "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+    "-N", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=" + nullDevice(),
     "-o", "ExitOnForwardFailure=yes",
     "-i", keyFile,
     "-R", `9999:127.0.0.1:${localSrvPort}`, // bogus bind port on the server side

@@ -396,31 +396,48 @@ export class TunnelManager {
     s.url = null;
 
     // Windows: a .cmd/.bat shim (or a bare name that only exists with a
-    // PATHEXT suffix) must go through a shell — a plain spawn can't exec it.
+    // PATHEXT suffix) must go through cmd.exe — a plain spawn can't exec it
+    // (EINVAL) and Node's `shell: true` fails to pipe stdio for .cmd files.
     // Real tools resolve to .exe and keep the direct (non-shell) spawn.
     let bin = spec.bin;
-    let useShell = spec.shell;
-    if (!useShell && process.platform === "win32") {
+    let winCmd = false;
+    if (process.platform === "win32") {
       if (!existsSync(bin)) {
         for (const ext of [".cmd", ".bat"]) {
           if (existsSync(bin + ext)) {
             bin = bin + ext;
-            useShell = true;
+            winCmd = true;
             break;
           }
         }
       } else if (/\.(cmd|bat)$/i.test(bin)) {
-        useShell = true;
+        winCmd = true;
       }
     }
 
-    const child = useShell
-      ? spawn(bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] })
-      : spawn(bin, spec.args, {
-          env: { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...spec.env, ...cfg.env },
-          detached: true, // own process group → group kill
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+    const baseEnv = { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...spec.env, ...cfg.env };
+    let child: ChildProcess;
+    if (spec.shell) {
+      // user-supplied command string (custom command tunnels)
+      child = spawn(bin, { shell: true, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } else if (winCmd) {
+      // .cmd tool shim: cmd.exe /c with verbatim quoting (Node would
+      // otherwise re-escape the command line and break the quotes).
+      const quoted = (s: string): string => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+      const cmdLine = `"${bin}" ${spec.args.map(quoted).join(" ")}`;
+      child = spawn("cmd.exe", ["/d", "/s", "/c", cmdLine], {
+        windowsVerbatimArguments: true,
+        env: baseEnv,
+        detached: true, // own process group → group kill
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } else {
+      child = spawn(bin, spec.args, {
+        env: baseEnv,
+        detached: true, // own process group → group kill
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    }
     s.child = child;
     this.#opts.onEvent?.({ type: "start", name });
     this.#opts.registerPid?.("tunnel", child.pid ?? 0);

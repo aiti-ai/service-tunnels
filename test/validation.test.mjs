@@ -150,6 +150,7 @@ test("validation: validateTunnelConfig per-type rules", async () => {
 // ── Integration: TunnelManager.start() fail-closed ─────────────────────────
 
 test("start: shell metacharacters in token/domain NEVER reach a shell (spawn argv/env)", { timeout: 20_000 }, async () => {
+  if (process.platform === "win32") return; // .cmd shims must go through cmd.exe — the "argv never touches a shell" contract only holds for direct spawns (POSIX + .exe)
   const { TunnelManager } = await loadTunnels();
   const { cacheDir, base } = tempDirs();
   try {
@@ -210,6 +211,7 @@ test("start: frpc INI-injection token and path-traversal name are rejected", { t
 });
 
 test("start: ngrok token is wired to NGROK_AUTHTOKEN env (not argv)", { timeout: 20_000 }, async () => {
+  if (process.platform === "win32") return; // see the shell-metacharacters test above
   const { TunnelManager } = await loadTunnels();
   const { cacheDir, base } = tempDirs();
   try {

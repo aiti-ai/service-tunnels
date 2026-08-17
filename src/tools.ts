@@ -13,7 +13,7 @@ import {
   closeSync,
 } from "fs";
 import { createRequire } from "module";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import { platform, arch, tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync } from "fs";
@@ -155,7 +155,7 @@ export function candidateUrls(
   const fill = (t: string) =>
     t
       .replaceAll("{version}", def.version ?? "")
-      .replaceAll("{platform}", platform())
+      .replaceAll("{platform}", DL_PLATFORM[platform()] ?? platform())
       .replaceAll("{dl_platform}", DL_PLATFORM[platform()] ?? platform())
       .replaceAll("{arch}", ARCH_ALIAS[arch()] ?? arch())
       .replaceAll("{rust_target}", RUST_TARGET[`${platform()}_${arch()}`] ?? "{rust_target}")
@@ -534,16 +534,29 @@ async function ensureNpmTool(def: ToolDef, opts: ToolRegistryOptions): Promise<s
   if (existsSync(dest)) return dest;
   const pkg = def.npmPackage ?? def.name;
   const registry = def.npmRegistry ?? "https://registry.npmmirror.com";
-  // npm is npm.cmd on Windows (a bare "npm" spawn ENOENTs outside a shell).
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  // npm is npm.cmd on Windows (a bare "npm" spawn ENOENTs outside a shell;
+  // execFileSync("npm.cmd", …, {shell:true}) still throws EINVAL on some
+  // Node builds — wrap the whole thing in cmd.exe /c instead).
+  const npmRun = (args: string[]): void => {
+    if (process.platform === "win32") {
+      const q = (s: string) => (s.includes(" ") ? `"${s}"` : s);
+      const r = spawnSync("cmd.exe", ["/d", "/s", "/c", `npm ${args.map(q).join(" ")}`], {
+        windowsVerbatimArguments: true,
+        stdio: "ignore",
+        timeout: 120_000,
+      });
+      if (r.status !== 0) {
+        throw new Error(`npm ${args[0]} failed with exit ${r.status}`);
+      }
+    } else {
+      execFileSync("npm", args, { stdio: "ignore", timeout: 120_000 });
+    }
+  };
   try {
-    execFileSync(npmCmd, ["install", "--prefix", join(opts.cacheDir, "npm"), pkg, "--registry", registry], {
-      stdio: "ignore",
-      timeout: 120_000,
-    });
+    npmRun(["install", "--prefix", join(opts.cacheDir, "npm"), pkg, "--registry", registry]);
   } catch {
     // fall back to official registry
-    execFileSync(npmCmd, ["install", "--prefix", join(opts.cacheDir, "npm"), pkg], { stdio: "ignore", timeout: 120_000 });
+    npmRun(["install", "--prefix", join(opts.cacheDir, "npm"), pkg]);
   }
   // npm bins often differ from the tool name (localtunnel ships `lt`).
   // Walk def.commands (alias order) then fall back to def.name; first hit wins.
