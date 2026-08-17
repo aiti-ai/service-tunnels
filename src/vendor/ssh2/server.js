@@ -1216,7 +1216,6 @@ class Client extends EventEmitter {
     });
     socket.on('error', (err) => {
       err.level = 'socket';
-      if (this.listenerCount('error') === 0) console.error('[SSH2-SOCK-ERROR no-listeners]', err.message);
       this.emit('error', err);
     }).once('end', () => {
       debug && debug('Socket ended');

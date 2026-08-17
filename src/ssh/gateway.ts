@@ -182,6 +182,11 @@ export class SshGateway {
   readonly #clients = new Set<Connection>();
 
   #onClient(client: Connection, info?: { ip: string; port: number }): void {
+    // Socket errors are expected (client RST after rejection) — register
+    // FIRST so every early-return branch below (lockout / maxConnections)
+    // still swallows them; an unhandled 'error' on the ssh2 Connection
+    // becomes an uncaughtException in the host process.
+    client.on("error", () => {});
     const srcIp = info?.ip ?? "";
     if (srcIp) {
       const entry = this.authFailures.get(srcIp);
