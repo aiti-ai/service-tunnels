@@ -69,7 +69,10 @@ function sshLogin(gwPort, keyFile, timeoutMs = 8000) {
 
 test("gateway: repeated auth failures from one source lock the source out", { timeout: 60_000 }, async () => {
   const echoPort = await freePort();
-  const echo = netServer((s) => s.on("data", (d) => s.write(d)));
+  const echo = netServer((s) => {
+    s.on("data", (d) => s.write(d));
+    s.on("error", () => {}); // RST from closing peers — never crash the test
+  });
   await new Promise((r) => echo.listen(echoPort, "127.0.0.1", r));
 
   const gw = new SshGateway({
@@ -110,6 +113,10 @@ test("gateway: repeated auth failures from one source lock the source out", { ti
     assert.notEqual(locked.out.includes("Authenticated"), true, "never authenticates");
   } finally {
     await gw.close();
+    // Give ssh2 transport sockets a beat to flush their RSTs before the
+    // runner tears the worker down — otherwise the residual ECONNRESET
+    // becomes an uncaughtException and fails the test after it passed.
+    await new Promise((r) => setTimeout(r, 150));
     echo.close();
     rmSync(base, { recursive: true, force: true });
   }
