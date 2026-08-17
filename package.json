@@ -33,7 +33,8 @@
     "prepack": "npm run build:justget && npm run build",
     "test": "node --test --test-force-exit \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit",
-    "build:justget": "node scripts/build-justget.mjs"
+    "build:justget": "node scripts/build-justget.mjs",
+    "test:serial": "node --test --test-force-exit --test-concurrency=1 \"test/**/*.test.mjs\""
   },
   "keywords": [
     "tunnel",
