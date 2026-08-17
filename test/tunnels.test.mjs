@@ -511,12 +511,24 @@ test("bore: builds `bore local` argv + synthesizes url from 'listening at host:p
   try {
     const argvFile = join(base, "bore.argv");
     fakeTool(base, "bore", "");
-    writeFileSync(
-      join(base, "bin", "bore"),
-      `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvFile}"\necho 'listening at localhost:3999'\nsleep 60\n`,
-      "utf8",
-    );
-    chmodSync(join(base, "bin", "bore"), 0o755);
+    if (process.platform === "win32") {
+      // fakeTool made bore.cmd; override it (argv to a file + URL echo).
+      writeFileSync(
+        join(base, "bin", "bore.cmd"),
+        "@echo off\r\n" +
+          `for %%a in (%*) do echo %%a>> "${argvFile}"\r\n` +
+          "echo listening at localhost:3999\r\n" +
+          "ping -n 60 127.0.0.1 >NUL\r\n",
+        "utf8",
+      );
+    } else {
+      writeFileSync(
+        join(base, "bin", "bore"),
+        `#!/bin/sh\nprintf '%s\\n' "$@" > "${argvFile}"\necho 'listening at localhost:3999'\nsleep 60\n`,
+        "utf8",
+      );
+      chmodSync(join(base, "bin", "bore"), 0o755);
+    }
 
     const tm = new TunnelManager({ cacheDir, resolveTool: async (n) => join(base, "bin", n) });
     tm.add({ name: "b", type: "bore", target: 4180, server: "tunnel.local:7835", token: "sek", remotePort: 5500 });

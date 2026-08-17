@@ -413,6 +413,25 @@ export class TunnelManager {
       } else if (/\.(cmd|bat)$/i.test(bin)) {
         winCmd = true;
       }
+      // Bare PATH command names (e.g. "ssh"): CreateProcess can't exec a
+      // .cmd/.bat shim — resolve it via `where` so it lands in the cmd.exe
+      // branch instead of an opaque ENOENT/EINVAL. .exe hits keep the direct
+      // spawn (their output pipes fine).
+      if (!winCmd) {
+        try {
+          const hit = execFileSync("where.exe", [bin], { encoding: "utf8" })
+            .split(/\r?\n/)
+            .find((l) => l.trim());
+          if (hit && /\.(cmd|bat)$/i.test(hit.trim())) {
+            bin = hit.trim();
+            winCmd = true;
+          } else if (hit) {
+            bin = hit.trim();
+          }
+        } catch {
+          // not on PATH — leave as-is, spawn will surface the real error
+        }
+      }
     }
 
     const baseEnv = { ...process.env, ...roleEnv("tunnel"), ...this.#opts.env, ...spec.env, ...cfg.env };
