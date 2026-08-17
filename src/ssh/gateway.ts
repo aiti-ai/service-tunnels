@@ -114,7 +114,7 @@ export class SshGateway {
         // Raw sockets get an idle timeout; authenticated connections lift it
         // in the 'ready' handler. Destroys silent pre-banner peers.
         socket.setTimeout(this.authTimeoutMs, () => socket.destroy());
-        socket.on("error", () => {});
+        socket.on("error", (e) => { console.error("[DBG netSrv-socket error]", e.message); });
         this.server.injectSocket(socket);
       });
       this.netSrv = netSrv;
@@ -220,7 +220,7 @@ export class SshGateway {
     };
     client.on("close", () => { done(); this.#clients.delete(client); });
     client.on("end", done);
-    client.on("error", () => {}); // socket errors are expected; never crash
+    client.on("error", (e) => { console.error("[DBG client error]", e.message); }); // socket errors are expected; never crash
 
     const failAuth = () => {
       if (!srcIp) return;
