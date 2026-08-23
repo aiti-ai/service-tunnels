@@ -46,7 +46,11 @@ export interface PortalAuthProviderOptions {
    *  redirect target (next) when the login form carries none — /dev/portal/...
    *  deployments redirect to /dev instead of /. */
   deployBasePath?: string;
-  /** Bootstrap user (only created when the db is empty). */
+  /** @deprecated `user` 不再被 `prepare()` 用于自动创建 admin 用户；
+   *  安装者需要显式创建真实用户时请调用 `addUser()`；全新安装的初始访问途径为
+   *  break-glass（env `SERVICE_TUNNELS_PORTAL_INITIAL_USER/PASSWORD` / CLI
+   *  `--provider-set initialUser.name=…` / `opts.initialUser`，缺省自动生成
+   *  随机凭据写入配置目录 `initial-user.txt`）。*/
   user?: { name: string; password: string; displayName?: string };
   /** 初始（break-glass）用户——仅在当前 site 用户库为 **0 个真实用户** 时可登录：
    *  不写入 users.json（不占真实用户名额，否则一创建即自失效）；登录不验证
@@ -399,12 +403,8 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     const vendorDir = dirname(providerDir); // src/
     const jgSrc = join(vendorDir, "vendor", "justget", "justget-browser.js");
     copyFileSync(jgSrc, join(this.#dir, "justget-browser.js"));
-    // 显式 opts.user → 空库时入真实用户（expose 层公共 API 语义，与 break-glass
-    // 并存：显式建号优先；未提供且零库时才武装 break-glass 初始用户）。
-    if (this.#opts.user && !existsSync(this.#usersFile)) {
-      await this.addUser(this.#opts.user.name, this.#opts.user.password, this.#opts.user.displayName ?? "Administrator");
-      this.#ctx.log(`portal: bootstrapped initial user ${this.#opts.user.name}`);
-    }
+    // 注：真实用户不再由 `prepare()` 自动创建——调用方需要显式调用 `addUser()`。
+    // 全新安装唯一初始访问途径为 break-glass（见 `#armInitialUser`）。
     if (!this.#armed) {
       await this.#armInitialUser();
       this.#armed = true;

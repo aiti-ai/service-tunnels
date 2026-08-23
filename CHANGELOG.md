@@ -1,3 +1,17 @@
+## 0.3.63 (2026-08-23)
+
+- **refactor(portal): bootstrap admin 自动创建彻底移除**——`prepare()` 不再根据 `opts.user`
+  自动创建隐藏 admin（旧行为密码从不输出等于锁死）；全新安装唯一初始访问途径为
+  break-glass 初始用户（env `SERVICE_TUNNELS_PORTAL_INITIAL_USER/PASSWORD` / CLI
+  `--provider-set initialUser.name=…` / `opts.initialUser`；缺省自动生成随机凭据，
+  写入配置目录 `initial-user.txt` + stdout）。真实用户请经 `addUser()` 显式创建。
+- **feat(portal): break-glass 凭据自动清理**——`addUser()` 检测到站点从 0→1 个真实用户
+  时同步删除 `initial-user.txt`，不再残留明文 break-glass 密码。
+- **fix(portal): `#armInitialUser` 双重调用修复**——`start()` 内调 `prepare()` 时经
+  `#armed` 标记跳过重复武装，避免凭据文件 + stdout 重复输出。
+- **test(portal)**: 全部 12 项通过；break-glass 双测试覆盖（自动生成 + env 覆盖 + 凭据
+  失效 + 会话作废 + 清理）。
+
 ## 0.3.62 (2026-08-17)
 
 - **fix(cleanup): 测试残留进程泄漏根治——daemon/guardian/nginx/portal 清理链条补齐**。

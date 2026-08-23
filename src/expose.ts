@@ -3,7 +3,7 @@ import { ProxyManager } from "./proxy-manager.ts";
 import { readSites, type SiteConfig } from "./sites.ts";
 import { readConfigFile, resolveBaseDomains, resolveAllowAuthNone } from "./config.ts";
 import { RedisController } from "./redis.ts";
-import { validateBypassPaths } from "./auth-provider.ts";
+import { validateBypassPaths, isUserManager, type UserManager } from "./auth-provider.ts";
 import type { AuthProvider, ProviderContext } from "./auth-provider.ts";
 import { AuthRegistry } from "./auth-registry.ts";
 import { tunnelSupportsTcp } from "./tunnels.ts";
@@ -393,6 +393,11 @@ async function proxyExpose(
   if (authRequested) {
     const pctx = providerCtx(ctx);
     const registry = ctx.auth ?? new AuthRegistry(pctx);
+    // 初始用户：portal 不再吃 opts.user（break-glass 重构）——start 后经
+    // UserManager.addUser() 显式建号；其余 provider（authelia 等）仍走构造参数。
+    const extractedUser: { name: string; password: string } | undefined =
+      opts.user ?? (typeof siteCfg?.user === "string" ? { name: siteCfg.user, password: randomSecret() }
+        : siteCfg?.user ? { name: siteCfg.user.name, password: siteCfg.user.password ?? randomSecret() } : undefined);
     // 先建 provider（缓存实例直接取），再按自描述能力算 basePath
     const provider = registry.create(
       providerType,
@@ -401,7 +406,9 @@ async function proxyExpose(
         ...(siteCfg?.providerParams ?? {}),
         deployBasePath: proxy.basePath || undefined,
         policy: opts.policy ?? siteCfg?.policy,
-        user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
+        ...(providerType !== "portal" && extractedUser)
+        ? { user: extractedUser }
+        : {},
         sessionSecret: opts.sessionSecret,
         externalReloadCmd: opts.autheliaReloadCmd,
       },
@@ -439,6 +446,9 @@ async function proxyExpose(
       ctx.internal.register("redis", { port: redisPort, pid: 0, process: "redis", cmdline: "redis", addresses: ["127.0.0.1"] });
     }
     await provider.start();
+    if (providerType === "portal" && isUserManager(provider) && extractedUser) {
+      await (provider as UserManager).addUser(extractedUser.name, extractedUser.password);
+    }
     authProvider = provider;
     log(`expose ${port} (proxy): provider ${providerType} up (site ${site})`);
   }
@@ -632,6 +642,10 @@ async function exposeTunnel(
   // service-tunnels.json (basePath / basePathByProvider) > provider 自描述默认
   // （portal → /portal-sneaky-capybara，authelia → /authelia<alnum>，basic → ""）。
   const cfgFile = readConfigFile(ctx.configDir);
+  // 初始用户：同 proxyExpose——portal 经 addUser()，其余走构造参数。
+  const extractedUser: { name: string; password: string } | undefined =
+    opts.user ?? (typeof siteCfg?.user === "string" ? { name: siteCfg.user, password: randomSecret() }
+      : siteCfg?.user ? { name: siteCfg.user.name, password: siteCfg.user.password ?? randomSecret() } : undefined);
   // 先建 provider（缓存实例直接取），再按自描述能力算 basePath
   const provider: AuthProvider = registry.create(
     providerType,
@@ -641,7 +655,9 @@ async function exposeTunnel(
       port: opts.autheliaPort,
       sessionSecret: opts.sessionSecret,
       policy: opts.policy ?? siteCfg?.policy,
-      user: opts.user ?? (siteCfg?.user ? { name: siteCfg.user.name, password: randomSecret() } : undefined),
+      ...(providerType !== "portal" && extractedUser)
+        ? { user: extractedUser }
+        : {},
       externalReloadCmd: opts.autheliaReloadCmd,
     },
     site,
@@ -723,6 +739,9 @@ async function exposeTunnel(
   }
 
   await provider.start();
+  if (providerType === "portal" && isUserManager(provider) && extractedUser) {
+    await (provider as UserManager).addUser(extractedUser.name, extractedUser.password);
+  }
   const authPort = (provider as unknown as { port?: number }).port ?? 9091;
   // start the shared gateway once (auth backend is per-host now)
   const gatewayPort = await gateway.start(authMode);

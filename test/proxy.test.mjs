@@ -523,9 +523,10 @@ test("proxy forward-auth gate (portal): unauthenticated 302, cookie-authenticate
     });
   const provider = new PortalAuthProvider(
     { configDir: join(base, "config"), cacheDir: join(base, "cache"), resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" }, // 显式与下方 proxy auth.basePath 一致
+    { basePath: "/portal" }, // 显式与下方 proxy auth.basePath 一致
   );
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   await provider.start();
   const authPort = provider.port;
 

@@ -118,8 +118,9 @@ test("login-fab e2e: portal 注入 → who JSON → logout 清会话（真实 ng
     pickPort, log: () => {},
   };
 
-  const portal = new PortalAuthProvider(ctx, { user: { name: "admin", password: "pw" }, basePath: "/portal", policy: "one_factor" });
+  const portal = new PortalAuthProvider(ctx, { basePath: "/portal", policy: "one_factor" });
   await portal.prepare();
+  await portal.addUser("admin", "pw");
   await portal.start();
 
   const gateway = new GatewayController({ configDir, cacheDir, port: 0, basePath: "/portal", registerInternal: () => {}, registerPid: () => {}, log: () => {} });

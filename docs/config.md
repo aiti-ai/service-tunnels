@@ -38,7 +38,19 @@
     "reloadCmd": "",                       // 外部 Authelia 重启命令（可选，空=自管进程）
     "cookieDomains": [],                   // 已登记的固定 cookie domain（动态文件同步）
     "policy": "two_factor",                // 默认授权策略
-    "user": { "name": "admin", "password": "" }  // 初始用户（首次启动生成）
+    // —— portal provider 专用 ——
+    // "initialUser": { "name": "", "password": "" },  // break-glass 初始凭据（留空=自动生成随机；仅站点 0 真实用户时有效，不入库；站点出现任意用户即作废，含凭据文件自动清理）
+    //     等价 env：SERVICE_TUNNELS_PORTAL_INITIAL_USER / SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD
+    //     等价 CLI：--provider-set initialUser.name=… --provider-set initialUser.password=…
+    // "sessionTtlDays": 7,                     // 会话 TTL（天）
+    // "rememberMeTtlDays": 365,                // "记住我"会话 TTL（天）
+    // "twoFactorGraceDays": 52,                // 2FA 复验周期（天）
+    // "biometrics": true,                      // 启用 face/voice 生物识别 2FA
+    // "biometricThresholds": {                 // 生物识别匹配阈值
+    //   "face": 0.6, "voice": 0.9
+    // }
+    // "policy": "two_factor",
+    // "user" 字段已移除——全新安装唯一初始访问途径为 break-glass 初始用户，真实用户请经 addUser() 显式创建
     // —— oauth2-proxy provider 专用 ——
     // "oidc": { "issuerUrl": "...", "clientId": "...", "clientSecret": "...", "cookieSecret": "" }
     // —— oauth2 变体专用（docs/oauth2-variants.md）——

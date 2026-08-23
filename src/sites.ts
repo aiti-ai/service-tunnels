@@ -24,8 +24,11 @@ export interface SiteConfig {
   domain?: string;
   /** Vhost dash label (default = site name); default site uses "auth". */
   suffix?: string;
-  /** Bootstrap user (created when the user db is empty; password printed once). */
-  user?: { name: string };
+  /** Bootstrap user. Forms: "name" shorthand or { name, password? } —
+   *  portal ignores this on construction (break-glass model) and expose()
+   *  creates the user via addUser() after start; password omitted → random
+   *  (never printed — treat as opaque). Kept for other providers (authelia). */
+  user?: string | { name: string; password?: string };
   /** Extra provider options (schema-driven form params, dotted keys nested). */
   providerParams?: Record<string, unknown>;
 }
