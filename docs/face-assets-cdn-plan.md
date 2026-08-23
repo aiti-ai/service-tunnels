@@ -308,8 +308,14 @@ jsdelivr 作为默认主源的理由又多一条。
 
 ### 8.5 修复后待补的验证
 
-- [ ] exports 修复后 `import { download } from 'justget/browser'` 实测
-- [ ] browser bundle（esbuild 单文件）经 portal `/assets/` 加载实测
-- [ ] 三源竞速 + npmmirror 403 负样本 + checksum 篡改样本（修复③后）
-- [ ] fetch 拦截 → loadFromUri 端到端（即此前搁置的④场景）
-- [ ] face 2FA 真实登录流程在隧道环境回归
+- [x] exports 修复后 `import { download } from 'justget/browser'` 实测（0.2.2 已发 npm.example.com）
+- [x] browser bundle（esbuild 单文件）经 portal `/assets/` 加载实测
+- [x] 三源竞速 + npmmirror 403 负样本 + checksum 篡改样本（降级重跑验证，场景 1/2/5）
+- [x] fetch 拦截 → loadFromUri 端到端（同下）
+- [x] **face 2FA 真实登录闭环**（2026-08-24，v4l2loopback 虚拟摄像头 + ffmpeg 哈欠循环视频源）：enroll（3 次张嘴捕获、质量门通过、模板 active）→ 密码登录 → face 2FA 验证（再 3 次张嘴）→ 会话签发重定向 ✓
+- [ ] 隧道环境（真 nginx 网关 + 外网暴露）下的回归
+
+实测补充（闭环中发现）：
+- **sizeThreshold 陷阱**：justget 默认 50MB 阈值下，6.4MB 识别模型永远不会释放镜像——jsdelivr 慢时（实测 243KB/s）页面卡住而 Gitee（1.9MB/s）闲置。页面已传 `sizeThreshold: 1MiB + primaryWarmupTime: 3s`。
+- **进度条 >100%**：HEAD 返回的 content-length 是 gzip 压缩长度，而 chunk 计数是解压后字节 → percentage 可超 100%（无功能影响，待 justget 侧修）。
+- **landmark 网络不可欺**：用深色椭圆/肤色块叠加伪造嘴部开合均无法显著改变 mar（网络按脸型几何回归嘴型）——活体检测对合成攻击意外地稳健，但测试需真实大幅张嘴素材（哈欠/唱歌类视频）。
