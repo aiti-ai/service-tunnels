@@ -399,6 +399,12 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     const vendorDir = dirname(providerDir); // src/
     const jgSrc = join(vendorDir, "vendor", "justget", "justget-browser.js");
     copyFileSync(jgSrc, join(this.#dir, "justget-browser.js"));
+    // 显式 opts.user → 空库时入真实用户（expose 层公共 API 语义，与 break-glass
+    // 并存：显式建号优先；未提供且零库时才武装 break-glass 初始用户）。
+    if (this.#opts.user && !existsSync(this.#usersFile)) {
+      await this.addUser(this.#opts.user.name, this.#opts.user.password, this.#opts.user.displayName ?? "Administrator");
+      this.#ctx.log(`portal: bootstrapped initial user ${this.#opts.user.name}`);
+    }
     if (!this.#armed) {
       await this.#armInitialUser();
       this.#armed = true;
