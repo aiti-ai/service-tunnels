@@ -5130,7 +5130,8 @@ var DEFAULT_CONFIG = {
   // 5 minutes
   connectTimeout: 1e4,
   // 10 seconds
-  checksumAlgorithm: "sha256"
+  checksumAlgorithm: "sha256",
+  responseType: "blob"
 };
 var SPEED_CONFIG = {
   ewmaAlpha: 0.3,

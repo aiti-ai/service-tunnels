@@ -1,6 +1,7 @@
-import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from "fs";
+import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync, copyFileSync } from "fs";
 import { execFileSync, spawn } from "child_process";
-import { join } from "path";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import { randomBytes, scryptSync, createHmac, timingSafeEqual, createHash } from "crypto";
 import { connect } from "net";
 import { validateUserName } from "../validation.ts";
@@ -47,6 +48,14 @@ export interface PortalAuthProviderOptions {
   deployBasePath?: string;
   /** Bootstrap user (only created when the db is empty). */
   user?: { name: string; password: string; displayName?: string };
+  /** 初始（break-glass）用户——仅在当前 site 用户库为 **0 个真实用户** 时可登录：
+   *  不写入 users.json（不占真实用户名额，否则一创建即自失效）；登录不验证
+   *  2FA；站点一旦出现任意真实用户即失效（登录拒绝，已签发初始会话一并作废）。
+   *  name/password 任一缺省 → 自动生成随机，并写入配置目录「initial-user.txt」
+   *  （0600）+ 打印 stdout。也可经 env SERVICE_TUNNELS_PORTAL_INITIAL_USER /
+   *  SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD，或 CLI --provider-set
+   *  initialUser.name=… initialUser.password=… 指定。 */
+  initialUser?: { name?: string; password?: string };
   /** Per-site storage dir (P1); default = cacheDir/tmp/portal. */
   storageDir?: string;
   /** Site (auth realm) this instance belongs to. */
@@ -95,6 +104,9 @@ export interface BiometricTemplates {
 // 下载源：自有 Gitee 镜像（国内主力）→ jsdelivr → unpkg；SHA-256 固定清单。
 // 注：registry.npmmirror.com 的 unpkg 文件 CDN 对本包 403（白名单），不可用。
 export const FACE_ASSETS_VERSION = "1.7.15";
+/** vendored justget/browser 版本（scripts/build-justget-browser.mjs 产物，
+ *  页面用它拼 immutable 缓存参数；升级换此值即换缓存键）。 */
+export const JUSTGET_BROWSER_VERSION = "0.2.2";
 interface FaceAsset {
   file: string;
   sha256: string;
@@ -260,7 +272,10 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
   #deployBasePath = "";
   #secret = "";
   #proc: ReturnType<typeof spawn> | null = null;
-  #creds = { name: "admin", password: "" };
+  /** 初始（break-glass）用户凭据（仅站点 0 真实用户时有效，不入库）。 */
+  #initialUser: { name: string; password: string } | null = null;
+  /** 初始凭据已武装标记——防 prepare→start 双重 prepare 时重复输出。 */
+  #armed = false;
   // 记住我（可信设备）三参数（biometric-2fa-design.md §5）：会话 TTL 7d /
   // remember 365d / 2FA 复验周期 = remember/7（最小 1 天）。子进程经 env 注入。
   #ttlMs = 7 * 24 * 3600 * 1000;
@@ -276,9 +291,16 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
   constructor(ctx: ProviderContext, opts: PortalAuthProviderOptions = {}) {
     this.#ctx = ctx;
     this.#opts = opts;
-    this.#creds = {
-      name: opts.user?.name ?? "admin",
-      password: opts.user?.password ?? randomBytes(9).toString("base64url"),
+    // bootstrap admin 自动创建已移除：全新安装唯一初始访问途径为 break-glass
+    // 初始用户（见 #armInitialUser）。调用方可经 addUser() 显式创建真实用户。
+    // 初始（break-glass）用户：env / CLI(--provider-set) / opts.initialUser 任一
+    // 来源；未指定 name/password → 自动生成随机（每次进程启动轮换）。仅在站点
+    // 用户库为空时武装并输出（prepare 里落盘 + stdout）。
+    const iuName = (opts.initialUser?.name ?? process.env.SERVICE_TUNNELS_PORTAL_INITIAL_USER ?? "").trim();
+    const iuPass = opts.initialUser?.password ?? process.env.SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD ?? "";
+    this.#initialUser = {
+      name: iuName || `bootstrap-${randomName()}`,
+      password: iuPass || randomBytes(12).toString("base64url"),
     };
     this.#dir = opts.storageDir ?? join(ctx.cacheDir, "tmp", "portal");
     this.#usersFile = join(this.#dir, "users.json");
@@ -331,7 +353,6 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
 
   async validate(): Promise<string[]> {
     const problems: string[] = [];
-    if (!this.#creds.password) problems.push("portal auth requires a password");
     const dayOpts: Array<[string, unknown]> = [
       ["sessionTtlDays", this.#opts.sessionTtlDays],
       ["rememberMeTtlDays", this.#opts.rememberMeTtlDays],
@@ -359,12 +380,64 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
   async prepare(): Promise<AuthProviderStatus> {
     mkdirSync(this.#dir, { recursive: true });
     this.#policyFile = join(this.#dir, "hosts-policy.json");
-    writeServerScript(this.#serverFile, this.#basePath, this.#deployBasePath, this.site);
-    if (!existsSync(this.#usersFile)) {
-      await this.addUser(this.#creds.name, this.#creds.password, this.#opts.user?.displayName ?? "Administrator");
-      this.#ctx.log(`portal: bootstrapped initial user ${this.#creds.name}`);
+    writeServerScript(
+      this.#serverFile,
+      this.#basePath,
+      this.#deployBasePath,
+      this.site,
+      JUSTGET_BROWSER_VERSION,
+      JSON.stringify({
+        ver: FACE_ASSETS_VERSION,
+        assets: FACE_ASSETS.map((a) => ({ file: a.file, npmPath: a.npmPath, sha256: a.sha256 })),
+      }),
+    );
+    // justget-browser 单文件 IIFE（构建期 esbuild 产物，随包分发）→ 随 server
+    // 一起写盘，/assets/justget-browser.js 同源提供（不依赖公网 CDN）。路径以
+    // import.meta 为锚计算绝对值，避免 .ts 模块下 CJS require.resolve 相对解析
+    // 的不可靠（vendor 在 src/vendor/，在 providers/ 之上）。
+    const providerDir = dirname(fileURLToPath(import.meta.url));
+    const vendorDir = dirname(providerDir); // src/
+    const jgSrc = join(vendorDir, "vendor", "justget", "justget-browser.js");
+    copyFileSync(jgSrc, join(this.#dir, "justget-browser.js"));
+    if (!this.#armed) {
+      await this.#armInitialUser();
+      this.#armed = true;
     }
     return this.status();
+  }
+
+  /** 站点用户库为空时武装 break-glass 初始用户：凭据写配置目录
+   *  「initial-user.txt」（0600）+ 打印 stdout，供运维登录后立即建号。 */
+  async #armInitialUser(): Promise<void> {
+    if (!this.#initialUser) return;
+    const users = await this.#readDb();
+    if (users.size > 0) return; // 站点已有任意真实用户 → 初始用户无效（不输出）
+    mkdirSync(this.#ctx.configDir, { recursive: true });
+    const file = join(this.#ctx.configDir, "initial-user.txt");
+    const lines = [
+      "service-tunnels portal 初始（break-glass）用户凭据",
+      "──────────────────────────────────────────────",
+      `site       : ${this.site}`,
+      `username   : ${this.#initialUser.name}`,
+      `password   : ${this.#initialUser.password}`,
+      "",
+      "· 仅在当前 site 没有任何真实用户时可登录（登录不验证 2FA）。",
+      "· 登录后请立即创建真实用户（管理界面 / auth user add）。",
+      "· 站点一旦出现任意真实用户，本凭据立即失效（含已登录会话）。",
+      `· 生成时间：${new Date().toISOString()}`,
+    ];
+    try {
+      writeFileSync(file, lines.join("\n") + "\n", "utf8");
+      try {
+        execFileSync("chmod", ["600", file], { stdio: "ignore" });
+      } catch {
+        /* best-effort */
+      }
+    } catch (err) {
+      this.#ctx.log(`portal: 初始用户凭据写文件失败 ${file}: ${(err as Error | undefined)?.message ?? err}`);
+    }
+    console.log(`[service-tunnels] portal 初始用户（break-glass）已武装（site=${this.site}）：username=${this.#initialUser.name} password=${this.#initialUser.password}（仅站点无用户时有效，已存 ${file}）`);
+    this.#ctx.log(`portal: break-glass initial user armed (site ${this.site}, user ${this.#initialUser.name}) → ${file}`);
   }
 
   /** 下载/修复 face 浏览器资产（biometric-2fa-design.md §7.5）：存在且 SHA-256
@@ -443,7 +516,10 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
           VOICE_ENABLED: this.#bioVoice ? "1" : "",
           VOICE_THRESHOLD: String(this.#voiceThreshold),
           ASSETS_DIR: faceAssetsDir(this.#ctx.cacheDir),
+          STATIC_DIR: this.#dir,
           SECURE: process.env.PORTAL_SECURE === "1" ? "1" : "",
+          INITIAL_USER: this.#initialUser?.name ?? "",
+          INITIAL_PASSWORD: this.#initialUser?.password ?? "",
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -570,6 +646,10 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     // users.json is JSON (escaping-safe), but the name is also used as a
     // cookie subject + otpauth label — keep the same charset gate everywhere.
     validateUserName(name);
+    // 0→1 过渡检测：users.json 尚不存在（站点零真实用户）→ 本次是首个真实用户
+    // 创建，break-glass 凭据文件同步作废（不再残留明文密码）。注意：bootstrap
+    // admin 已彻底移除，addUser 是真实用户的唯一入口。
+    const wasEmpty = !existsSync(this.#usersFile);
     const rows = await this.#readDb();
     const isNew = !rows.has(name);
     const salt = randomBytes(16).toString("hex");
@@ -579,6 +659,17 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
       hash: hashPassword(password, salt),
     });
     await this.#writeDb(rows);
+    if (wasEmpty && rows.size > 0) {
+      const credFile = join(this.#ctx.configDir, "initial-user.txt");
+      try {
+        if (existsSync(credFile)) {
+          rmSync(credFile);
+          this.#ctx.log(`portal: break-glass credentials cleaned (${credFile}) — first real user created`);
+        }
+      } catch {
+        // best-effort — 清理失败不影响建号
+      }
+    }
     this.#ctx.log(`portal: user ${name} ${isNew ? "added" : "updated"}`);
   }
 
@@ -1043,7 +1134,14 @@ async function extractVoiceVector(blob){
 `;
 
 /** The generated portal server (ESM, written to cacheDir/tmp/portal/server.mjs). */
-function writeServerScript(file: string, basePath: string, deployBasePath = "", site = "default"): void {
+function writeServerScript(
+  file: string,
+  basePath: string,
+  deployBasePath = "",
+  site = "default",
+  justgetVer = "0",
+  faceAssetsJson = "{}",
+): void {
   const script = `import { createServer } from "http";
 import { readFileSync, writeFileSync, renameSync, chmodSync } from "fs";
 import { createHmac, scryptSync, randomBytes, timingSafeEqual, generateKeyPairSync, privateDecrypt, constants, createDecipheriv } from "crypto";
@@ -1056,9 +1154,23 @@ const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
 const POLICY_FILE = process.env.POLICY_FILE || "";
 const POLICY_DEFAULT = process.env.POLICY_DEFAULT || "one_factor";
 const SECURE = process.env.SECURE === "1";
+// break-glass 初始用户（仅站点 0 个真实用户时可登录；不验证 2FA；站点一旦出现
+// 任意用户即失效——登录拒绝 + 已签发初始会话一并作废）。密码以 scrypt 哈希比对，
+// salt 每次进程启动随机（同一密码跨重启不可重放）。
+const INITIAL_USER = process.env.INITIAL_USER || "";
+const INITIAL_PASSWORD = process.env.INITIAL_PASSWORD || "";
+const INITIAL_SALT = randomBytes(16).toString("hex");
+const INITIAL_HASH = INITIAL_PASSWORD ? scryptSync(INITIAL_PASSWORD, INITIAL_SALT, 64).toString("hex") : "";
+function siteHasUsers() {
+  return Object.keys(loadUsers()).length > 0;
+}
 const COOKIE = "st_portal${site === "default" ? "" : "_" + site}_session";
 const COOKIE2 = "st_portal${site === "default" ? "" : "_" + site}_2fa";
 const SITE = ${JSON.stringify(site)};
+// justget/browser 版本（页面拼缓存参数用；随库升级变更）
+const JGVER = ${JSON.stringify(justgetVer)};
+// face 资产配置（浏览器竞速下载用：CDN URL 模板 + sha256 校验清单）
+const FACE_CFG = JSON.parse(${JSON.stringify(faceAssetsJson)});
 // 会话/记住我 TTL 与 2FA 复验周期（biometric-2fa-design.md §5）——父进程按
 // opts 计算后经 env 注入；缺省 7d / 365d / 52d（= 365/7，最小 1 天）。
 const TTL_MS = Number(process.env.TTL_MS) || 7 * 24 * 3600 * 1000;
@@ -1072,6 +1184,7 @@ const VOICE_ENABLED = process.env.VOICE_ENABLED === "1";
 const VOICE_THRESHOLD = Number(process.env.VOICE_THRESHOLD) || 0.9;
 const ENROLL_SECRET = process.env.SECRET || "";
 const ASSETS_DIR = process.env.ASSETS_DIR || "";
+const STATIC_DIR = process.env.STATIC_DIR || "";
 const MODEL_FILES = [
   "tiny_face_detector_model-weights_manifest.json", "tiny_face_detector_model.bin",
   "face_landmark_68_model-weights_manifest.json", "face_landmark_68_model.bin",
@@ -1107,11 +1220,14 @@ function sign(payload) {
   return createHmac("sha256", SECRET).update(payload).digest("base64url");
 }
 
-function issueSession(name, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0) {
+function issueSession(name, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0, initial = false) {
   // cookieName is mixed into the payload so a 2FA ticket can never be
   // replayed as a full session cookie (or vice versa). twoFactorAt = 最近一次
   // 2FA 完成时刻（".2fa:<epochMs>"后缀）——探针按 GRACE_MS 复验（remember me）。
-  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name + (twoFactorAt ? ".2fa:" + twoFactorAt : "");
+  // initial = break-glass 初始会话（".init:1" 后缀）——站点一旦有用户即失效。
+  const payload = String(Date.now() + ttl) + "." + cookieName + "." + name
+    + (initial ? ".init:1" : "")
+    + (twoFactorAt ? ".2fa:" + twoFactorAt : "");
   const body = Buffer.from(payload).toString("base64url");
   return body + "." + sign(body);
 }
@@ -1132,9 +1248,12 @@ function verifySession(token, cookieName = COOKIE) {
   if (parts[1] !== cookieName) return null;
   let name = parts.slice(2).join(".");
   let twoFactorAt = 0;
+  let initial = false;
   const m2fa = /\\.2fa:(\\d+)$/.exec(name);
   if (m2fa) { twoFactorAt = Number(m2fa[1]); name = name.slice(0, name.length - m2fa[0].length); }
-  return { name, twoFactorAt, expiry };
+  const minit = /\\.init:1$/.exec(name);
+  if (minit) { initial = true; name = name.slice(0, name.length - minit[0].length); }
+  return { name, twoFactorAt, initial, expiry };
 }
 
 function hostPolicy(host) {
@@ -1534,7 +1653,7 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
     : "";
   return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Face verification</title>'
-    + '<script src="' + BASE + '/assets/face-api.js"></script>'
+    + '<script src="' + BASE + '/assets/justget-browser.js?v=' + JGVER + '"></script>'
     + '<style>*{box-sizing:border-box}body{font-family:system-ui;display:flex;min-height:90vh;align-items:center;justify-content:center;background:#f4f5f7;padding:1rem}'
     + 'main{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08);width:100%;max-width:22rem;text-align:center}'
     + 'h1{font-size:1.15rem;margin:0 0 .3rem}p.hint{font-size:.85rem;color:#666;margin:0 0 .8rem}'
@@ -1565,8 +1684,49 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '</form><div id="busy"><div class="spin"></div><p>Verifying…</p></div></main>'
     + '<script>'
     + 'var A=' + JSON.stringify(BASE) + ',NONCE=' + JSON.stringify(nonce) + ',PUB=' + JSON.stringify(publicKey) + ',KEY_ID=' + JSON.stringify(keyId) + ';'
+    + 'var FACE_CFG=' + JSON.stringify(FACE_CFG) + ';'
     + 'var vectors=[],prevClosed=false,mouthCount=0,base=[],done=false;'
     + 'function st(t){document.getElementById("st").textContent=t;}'
+    + 'function loadScript(src){return new Promise(function(res,rej){var s=document.createElement("script");s.src=src;s.onload=res;s.onerror=function(){rej(new Error("script load failed"))};document.head.appendChild(s);});}'
+    + 'function jgUrls(f){var u=["https://cdn.jsdelivr.net/npm/@vladmandic/face-api@"+FACE_CFG.ver+"/"+f.npmPath,"https://unpkg.com/@vladmandic/face-api@"+FACE_CFG.ver+"/"+f.npmPath,"https://gitee.com/justdb-mirrors/face-models/releases/download/face-api-"+FACE_CFG.ver+"/"+f.file];return u;}'
+    + 'async function loadFaceAssets(){'
+    + 'var JG=window.justgetBrowser;'
+    + 'if(!JG)throw new Error("racer unavailable");'
+    + 'st("Downloading engine…");'
+    + 'var a0=FACE_CFG.assets[0];'
+    + 'var u0=jgUrls(a0);u0.push(A+"/assets/face-api.js");'
+    + 'var r0=await JG.download({url:u0[0],mirrors:u0.slice(1),options:{checksum:a0.sha256,checksumAlgorithm:"sha256",responseType:"uint8array",onProgress:function(p){st("Engine "+Math.round(p.percentage)+"%");}}});'
+    + 'await loadScript(URL.createObjectURL(new Blob([r0.data],{type:"application/javascript"})));'
+    + 'st("Downloading models…");'
+    + 'var bytes={};'
+    + 'var dl=FACE_CFG.assets.slice(1).map(function(a){'
+    + 'var mu=jgUrls(a);mu.push(A+"/assets/models/"+a.file);'
+    + 'return JG.download({url:mu[0],mirrors:mu.slice(1),options:{checksum:a.sha256,checksumAlgorithm:"sha256",responseType:"uint8array"}}).then(function(r){bytes[a.file]=r.data;});'
+    + '});'
+    + 'await Promise.all(dl);'
+    + 'var of=window.fetch;'
+    + 'window.fetch=function(input,init){'
+    + 'var q=typeof input==="string"?input:(input&&input.url||"");'
+    + 'var n=q.slice(q.lastIndexOf("/")+1);'
+    + 'var hit=bytes[n]&&(q.indexOf("/model/")>0||q.indexOf("/assets/models/")>0);'
+    + 'if(hit)return Promise.resolve(new Response(bytes[n],{headers:{"Content-Type":n.lastIndexOf(".json")>0?"application/json":"application/octet-stream"}}));'
+    + 'return of(input,init);'
+    + '};'
+    + 'try{'
+    + 'var MB="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@"+FACE_CFG.ver+"/model/";'
+    + 'await faceapi.tf.ready();'
+    + 'await faceapi.nets.tinyFaceDetector.loadFromUri(MB);'
+    + 'await faceapi.nets.faceLandmark68Net.loadFromUri(MB);'
+    + 'await faceapi.nets.faceRecognitionNet.loadFromUri(MB);'
+    + '}finally{window.fetch=of;}'
+    + '}'
+    + 'async function loadFaceAssetsFallback(){'
+    + 'await loadScript(A+"/assets/face-api.js");'
+    + 'await faceapi.tf.ready();'
+    + 'await faceapi.nets.tinyFaceDetector.loadFromUri(A+"/assets/models/");'
+    + 'await faceapi.nets.faceLandmark68Net.loadFromUri(A+"/assets/models/");'
+    + 'await faceapi.nets.faceRecognitionNet.loadFromUri(A+"/assets/models/");'
+    + '}'
     + 'function dot(){var d=document.querySelectorAll("#dots i");for(var i=0;i<d.length;i++)d[i].className=i<vectors.length?"on":"";}'
     + 'function b2u(b){var u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u.buffer;}'
     + 'function u2b(u){var s="";for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s);}'
@@ -1608,10 +1768,7 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '}'
     + '(async function(){'
     + 'try{'
-    + 'await faceapi.tf.ready();'
-    + 'await faceapi.nets.tinyFaceDetector.loadFromUri(A+"/assets/models/");'
-    + 'await faceapi.nets.faceLandmark68Net.loadFromUri(A+"/assets/models/");'
-    + 'await faceapi.nets.faceRecognitionNet.loadFromUri(A+"/assets/models/");'
+    + 'try{await loadFaceAssets();}catch(e1){await loadFaceAssetsFallback();}'
     + 'st("Starting camera…");'
     + 'var s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:640}});'
     + 'var v=document.getElementById("v");v.srcObject=s;await v.play();'
@@ -1787,8 +1944,8 @@ function safeNext(next) {
   return next;
 }
 
-function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0) {
-  const token = issueSession(name, cookieName, ttl, twoFactorAt);
+function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFactorAt = 0, initial = false) {
+  const token = issueSession(name, cookieName, ttl, twoFactorAt, initial);
   res.writeHead(302, {
     Location: safeNext(next),
     "Set-Cookie": cookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
@@ -1811,6 +1968,13 @@ createServer((req, res) => {
       res.end("unauthorized");
       return;
     }
+    // break-glass 初始会话：站点一旦出现任意真实用户即作废（严格保证期间没有
+    // 真实用户）；未作废时豁免 2FA（初始用户不验证 2FA）。
+    if (sess.initial && siteHasUsers()) {
+      res.writeHead(401, { "Content-Type": "text/plain" });
+      res.end("initial session expired — site now has users");
+      return;
+    }
     const policy = hostPolicy((req.headers.host || "").split(":")[0]);
     if (policy === "deny") {
       // 已登录也拒绝(策略级拒绝)——gateway 403 直达,不再 302 登录页
@@ -1818,7 +1982,7 @@ createServer((req, res) => {
       res.end("denied by policy");
       return;
     }
-    if (policy === "two_factor" && (!sess.twoFactorAt || Date.now() - sess.twoFactorAt > GRACE_MS)) {
+    if (policy === "two_factor" && !sess.initial && (!sess.twoFactorAt || Date.now() - sess.twoFactorAt > GRACE_MS)) {
       // 2FA 复验周期（remember me 可信设备）：周期外一律 401——nginx 302 回
       // 登录页后，GET /login 识别“会话有效但 2FA 过期”直接放行到 2FA 步骤页
       res.writeHead(401, { "Content-Type": "text/plain" });
@@ -1866,9 +2030,15 @@ createServer((req, res) => {
     // remember 属性延续：旧会话剩余寿命 > TTL_MS → 原本是 remember 会话。
     const sc = (req.headers.cookie || "").split(";").map((c) => c.trim()).find((c) => c.startsWith(COOKIE + "="));
     const sess = sc ? verifySession(sc.slice(COOKIE.length + 1)) : null;
-    if (sess) {
+    if (sess && !(sess.initial && siteHasUsers())) {
       const policy = hostPolicy((req.headers.host || "").split(":")[0]);
       if (policy === "two_factor") {
+        // break-glass 初始会话：不验证 2FA（站点无用户时直接 next）
+        if (sess.initial) {
+          res.writeHead(302, { Location: safeNext(next) });
+          res.end();
+          return;
+        }
         if (!sess.twoFactorAt || Date.now() - sess.twoFactorAt > GRACE_MS) {
           const tmp = issueSession(sess.name, COOKIE2, 5 * 60_000);
           const remember = sess.expiry - Date.now() > TTL_MS;
@@ -1925,6 +2095,18 @@ createServer((req, res) => {
       const expect = rec ? Buffer.from(rec.hash, "hex") : null;
       const got = expect ? scryptSync(password, rec.salt, expect.length) : null;
       const bad = !expect || expect.length !== got.length || !timingSafeEqual(expect, got);
+      // break-glass 初始用户：仅当站点 0 个真实用户 + 用户名/密码匹配才放行
+      // （不入库、不验证 2FA）。站点一旦出现任意真实用户即无效。
+      if (bad && INITIAL_USER && name === INITIAL_USER && !siteHasUsers()) {
+        const e = Buffer.from(INITIAL_HASH, "hex");
+        const g = scryptSync(password, INITIAL_SALT, e.length);
+        if (e.length === g.length && timingSafeEqual(e, g)) {
+          clearFailures(name, ip);
+          // initial 标记会话：authz 侧站点出现用户即 401 作废
+          setSession(res, name, next, COOKIE, TTL_MS, 0, true);
+          return;
+        }
+      }
       if (bad) {
         recordFailure(name, ip);
         res.writeHead(401, { "Content-Type": "text/html" });
@@ -2368,6 +2550,23 @@ createServer((req, res) => {
   }
 
   // face 浏览器资产（白名单严格匹配，防穿越；版本化目录，可中等缓存）
+  if (url.pathname === BASE + "/assets/justget-browser.js" && req.method === "GET") {
+    // justget-browser 单文件 IIFE（竞速下载器）——随 server 写盘，同源提供。
+    // 内容随库版本固定 → immutable；版本号查询参数由页面拼接（升级换参）。
+    try {
+      const buf = readFileSync(STATIC_DIR + "/justget-browser.js");
+      res.writeHead(200, {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": String(buf.length),
+      });
+      res.end(buf);
+    } catch {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    }
+    return;
+  }
   if (url.pathname === BASE + "/assets/face-api.js" && req.method === "GET") {
     try {
       const buf = readFileSync(ASSETS_DIR + "/face-api.js");

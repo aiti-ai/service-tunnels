@@ -311,6 +311,18 @@ export const AUTH_PARAM_SCHEMAS: Record<string, ParamSpec[]> = {
       description: "Global 2FA requirement: two_factor enforces TOTP (or biometrics) after password",
     },
     {
+      key: "initialUser.name",
+      label: "Initial (break-glass) username",
+      description: "Only usable while this site has ZERO users; skips 2FA; auto-generated (printed to config-dir initial-user.txt + stdout) when empty. Equivalent env: SERVICE_TUNNELS_PORTAL_INITIAL_USER",
+      placeholder: "bootstrap-...",
+    },
+    {
+      key: "initialUser.password",
+      label: "Initial (break-glass) password",
+      type: "password",
+      description: "Leave empty to auto-generate (printed once to config-dir initial-user.txt + stdout). Equivalent env: SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD",
+    },
+    {
       key: "basePath",
       label: "Base path",
       description: "Login page path; random by default (e.g. /portal-sneaky-capybara)",

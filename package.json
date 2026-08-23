@@ -29,12 +29,13 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "build": "npm run build:justget && tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/copy-vendor.mjs",
+    "build": "npm run build:justget && npm run build:justget-browser && tsc -p tsconfig.build.json && node scripts/fix-dts.mjs && node scripts/copy-vendor.mjs",
     "prepack": "npm run build:justget && npm run build",
     "test": "node --test --test-force-exit \"test/**/*.test.mjs\"",
     "typecheck": "tsc --noEmit",
     "build:justget": "node scripts/build-justget.mjs",
-    "test:serial": "node --test --test-force-exit --test-concurrency=1 \"test/**/*.test.mjs\""
+    "test:serial": "node --test --test-force-exit --test-concurrency=1 \"test/**/*.test.mjs\"",
+    "build:justget-browser": "node scripts/build-justget-browser.mjs"
   },
   "keywords": [
     "tunnel",
@@ -70,8 +71,8 @@
   "devDependencies": {
     "@types/node": "^26.1.2",
     "esbuild": "^0.28.2",
-    "typescript": "^5.8.3",
-    "justget": "^0.1.6"
+    "justget": "^0.2.2",
+    "typescript": "^5.8.3"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts"

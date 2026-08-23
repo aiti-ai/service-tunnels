@@ -59,10 +59,11 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
       },
       log: () => {},
     },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
 
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   assert.equal((await provider.listUsers()).map((u) => u.name).join(), "admin");
 
   await provider.start();
@@ -125,6 +126,111 @@ test("portal provider: forward-auth 401 → login → cookie → 200 + user mgmt
   await provider.stop();
 });
 
+test("portal break-glass initial user: zero-user site only, no 2FA, auto-generated + file/stdout, revoked once any user exists", { timeout: 40_000 }, async () => {
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const provider = new PortalAuthProvider(
+    {
+      configDir, cacheDir,
+      resolveTool: async () => "",
+      registerInternal: () => {},
+      unregisterInternal: () => {},
+      registerPid: () => {},
+      pickPort: async () => {
+        const { createServer } = await import("net");
+        return new Promise((resolve) => {
+          const srv = createServer();
+          srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+        });
+      },
+      log: () => {},
+    },
+    // 无 opts.user → 不自动建隐藏 admin；break-glass 接管空库
+    { basePath: "/portal", policy: "two_factor" },
+  );
+
+  await provider.prepare();
+  // 未指定 → 自动生成随机凭据，落盘配置目录 + stdout
+  const credFile = join(configDir, "initial-user.txt");
+  assert.equal(existsSync(credFile), true, "initial-credentials file written to config dir");
+  const fileTxt = readFileSync(credFile, "utf8");
+  const iu = fileTxt.match(/^username\s+:\s*(.+)$/m)?.[1];
+  const ip = fileTxt.match(/^password\s+:\s*(.+)$/m)?.[1];
+  assert.ok(iu && ip, "file contains username+password");
+  // 初始用户不入库（不是真实用户）
+  assert.equal((await provider.listUsers()).length, 0, "break-glass user is NOT a real db user");
+
+  await provider.start();
+  const port = provider.port;
+
+  // two_factor 策略下初始用户登录也应直达 302（不验证 2FA，无 2FA 步骤页）
+  const ok = await postForm("/portal/login", port, { username: iu, password: ip, next: "/app" });
+  assert.equal(ok.status, 302, "initial user login succeeds under two_factor policy without 2FA");
+  const cookie = String(ok.headers["set-cookie"]);
+  const token = cookie.split(";")[0].split("=")[1];
+  const authed = await get("/portal/api/authz/auth-request", port, { cookie: `st_portal_session=${token}` });
+  assert.equal(authed.status, 200, "initial session passes authz");
+  assert.equal(authed.headers["x-st-auth-user"], iu);
+
+  // 错误密码 → 401
+  const bad = await postForm("/portal/login", port, { username: iu, password: "nope", next: "/app" });
+  assert.equal(bad.status, 401);
+
+  // 站点出现任意真实用户 → 初始用户立即失效（登录拒绝 + 旧初始会话作废）
+  await provider.addUser("bob", "bob-pw", "Bob");
+  assert.equal((await provider.listUsers()).length, 1);
+  const reLogin = await postForm("/portal/login", port, { username: iu, password: ip, next: "/app" });
+  assert.equal(reLogin.status, 401, "initial user login rejected once a real user exists");
+  const deadSession = await get("/portal/api/authz/auth-request", port, { cookie: `st_portal_session=${token}` });
+  assert.equal(deadSession.status, 401, "existing initial session revoked once a real user exists");
+  // 真实用户登录（two_factor 策略 + 未注册 2FA → 200 选方法页，非 401 即登录密码被接受）
+  const bob = await postForm("/portal/login", port, { username: "bob", password: "bob-pw", next: "/app" });
+  assert.ok(bob.status !== 401, "real user login accepted (not rejected)");
+
+  await provider.stop();
+});
+
+test("portal break-glass initial user: env var override + explicit opts.initialUser + persisted empty db", { timeout: 40_000 }, async () => {
+  const { PortalAuthProvider } = await import("../src/providers/portal.ts");
+  const { cacheDir, configDir } = tempDirs();
+  const prevU = process.env.SERVICE_TUNNELS_PORTAL_INITIAL_USER;
+  const prevP = process.env.SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD;
+  process.env.SERVICE_TUNNELS_PORTAL_INITIAL_USER = "off";
+  process.env.SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD = "pw123";
+  try {
+    const pick = async () => {
+      const { createServer } = await import("net");
+      return new Promise((resolve) => {
+        const srv = createServer();
+        srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+      });
+    };
+    const provider = new PortalAuthProvider(
+      { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {}, registerPid: () => {}, log: () => {}, pickPort: pick },
+      { basePath: "/portal" },
+    );
+    await provider.prepare();
+    const fileTxt = readFileSync(join(configDir, "initial-user.txt"), "utf8");
+    assert.match(fileTxt, /^username\s+:\s*off$/m);
+    assert.match(fileTxt, /^password\s+:\s*pw123$/m);
+    await provider.start();
+    const port = provider.port;
+    // 指定凭据可登录
+    const ok = await postForm("/portal/login", port, { username: "off", password: "pw123", next: "/app" });
+    assert.equal(ok.status, 302);
+    // 已有用户 → 即使 env 指定也无效
+    await provider.addUser("alice", "alice-pw");
+    const re = await postForm("/portal/login", port, { username: "off", password: "pw123", next: "/app" });
+    assert.equal(re.status, 401);
+    await provider.stop();
+  } finally {
+    if (prevU === undefined) delete process.env.SERVICE_TUNNELS_PORTAL_INITIAL_USER;
+    else process.env.SERVICE_TUNNELS_PORTAL_INITIAL_USER = prevU;
+    if (prevP === undefined) delete process.env.SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD;
+    else process.env.SERVICE_TUNNELS_PORTAL_INITIAL_PASSWORD = prevP;
+  }
+});
+
 test("portal login redirect: hidden `next` survives the browser round-trip (no double-encoding)", { timeout: 40_000 }, async () => {
   // Regression: the login page used to put encodeURIComponent(next) in the
   // hidden field, so each redirect stacked an encoding layer (/foo → %2Ffoo
@@ -148,9 +254,10 @@ test("portal login redirect: hidden `next` survives the browser round-trip (no d
       },
       log: () => {},
     },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   await provider.start();
   const port = provider.port;
   try {
@@ -184,9 +291,10 @@ test("portal login password transport: RSA-OAEP front-end encryption", { timeout
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   await provider.start();
   const port = provider.port;
 
@@ -249,9 +357,10 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   await provider.start();
   const port = provider.port;
 
@@ -277,9 +386,10 @@ test("portal brute-force lockout (account + IP, persistent) + TOTP 2FA login", {
   const provider2 = new P2(
     { configDir: d2.configDir, cacheDir: d2.cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await provider2.prepare();
+  await provider2.addUser("admin", "pw");
   await provider2.start();
   const port2 = provider2.port;
   await provider2.addUser("alice", "alice-pw");
@@ -384,9 +494,10 @@ test("portal remember me: 365d-equivalent cookie, 2FA grace re-verify (skip pass
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await provider.prepare();
+  await provider.addUser("admin", "pw");
   await provider.addUser("bob", "bob-pw"); // 无 TOTP：1FA 用户
   const { secret } = await provider.totpEnroll("admin");
   await provider.totpActivate("admin", generateTotpCode(secret) ?? "000000");
@@ -545,7 +656,7 @@ test("portal biometric face: templates store (enroll→pending→verify→active
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort: async () => 0, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal", biometrics: true },
+    { basePath: "/portal", biometrics: true },
   );
   await provider.addUser("cara", "cara-pw");
   const face = synthVec(42);
@@ -609,7 +720,7 @@ test("portal biometric face: full login flow (challenge nonce, RSA payload, thre
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal", biometrics: true },
+    { basePath: "/portal", biometrics: true },
   );
   await provider.prepare(); // 生成 server.mjs（离线——资产下载只在 start）
   await provider.addUser("dana", "dana-pw");
@@ -796,7 +907,7 @@ test("portal biometric voice: parent API (enroll quality gate → pending → ve
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort: async () => 0, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal", biometrics: true },
+    { basePath: "/portal", biometrics: true },
   );
   await provider.addUser("vera", "vera-pw");
   const v = synthVoice(777);
@@ -805,7 +916,7 @@ test("portal biometric voice: parent API (enroll quality gate → pending → ve
   const off = new PortalAuthProvider(
     { configDir: cacheDir + "-off", cacheDir: cacheDir + "-off", resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort: async () => 0, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal" },
+    { basePath: "/portal" },
   );
   await off.addUser("vera", "vera-pw");
   // 管理端直写模板不检查门户 biometrics 运行开关（数据层预设置，2025 行为变更）——
@@ -858,7 +969,7 @@ test("portal biometric voice: login flow + enroll paths (login-time cookie & adm
   const provider = new PortalAuthProvider(
     { configDir, cacheDir, resolveTool: async () => "", registerInternal: () => {}, unregisterInternal: () => {},
     registerPid: () => {}, pickPort, log: () => {} },
-    { user: { name: "admin", password: "pw" }, basePath: "/portal", biometrics: true },
+    { basePath: "/portal", biometrics: true },
   );
   await provider.prepare();
   await provider.addUser("wendy", "wendy-pw"); // 零方法用户

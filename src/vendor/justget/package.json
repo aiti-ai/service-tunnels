@@ -1,0 +1,7 @@
+{
+  "name": "justget-vendor",
+  "version": "0.2.2",
+  "description": "Vendored justget: browser IIFE bundle + node single-file ESM (MIT) - CommonJS scope for the ESM package",
+  "private": true,
+  "type": "commonjs"
+}

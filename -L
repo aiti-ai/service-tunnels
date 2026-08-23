@@ -1,0 +1,27 @@
+HTTP/1.1 302 Found
+Server: ADAS/1.0.214
+Date: Sun, 23 Aug 2026 06:20:20 GMT
+Content-Type: text/html; charset=utf-8
+Transfer-Encoding: chunked
+Connection: keep-alive
+X-XSS-Protection: 1; mode=block
+X-Content-Type-Options: nosniff
+X-UA-Compatible: chrome=1
+Referrer-Policy: same-origin
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+Expires: Sun, 1 Jan 2000 01:00:00 GMT
+Pragma: must-revalidate, no-cache, private
+Location: https://gitee.com/justdb-mirrors/face-models/attach_files/3050468/download/face-api.js
+Cache-Control: no-cache
+Set-Cookie: user_locale=zh-CN; domain=.gitee.com; path=/; expires=Thu, 23 Aug 2046 06:20:19 -0000
+Set-Cookie: oschina_new_user=false; path=/; expires=Thu, 23 Aug 2046 06:20:19 -0000
+Set-Cookie: gitee-session-n=ZFdaSVVZWFlDZXdselM0N25oVkxXb3RydDZiS3o1TkcxS1dJL3k5Znc4bS9xVzRrVjkwQkVGM0RDakdTWFlPeXZ6OXZ5VXhoZHBaMmlBbm9ZYVNlUGc9PS0tZlFxbVh1N0ltaHB1Zk1LR1JUTm9oQT09--a1ad631c8e3c1dbe2c58e3cbc4acf4cc9132d31b; domain=.gitee.com; path=/; secure; HttpOnly; SameSite=Lax
+X-Request-Id: 387c1de9ba299055e061d5ca7d5cfd14
+X-Runtime: 0.041617
+Vary: Origin
+X-Frame-Options: SAMEORIGIN
+Content-Security-Policy: frame-ancestors 'self' https://*.gitee.com
+BDWAF-Request-ID: f76eb90a-cf74-410e-9f57-717d7d289d0e
+Set-Cookie: abymg_id=1_db4df99182e71eb089546359a3e991cfc6e997995d8a1f0ec9ec260ac783ea08; Max-Age=86400; Path=/; Domain=gitee.com; HttpOnly; Secure; SameSite=None
+Set-Cookie: BEC=4431548549a19240b277aa1ec69b0837;Path=/;Max-Age=126000
+
