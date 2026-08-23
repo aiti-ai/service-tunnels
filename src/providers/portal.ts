@@ -1653,8 +1653,9 @@ function chooserPage(next, methods, remember, host, error, enrollMethods) {
 // face 验证页（biometric-2fa-design.md §7.2）：浏览器本地提取 128-d 向量
 // （face-api.js + 3 模型从本站 assets 加载，原始画面不出设备），眨眼活体
 // 断言（EAR），JSON{nonce,vectors,blinked} 一次性 RSA-OAEP 加密上传。
-function facePage(next, error, host, remember, nonce, keyId, publicKey, altMethods) {
+function facePage(next, error, host, remember, nonce, keyId, publicKey, altMethods, action, extra) {
   const err = error ? '<p style="color:#c0392b">' + error + "</p>" : "";
+  const formAction = action || BASE + "/login/2fa";
   const alt = altMethods && altMethods.length > 1
     ? '<a class="alt" href="' + BASE + "/login/2fa?next=" + encodeURIComponent(next) + (remember ? "&r=1" : "") + '">Use another method</a>'
     : "";
@@ -1682,10 +1683,11 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + '<div id="cam"><video id="v" autoplay muted playsinline></video></div>'
     + '<p id="st" class="st">Loading…</p>'
     + '<div id="dots"><i></i><i></i><i></i></div>' + err + alt
-    + '<form id="f" method="post" action="' + BASE + '/login/2fa">'
+    + '<form id="f" method="post" action="' + formAction + '">'
     + '<input type="hidden" name="method" value="face">'
     + '<input type="hidden" name="next" value="' + escapeAttr(next) + '">'
     + (remember ? '<input type="hidden" name="remember" value="1">' : "")
+    + (extra || "")
     + '<input type="hidden" name="keyId" id="keyId"><input type="hidden" name="wrapped" id="wrapped"><input type="hidden" name="iv" id="iv"><input type="hidden" name="data" id="data">'
     + '</form><div id="busy"><div class="spin"></div><p>Verifying…</p></div></main>'
     + '<script>'
@@ -1701,13 +1703,13 @@ function facePage(next, error, host, remember, nonce, keyId, publicKey, altMetho
     + 'st("Downloading engine…");'
     + 'var a0=FACE_CFG.assets[0];'
     + 'var u0=jgUrls(a0);u0.push(A+"/assets/face-api.js");'
-    + 'var r0=await JG.download({url:u0[0],mirrors:u0.slice(1),options:{checksum:a0.sha256,checksumAlgorithm:"sha256",responseType:"uint8array",onProgress:function(p){st("Engine "+Math.round(p.percentage)+"%");}}});'
+    + 'var r0=await JG.download({url:u0[0],mirrors:u0.slice(1),options:{checksum:a0.sha256,checksumAlgorithm:"sha256",responseType:"uint8array",sizeThreshold:1048576,primaryWarmupTime:3000,onProgress:function(p){st("Engine "+Math.round(p.percentage)+"%");}}});'
     + 'await loadScript(URL.createObjectURL(new Blob([r0.data],{type:"application/javascript"})));'
     + 'st("Downloading models…");'
     + 'var bytes={};'
     + 'var dl=FACE_CFG.assets.slice(1).map(function(a){'
     + 'var mu=jgUrls(a);mu.push(A+"/assets/models/"+a.file);'
-    + 'return JG.download({url:mu[0],mirrors:mu.slice(1),options:{checksum:a.sha256,checksumAlgorithm:"sha256",responseType:"uint8array"}}).then(function(r){bytes[a.file]=r.data;});'
+    + 'return JG.download({url:mu[0],mirrors:mu.slice(1),options:{checksum:a.sha256,checksumAlgorithm:"sha256",responseType:"uint8array",sizeThreshold:1048576,primaryWarmupTime:3000}}).then(function(r){bytes[a.file]=r.data;});'
     + '});'
     + 'await Promise.all(dl);'
     + 'var of=window.fetch;'
