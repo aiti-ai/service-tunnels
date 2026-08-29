@@ -9,7 +9,7 @@ import { validateUserName, validateDisplayName, validateEmail, yamlEscape } from
 import type { AuthProvider, AuthPolicy, ProviderContext, AuthProviderStatus, AuthUser } from "./auth-provider.ts";
 
 /**
- * Authelia auth provider (built-in default, design.md §5.3).
+ * Authelia auth provider (built-in option; default is portal — design.md §5.3).
  *
  * Green start: resolve authelia binary (PATH > cache > download) → generate
  * configuration.yml (base-path /authelia, file auth backend, sqlite storage,

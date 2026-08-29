@@ -6,9 +6,12 @@ import { readStarttime } from "./guardian.ts";
 import { spawnNode } from "./spawn-node.ts";
 
 /**
- * Spawn the parent-death guardian (detached, unref'd). The guardian polls the
- * given parent pid; when it exits it kills every SERVICE_TUNNELS_ROLE helper
- * (see guardian.ts). Returns the child (or null when unsupported).
+ * Spawn the parent-death guardian (detached, unref'd). The guardian holds an
+ * IPC channel back to us — our death (crash / SIGKILL / graceful exit) closes
+ * the channel and fires 'disconnect' in the guardian, which then kills every
+ * SERVICE_TUNNELS_ROLE helper (see guardian.ts). Event-driven: no polling on
+ * either side; on Windows this removes the former 1 Hz `tasklist` probes.
+ * Returns the child (or null when unsupported).
  */
 
 function guardianEntry(): string | null {
@@ -28,9 +31,15 @@ export function spawnGuardian(
   const starttime = readStarttime(parentPid);
   const child = spawnNode(
     opts.nodePath,
+    // intervalMs is only used by the legacy poll fallback (no-IPC mode); with
+    // the channel present detection is purely event-driven.
     [entry, String(parentPid), starttime, String(opts.intervalMs ?? 1_000), opts.registrationFile ?? "", opts.cacheDir ?? ""],
-    { detached: true, stdio: ["ignore", "ignore", "ignore"] },
+    { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] },
   );
   child.unref();
+  // Unref the channel so the IPC fd doesn't pin OUR event loop — the fd stays
+  // open (the guardian keeps watching it) but a graceful exit of this process
+  // is not blocked. On death the kernel closes it and the guardian reaps.
+  (child as { channel?: { unref?: () => void } | undefined }).channel?.unref?.();
   return child;
 }

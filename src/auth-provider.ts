@@ -3,12 +3,12 @@
  *
  * Mainline is the LOCAL GATEWAY model: all tunnels are pure transports to the
  * local nginx gateway port; auth is decided 100% locally via nginx
- * auth_request → provider (default: Authelia forward-auth). Edge-auth
+ * auth_request → provider (default: portal). Edge-auth
  * providers (ngrok edge-oidc) are optional plugins that do not start local
  * processes.
  *
- * Authelia is the built-in default, NOT the only option: providers are
- * registered via a factory (built-in authelia/basic; plugins from the
+ * Portal is the built-in default, NOT the only option: providers are
+ * registered via a factory (built-in portal/authelia/basic; plugins from the
  * providers/ directory, npm packages, or authPlugins at construction).
  */
 

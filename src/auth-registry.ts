@@ -18,7 +18,7 @@ import { withSchemaI18nKeys } from "./i18n.ts";
 /**
  * Auth provider registry + plugin loading (design.md §5.3).
  *
- * Built-ins: authelia (default), basic. Plugins load from:
+ * Built-ins: portal (default), authelia, basic. Plugins load from:
  *   1. authPlugins passed to createServiceTunnels,
  *   2. providers/*.js in configDir (ESM modules exporting a factory).
  * Each factory receives a ProviderContext; the registry exposes list() /

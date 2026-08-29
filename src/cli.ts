@@ -26,6 +26,10 @@ function usage(lang: Lang = "en"): void {
                  [--host <h>] [--user <u>] [--port <p>] [--remote-port <rp>] |
                  [--server <s>] [--token <t>] [--arg <a>...] [--set k=v ...] [-i] |
          start|stop|remove <name>
+  ddns list | add <name> --provider <cloudflare|dnspod|aliyun|duckdns>
+       --record <fqdn> --zone <z> [--token <t>] [--secret <s>] [--access-key-id <k>]
+       [--ttl <n>] [--interval <sec>] | remove <name>
+  ddns update [--name <n>] [--loop] | ip    # keep a stable name on a dynamic IP
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
@@ -66,6 +70,15 @@ interface CliArgs {
   token?: string;
   user?: string;
   remotePort?: number;
+  provider?: string;
+  record?: string;
+  zone?: string;
+  secret?: string;
+  accessKeyId?: string;
+  ttl?: number;
+  interval?: number;
+  proxied?: boolean;
+  loop?: boolean;
   cmd?: string;
   /** --set key=value (tunnel params, validated against the type schema). */
   sets?: Record<string, string>;
@@ -194,6 +207,33 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--remote-port":
         args.remotePort = Number(argv[++i]!);
+        break;
+      case "--provider":
+        args.provider = argv[++i];
+        break;
+      case "--record":
+        args.record = argv[++i];
+        break;
+      case "--zone":
+        args.zone = argv[++i];
+        break;
+      case "--secret":
+        args.secret = argv[++i];
+        break;
+      case "--access-key-id":
+        args.accessKeyId = argv[++i];
+        break;
+      case "--ttl":
+        args.ttl = Number(argv[++i]!);
+        break;
+      case "--interval":
+        args.interval = Number(argv[++i]!);
+        break;
+      case "--proxied":
+        args.proxied = true;
+        break;
+      case "--loop":
+        args.loop = true;
         break;
       case "--set":
         addSet(args, "sets", argv[++i]);
@@ -808,13 +848,13 @@ async function main(): Promise<void> {
       }
       const res = await st.daemon.request("expose", {
         port,
-        // "auto" → expose 内部按平台解析默认 provider（win32=portal，其余=authelia）
+        // "auto" → expose 内部解析默认 provider（portal，全平台）
         // "none" → 显式无认证（纯透传隧道，走 none 网关路径）
         auth: args.auth === "auto" || args.auth === true
           ? "auto"
           : args.auth === "none" ? false : Boolean(args.auth),
         provider: typeof args.auth === "string" && args.auth !== "auto" ? args.auth : undefined,
-        mode: args.mode as "tunnel" | "proxy" | "both" | undefined,
+        mode: args.mode as "tunnel" | "proxy" | "both" | "portmap" | undefined,
         site: args.site,
         proxyPort: args.proxyPort != null ? Number(args.proxyPort) : undefined,
         baseDomain: args.baseDomain,
@@ -1029,6 +1069,87 @@ async function main(): Promise<void> {
         jsonOut({ revoked: id, site, providers });
       } else {
         console.error("auth providers list | auth user list|add|set-password|remove | auth token list|create|revoke | auth totp enroll|disable|status|code [--site <s>] [--provider ...] [--secret <b32>]");
+        process.exit(2);
+      }
+      break;
+    }
+
+    case "ddns": {
+      const { readDdnsConfigs, writeDdnsConfigs, runDdnsOnce, resolvePublicIp, startDdnsLoop, DDNS_PROVIDERS } = await import("./ddns.ts");
+      const op = cmd[1] ?? "list";
+      const name = cmd[2];
+      if (op === "list") {
+        jsonOut({ configPath: join(st.dirs.configDir, "ddns.json"), records: readDdnsConfigs(st.dirs.configDir).map((r) => ({ ...r, token: r.token ? "***" : undefined, secret: r.secret ? "***" : undefined })) });
+      } else if (op === "add") {
+        if (!name || !args.record) {
+          console.error("ddns add <name> --provider <cloudflare|dnspod|aliyun|duckdns> --record <fqdn> --zone <z> [--token <t>] [--secret <s>] [--access-key-id <k>] [--ttl <n>] [--interval <sec>] [--proxied]");
+          process.exit(2);
+        }
+        const provider = args.provider as typeof DDNS_PROVIDERS[number];
+        if (!DDNS_PROVIDERS.includes(provider)) {
+          console.error(`unknown provider: ${args.provider} (known: ${DDNS_PROVIDERS.join(", ")})`);
+          process.exit(2);
+        }
+        if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(args.record)) {
+          console.error(`invalid record fqdn: ${args.record}`);
+          process.exit(2);
+        }
+        const cfgs = readDdnsConfigs(st.dirs.configDir);
+        const rec = {
+          name,
+          provider,
+          record: args.record.toLowerCase(),
+          zone: args.zone?.toLowerCase(),
+          token: args.token,
+          secret: args.secret,
+          accessKeyId: args.accessKeyId,
+          ttl: args.ttl,
+          intervalSec: args.interval,
+          proxied: args.proxied,
+        };
+        // duckdns uses bare labels; the others need a root zone
+        if (provider !== "duckdns" && !rec.zone) {
+          console.error(`ddns add ${name}: provider '${provider}' requires --zone <root domain>`);
+          process.exit(2);
+        }
+        writeDdnsConfigs(st.dirs.configDir, [...cfgs.filter((c) => c.name !== name), rec]);
+        jsonOut({ added: name, provider, record: rec.record, zone: rec.zone ?? null });
+      } else if (op === "remove") {
+        if (!name) {
+          console.error("ddns remove <name>");
+          process.exit(2);
+        }
+        const cfgs = readDdnsConfigs(st.dirs.configDir);
+        if (!cfgs.some((c) => c.name === name)) {
+          console.error(`ddns record not found: ${name}`);
+          process.exit(2);
+        }
+        writeDdnsConfigs(st.dirs.configDir, cfgs.filter((c) => c.name !== name));
+        jsonOut({ removed: name });
+      } else if (op === "ip") {
+        jsonOut({ ipv4: await resolvePublicIp(4), ipv6: await resolvePublicIp(6) });
+      } else if (op === "update") {
+        let cfgs = readDdnsConfigs(st.dirs.configDir).filter((c) => c.enabled !== false);
+        if (name) cfgs = cfgs.filter((c) => c.name === name);
+        if (name && !cfgs.length) {
+          console.error(`ddns record not found: ${name}`);
+          process.exit(2);
+        }
+        if (!cfgs.length) {
+          console.error("no ddns records configured — use 'st ddns add' first");
+          process.exit(2);
+        }
+        if (args.loop === true) {
+          const handle = startDdnsLoop(cfgs, { log: (l) => process.stdout.write(l + "\n") });
+          const stop = () => { handle.stop(); process.exit(0); };
+          process.on("SIGINT", stop);
+          process.on("SIGTERM", stop);
+          await new Promise(() => {}); // loop keeps running; interval is unref'd so keep alive here
+        }
+        const results = await runDdnsOnce(cfgs);
+        jsonOut(args.json ? results : results.map(({ name: n, record, type, ip, changed, skipped, error }) => ({ name: n, record, type, ip, changed, skipped, error })));
+      } else {
+        usage(lang);
         process.exit(2);
       }
       break;

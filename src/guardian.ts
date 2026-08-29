@@ -16,12 +16,18 @@ import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
  *   - Library: createServiceTunnels can spawn a guardian watching the caller
  *     (e.g. host) so a crashed host never leaves helpers behind.
  *
- * Detection is a cross-platform poll (no native deps):
- *   - Linux: process.kill(pid, 0) + /proc/<pid>/stat starttime comparison to
- *     reject pid-reuse false positives
- *   - macOS: process.kill(pid, 0) (ESRCH = parent gone; zombies reaped by init)
- *   - Windows: tasklist /FI "PID eq <pid>" (process.kill(pid,0) semantics for
- *     nonexistent pids are unreliable there)
+ * Detection, in order of preference:
+ *   1. IPC channel (spawned with stdio 'ipc', guardian-spawn.ts): the parent
+ *      holds the other end; its death — crash, SIGKILL or graceful exit —
+ *      closes the pipe and fires 'disconnect'. Event-driven: zero polling,
+ *      zero child_process spawns (this replaces the former 1 Hz tasklist
+ *      flash on Windows). 5 s maintenance tick is pure file IO.
+ *   2. Fallback poll (spawned without IPC / run directly), cross-platform:
+ *      - Linux: process.kill(pid, 0) + /proc/<pid>/stat starttime comparison
+ *        to reject pid-reuse false positives
+ *      - macOS: process.kill(pid, 0) (ESRCH = parent gone; zombies reaped by init)
+ *      - Windows: tasklist /FI "PID eq <pid>" (process.kill(pid,0) semantics
+ *        for nonexistent pids are unreliable there)
  *
  * Spawn:  node guardian.ts <parentPid> <parentStarttime?> <intervalMs?>
  */
@@ -178,25 +184,11 @@ async function main(): Promise<void> {
   const cleanupIntervalMs = 6 * 3600 * 1000; // stale-folder sweep every 6h
   let descendants = new Set<number>();
   let registered = new Set<number>();
-  let lastScan = 0;
   let lastCleanup = 0;
-  for (;;) {
-    await new Promise((r) => setTimeout(r, intervalMs));
-    if (parentAlive(parentPid, parentStarttime)) {
-      if (Date.now() - lastScan >= scanIntervalMs) {
-        descendants = collectDescendants(parentPid);
-        registered = readRegistered(registrationFile);
-        lastScan = Date.now();
-      }
-      // periodic sweep of stale per-parent artifacts (older than 7d + owner dead)
-      if (Date.now() - lastCleanup >= cleanupIntervalMs) {
-        cleanupStaleDirs(cacheDir);
-        lastCleanup = Date.now();
-      }
-      continue;
-    }
-    // parent gone — kill everything we recorded (by pid; valid even after
-    // reparenting), then marker-scoped stragglers (detached tunnels).
+
+  // parent gone — kill everything we recorded (by pid; valid even after
+  // reparenting), then marker-scoped stragglers (detached tunnels).
+  const reapAndExit = async (): Promise<never> => {
     const marker = process.env.SERVICE_TUNNELS_MARKER ?? "";
     const targets = new Set([...descendants, ...registered]);
     const killSig = (sig: NodeJS.Signals) => {
@@ -223,6 +215,53 @@ async function main(): Promise<void> {
     }
     killRoleProcessesSync(marker, parentPid, perPpidPath);
     process.exit(0);
+  };
+
+  // Maintenance while the parent is alive: refresh registered pids + snapshot
+  // descendants (pure file IO on Linux; no-op-ish on Windows — no /proc — where
+  // reaping relies on the registration file + role markers).
+  const refresh = () => {
+    registered = readRegistered(registrationFile);
+    descendants = collectDescendants(parentPid);
+    if (Date.now() - lastCleanup >= cleanupIntervalMs) {
+      cleanupStaleDirs(cacheDir);
+      lastCleanup = Date.now();
+    }
+  };
+
+  // ── Mode 1: IPC channel (preferred) ──────────────────────────────
+  // The channel IS the liveness link: the parent holds the far end, so its
+  // death closes the pipe and fires 'disconnect' — no polling, no spawns of
+  // any kind. The IPC handle itself keeps this process' loop alive; the
+  // maintenance timer is unref'd so it never does.
+  if (process.connected) {
+    refresh();
+    const maint = setInterval(refresh, scanIntervalMs);
+    maint.unref?.();
+    process.on("disconnect", () => {
+      void reapAndExit();
+    });
+    return;
+  }
+
+  // ── Mode 2: legacy poll (no IPC — old spawner or direct run) ────────
+  let lastScan = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    if (parentAlive(parentPid, parentStarttime)) {
+      if (Date.now() - lastScan >= scanIntervalMs) {
+        descendants = collectDescendants(parentPid);
+        registered = readRegistered(registrationFile);
+        lastScan = Date.now();
+      }
+      // periodic sweep of stale per-parent artifacts (older than 7d + owner dead)
+      if (Date.now() - lastCleanup >= cleanupIntervalMs) {
+        cleanupStaleDirs(cacheDir);
+        lastCleanup = Date.now();
+      }
+      continue;
+    }
+    await reapAndExit();
   }
 }
 

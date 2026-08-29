@@ -193,7 +193,7 @@ function syncProviderFields(){
   renderAuthParams();
   if(hint)hint.textContent=ssh?tr('ui.ports.sshHint'):(v==='token'?tr('ui.ports.tokenHint'):'');
 }
-// auth 默认随协议: tcp → ssh; http/https/auto → defaultProvider(authelia, 无则 portal)
+// auth 默认随协议: tcp → ssh; http/https/auto → defaultProvider(portal)
 function syncAuthDefault(){
   const prov=document.getElementById('exp-provider');if(!prov||authManual)return;
   const proto=document.getElementById('exp-protocol').value;

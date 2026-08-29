@@ -9,14 +9,11 @@ import { AuthRegistry } from "./auth-registry.ts";
 import { tunnelSupportsTcp } from "./tunnels.ts";
 import type { TunnelManager } from "./tunnels.ts";
 import { InternalRegistry } from "./internal.ts";
-import { platform } from "os";
-
-/** Default auth provider by platform. */
+/** Default auth provider. Portal is Node-based (no external binaries) and
+ *  feature-complete (2FA incl. biometrics) — default on every platform.
+ *  Authelia remains available via explicit `--auth auto`/`--provider`. */
 function getDefaultAuthProvider(): string {
-  // Windows: portal (Node-based, no external binaries)
-  // Linux/macOS: authelia (full-featured with 2FA)
-  if (platform() === "win32") return "portal";
-  return "authelia";
+  return "portal";
 }
 
 /** "oidc.issuerUrl" → { oidc: { issuerUrl } } — schema-driven form params
@@ -73,12 +70,16 @@ export function unflattenParams(params: Record<string, unknown>): Record<string,
  * §5). Random hosts work (dynamic registration).
  */
 
+import { ensurePortmap, PortmapUnavailableError, type MapHandle } from "./portmap/index.ts";
+
 export interface ExposeOptions {
   port: number;
   /** Exposure mode (sites-design.md §4): "tunnel" (default, existing),
    *  "proxy" (local virtual host only, NO tunnel process), "both" (local
-   *  vhost + public tunnel sharing one site). */
-  mode?: "tunnel" | "proxy" | "both";
+   *  vhost + public tunnel sharing one site), "portmap" (router port mapping:
+   *  external IP:port → the local proxy transport; auth still applies —
+   *  docs/portmap-analysis.md). */
+  mode?: "tunnel" | "proxy" | "both" | "portmap";
   /** @internal set by the dispatcher: whether the caller explicitly passed
    *  --site (distinguishes `--site default` from no --site — the former keeps
    *  the reserved "auth" label, the latter carries the provider name). */
@@ -168,6 +169,16 @@ export interface ExposeOptions {
   providerParams?: Record<string, unknown>;
   /** When true, skip the port ownership check (allow tunneling other users' ports). */
   force?: boolean;
+  /** mode "portmap" options (docs/portmap-analysis.md §4.2). */
+  portmap?: {
+    method?: "auto" | "upnp" | "pcp";
+    gateway?: string;
+    /** Manual UPnP SOAP control URL (skips SSDP discovery — test/dev). */
+    controlUrl?: string;
+    serviceType?: string;
+    externalPort?: number;
+    leaseSeconds?: number;
+  };
 }
 
 export interface ExposeResult {
@@ -182,8 +193,10 @@ export interface ExposeResult {
   /** Failure reason when `url` is null (e.g. ngrok "not authenticated").
    *  Surfaced so callers/UI aren't left with a silent null URL. */
   error?: string;
-  /** Mode used ("tunnel" | "proxy" | "both"). */
-  mode?: "tunnel" | "proxy" | "both";
+  /** Mode used ("tunnel" | "proxy" | "both" | "portmap"). */
+  mode?: "tunnel" | "proxy" | "both" | "portmap";
+  /** Router mapping details when mode === "portmap". */
+  portmap?: { backend: "upnp" | "pcp"; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number };
   /** Site (auth realm) the expose belongs to; "" for open bindings. */
   site?: string;
   /** Vhost dash label ("auth" for the default site, site name otherwise,
@@ -302,6 +315,7 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const siteCfg = sites[site];
   const opts2 = { ...opts, site, siteExplicit: opts.site !== undefined };
   if (mode === "proxy") return await proxyExpose(port, opts2, ctx, siteCfg);
+  if (mode === "portmap") return await portmapExpose(port, opts2, ctx, siteCfg);
   const proxyResult = mode === "both" ? await proxyExpose(port, opts2, ctx, siteCfg) : null;
   const result = await exposeTunnel(port, opts2, ctx, siteCfg);
   return proxyResult
@@ -316,6 +330,78 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
         domainUrl: proxyResult.domainUrl,
       }
     : result;
+}
+
+/**
+ * portmap mode — router port mapping (docs/portmap-analysis.md).
+ *
+ * The external gateway port ALWAYS targets the local proxy transport (never
+ * the raw app port), so the site's auth provider still guards the pipe;
+ * auth "none" open bindings are gated by the allow-auth-none switch above.
+ *
+ *   --mode portmap --auth basic   →  http://<公网IP>:<随机高位端口>（过 basic）
+ */
+async function portmapExpose(
+  port: number,
+  opts: ExposeOptions,
+  ctx: ExposeContext,
+  siteCfg: SiteConfig | undefined,
+): Promise<ExposeResult> {
+  const log = ctx.log ?? (() => {});
+  if (!opts.force) {
+    const { verifyPortOwner } = await import("./discovery.ts");
+    const check = verifyPortOwner(port, ctx.internal);
+    if (!check.allowed) {
+      return { url: null, tunnel: "", error: check.reason ?? "Port ownership verification failed" };
+    }
+  }
+  // Local transport + enrollment identical to proxy mode — the router maps
+  // to THIS listener, never straight to the app.
+  const proxyResult = await proxyExpose(port, opts, ctx, siteCfg);
+  const transportPort = Number(/:(\d+)$/.exec(proxyResult.localUrl ?? "")?.[1] ?? 0);
+  if (!transportPort) {
+    return { ...proxyResult, mode: "portmap", error: "portmap requires a started proxy transport (startTransport !== false)" };
+  }
+  try {
+    const handle: MapHandle = await ensurePortmap(`${ctx.configDir}:portmap:${port}:${proxyResult.label ?? ""}`, transportPort, {
+      method: opts.portmap?.method,
+      gateway: opts.portmap?.gateway,
+      controlUrl: opts.portmap?.controlUrl,
+      serviceType: opts.portmap?.serviceType,
+      externalPort: opts.portmap?.externalPort,
+      leaseSeconds: opts.portmap?.leaseSeconds,
+      description: `service-tunnels:${port}${proxyResult.label ? `-${proxyResult.label}` : ""}`,
+    });
+    const m = handle.mapping;
+    const url = `http://${handle.externalIp}:${m.externalPort}`;
+    log(`expose ${port} (portmap): ${url} → ${m.internalIp}:${transportPort} via ${m.backend} (lease ${m.leaseSeconds}s)`);
+    return {
+      url,
+      tunnel: "",
+      provider: proxyResult.provider,
+      mode: "portmap",
+      site: proxyResult.site,
+      label: proxyResult.label,
+      localUrl: proxyResult.localUrl,
+      baseUrl: proxyResult.baseUrl,
+      domainUrl: proxyResult.domainUrl,
+      protocol: "http",
+      portmap: {
+        backend: m.backend,
+        gateway: m.gateway,
+        externalIp: handle.externalIp,
+        externalPort: m.externalPort,
+        internalPort: m.internalPort,
+        leaseSeconds: m.leaseSeconds,
+      },
+    };
+  } catch (e) {
+    const hint = e instanceof PortmapUnavailableError
+      ? e.message
+      : `router mapping failed: ${(e as Error).message}`;
+    log(`expose ${port} (portmap): FAILED — ${hint}`);
+    return { url: null, tunnel: "", mode: "portmap", site: proxyResult.site, label: proxyResult.label, localUrl: proxyResult.localUrl, error: hint };
+  }
 }
 
 /**
@@ -518,7 +604,7 @@ async function exposeTunnel(
     log(`--force specified: skipping port ownership check for port ${port}`);
   }
   
-  const providerType = opts.provider ?? siteCfg?.provider ?? (opts.auth === "auto" ? getDefaultAuthProvider() : "authelia");
+  const providerType = opts.provider ?? siteCfg?.provider ?? (opts.auth === "auto" ? getDefaultAuthProvider() : "portal");
   const site = opts.site ?? "default";
   // "none" is a first-class provider = expose WITHOUT auth (like basic but
   // no auth): skip the whole gateway/auth flow and make a plain tunnel.

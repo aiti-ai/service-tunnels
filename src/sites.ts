@@ -13,7 +13,7 @@ import { dirname, join } from "path";
 
 export interface SiteConfig {
   name: string;
-  /** Auth provider type; default = platform default (win32=portal, else authelia). */
+  /** Auth provider type; default = portal (all platforms). */
   provider?: string;
   /** Whether the site's vhosts require auth by default (default true). */
   auth?: boolean;
