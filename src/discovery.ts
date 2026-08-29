@@ -184,6 +184,8 @@ interface ProcTree {
   descendants: Set<number>;
   /** The caller's own process chain. */
   selfAndAncestors: Set<number>;
+  /** Topmost LIVE caller-owned process (BFS starts here). */
+  root: number;
 }
 
 function collectLinuxTree(opts: DiscoveryOptions): ProcTree {
@@ -215,23 +217,28 @@ function collectLinuxTree(opts: DiscoveryOptions): ProcTree {
       if (p !== root && !selfAndAncestors.has(p)) descendants.add(p);
     }
   }
-  return { descendants, selfAndAncestors };
+  return { descendants, selfAndAncestors, root };
 }
 
-function collectTableTree(table: Map<number, ProcEntry>, opts: DiscoveryOptions): ProcTree {
+export function collectTableTree(table: Map<number, ProcEntry>, opts: DiscoveryOptions): ProcTree {
   const selfAndAncestors = new Set<number>();
   const isOwn = (s: string) => isOwnProcess(s) || matchesAny(s, opts.excludeCmdline);
 
   let pid = opts.rootPid ?? process.pid;
+  // Root = the topmost LIVE caller-owned process. Never park the root on a
+  // dead pid: a vanished ancestor leaves stale-ppid orphans in the table and
+  // BFS-ing below a dead pid would pull in unrelated processes.
+  let root = pid;
   for (;;) {
     selfAndAncestors.add(pid);
     const entry = table.get(pid);
     const isOwnProc = pid === (opts.rootPid ?? process.pid) || isOwn(entry?.cmdline ?? "") || isOwn(entry?.name ?? "");
+    if (!isOwnProc) break;
+    root = pid;
     const ppid = entry?.ppid ?? 0;
-    if (!isOwnProc || !ppid || ppid === pid || ppid === 1) break;
+    if (!ppid || ppid === pid || ppid === 1) break;
     pid = ppid;
   }
-  const root = pid;
 
   const childrenMap = new Map<number, number[]>();
   for (const [child, entry] of table) {
@@ -245,12 +252,17 @@ function collectTableTree(table: Map<number, ProcEntry>, opts: DiscoveryOptions)
   while (queue.length > 0) {
     const cur = queue.pop()!;
     for (const child of childrenMap.get(cur) ?? []) {
-      if (child === root || selfAndAncestors.has(child) || descendants.has(child)) continue;
-      descendants.add(child);
+      if (child === root || descendants.has(child)) continue;
+      // selfAndAncestors nodes (the walk-up chain, e.g. the caller itself and
+      // its dev-server parent) must still be TRAVERSED — their subtrees hold
+      // the agents and spawned servers we want — but they are not descendant
+      // candidates: their own ports are the caller's own, never "services".
+      // (Mirrors collectLinuxTree, whose frontier always expands fully.)
+      if (!selfAndAncestors.has(child)) descendants.add(child);
       queue.push(child);
     }
   }
-  return { descendants, selfAndAncestors };
+  return { descendants, selfAndAncestors, root };
 }
 
 /**

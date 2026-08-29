@@ -270,3 +270,52 @@ test("library instance: createServiceTunnels discovers + internal registry", { t
     child.kill("SIGKILL");
   }
 });
+
+// ── collectTableTree（Windows 路径）纯表驱动回归 ──────────────────────────────
+// Bug 历史（0.3.62 及以前）：
+//   1) BFS 把 walk-up 链上的节点（selfAndAncestors）直接剪枝——不入队，导致
+//      caller（如 pi-web）的整棵子树（agent 及其启动的测试服务）不可达，
+//      服务端口发现恒为空。Linux 版 frontier 全量扩展，无此问题。
+//   2) walk-up 遇到已退出祖先（表里查不到的 pid）时 root 停在那个死 pid 上，
+//      BFS 从死 pid 出发会把 stale-ppid 孤儿（无关进程）误收进候选。
+test("collectTableTree: traverses through the walk-up chain; root never parked on a dead pid", async () => {
+  const { collectTableTree } = await loadSubject();
+
+  // 进程表：300（祖先）已退出，不在表里 —— ppid 指向它是悬空引用
+  const table = new Map([
+    [100, { ppid: 200, name: "node.exe", cmdline: "node pi-web.js" }], // caller (rootPid)
+    [200, { ppid: 300, name: "node.exe", cmdline: 'node "next/dist/bin/next" dev -p 30143' }], // own via excludeCmdline
+    [101, { ppid: 100, name: "node.exe", cmdline: "node agent-session.js" }], // caller 的子（agent）
+    [9001, { ppid: 101, name: "node.exe", cmdline: "node test-server.js" }], // agent 启动的服务 ← 必须可达
+  ]);
+  const t = collectTableTree(table, {
+    rootPid: 100,
+    excludeCmdline: [/next[\/]dist[\/]bin[\/]next/],
+  });
+
+  // root = 200：最高的存活 own 进程（300 已死不能作 root）
+  assert.equal(t.root, 200);
+  // walk-up 链完整记录
+  assert.ok(t.selfAndAncestors.has(100) && t.selfAndAncestors.has(200));
+  // 链上节点不被计入候选……
+  assert.equal(t.descendants.has(100), false);
+  assert.equal(t.descendants.has(200), false);
+  // ……但必须被穿越：caller 子树全部可达
+  assert.ok(t.descendants.has(101), "agent child must be reachable through the chain");
+  assert.ok(t.descendants.has(9001), "spawned server must be reachable through the chain");
+});
+
+test("collectTableTree: orphans under a dead ancestor are not pulled in", async () => {
+  const { collectTableTree } = await loadSubject();
+
+  // 300 已死；5555 是 ppid 悬挂在 300 上的孤儿（与 caller 无关）
+  const table = new Map([
+    [100, { ppid: 200, name: "node.exe", cmdline: "node pi-web.js" }],
+    [200, { ppid: 300, name: "node.exe", cmdline: "node next/dist/bin/next dev" }],
+    [5555, { ppid: 300, name: "OneDrive.exe", cmdline: "OneDrive.exe /background" }],
+  ]);
+  const t = collectTableTree(table, { rootPid: 100, excludeCmdline: [/next[\/]dist[\/]bin[\/]next/] });
+
+  assert.equal(t.root, 200);
+  assert.equal(t.descendants.has(5555), false, "orphan of a dead ancestor must not become a candidate");
+});

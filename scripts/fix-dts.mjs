@@ -4,8 +4,11 @@
 // Rewrite relative .ts imports in dist/*.d.ts to .js.
 import { readdirSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
-const root = join(dirname(new URL(import.meta.url).pathname), "..", "dist");
+// fileURLToPath (not URL.pathname): on Windows pathname is "/D:/..." which
+// path.join mangles into "D:\D:\...".
+const root = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 for (const f of readdirSync(root)) {
   if (!f.endsWith(".d.ts")) continue;
   const p = join(root, f);
