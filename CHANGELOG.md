@@ -1,3 +1,20 @@
+## 0.3.66 (2026-08-30)
+
+- **feat(ddns): 预配置体系 + 自动注册闭环（CLI + UI）**——ddns.json 支持
+  `providerProfiles`（provider 级凭据）/ `profiles`（provider+域名目标）/
+  `entries`（注册条目），事件驱动自动注册：
+  - `kind:"portmap"`：路由器映射建立 → A 记录（externalIp）+ TXT（ip:port）
+    ——记录名分别由 `record` / `txtName` 指定（txtName 缺省回退 record）；
+  - `kind:"tunnel"` + `followTunnel`：tunnel 拿到新 URL → CNAME（url host）
+    + TXT（完整 url），重连/重启自动重注册；
+  - 预配置组合：`profile`（引用 profiles）或 `providerProfile` + 内联
+    zone/record，条目可再覆盖。
+  - CLI：`st ddns provider-profile-add | profile-add | entry-add | registry-list`；
+  - UI：DDNS tab（provider profiles / profiles / entries 三块，增删即存）；
+    `/api/ddns-registry` GET/POST + `/api/ddns-providers`。
+  - 库：`readRegistryConfig/writeRegistryConfig/resolveEntry/registerPortmap/
+    registerTunnel`（src/ddns-registry.ts），expose() 与 tunnel url 事件自动触发。
+
 ## 0.3.65 (2026-08-30)
 
 - **feat(ddns): 集成 ddns 包（120 家 provider）**——内置薄版适配器替换为

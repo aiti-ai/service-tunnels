@@ -83,6 +83,22 @@ const tunnels = new TunnelManager({
 for (const cfg of readTunnelConfigs(configDir)) tunnels.add(cfg);
 tunnels.hydrate(readState(stateFile).tunnels);
 
+// ── DDNS loop (dimension 1, daemon-hosted) ────────────────────────────────
+// If ddns.json has enabled entries, the daemon owns the long-running update
+// loop so it survives CLI/UI restarts (like tunnels). `st ddns update --once`
+// still runs on demand; the loop here is the always-on instance.
+import { readDdnsConfigs, startDdnsLoop, type DdnsLoopHandle } from "./ddns.ts";
+let ddnsLoop: DdnsLoopHandle | null = null;
+try {
+  const entries = readDdnsConfigs(configDir).filter((e) => e.enabled !== false);
+  if (entries.length) {
+    ddnsLoop = startDdnsLoop(entries, { log: (l) => console.error(`[ddns] ${l}`) });
+    console.error(`[ddns] loop started with ${entries.length} entries`);
+  }
+} catch (e) {
+  console.error("[ddns] loop start failed:", e instanceof Error ? e.message : String(e));
+}
+
 // Rehydrate the internal registry from state.json (survives daemon restart).
 for (const entry of readState(stateFile).internal) {
   internal.register(entry.role, {
@@ -1147,6 +1163,7 @@ writeState(stateFile, {
 console.log(`daemon ready ${ipc.path}`);
 
 process.once("exit", () => {
+  ddnsLoop?.stop();
   try {
     unlinkSync(sockPath); // remove the IPC socket so a fresh daemon can bind
   } catch {
