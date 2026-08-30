@@ -8,6 +8,8 @@ export interface UiContext {
   st: ServiceTunnels;
   port: number;
   csrfToken: string;
+  /** 远程放行的 Host 白名单（无端口；空 = loopback-only）。 */
+  allowedHosts?: string[];
 }
 
 export function isLoopbackHost(host: string | undefined): boolean {

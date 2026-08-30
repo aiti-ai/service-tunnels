@@ -388,6 +388,28 @@ if (path === "/api/ssh-keys" && req.method === "POST") {
 }
 
 // ── settings ───────────────────────────────────────────────────────
+if (path === "/api/tools-ensure" && req.method === "POST") {
+  // 下载缺失工具（长耗时——HTTP 层无超时限制，前端轮询状态刷新）。
+  // allowDownload 关闭时拒绝（与 expose 的下载门控一致）。
+  if (!ctx.st.tools.allowDownload()) {
+    json(res, 403, { error: "on-demand downloads are disabled — enable 'Allow on-demand tool downloads' first" });
+    return true;
+  }
+  const body = await readJson<{ name?: string }>(req);
+  const name = String(body.name ?? "");
+  if (!name || !ctx.st.tools.list().some((t) => t.name === name)) {
+    json(res, 400, { error: `unknown tool: ${name || "(empty)"}` });
+    return true;
+  }
+  try {
+    const path = await ctx.st.tools.ensure(name);
+    json(res, 200, { ok: true, name, path: path ?? null });
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  return true;
+}
+
 if (path === "/api/settings" && req.method === "POST") {
   const body = await readJson<{ allowToolDownload?: boolean }>(req);
   if (typeof body.allowToolDownload === "boolean") {

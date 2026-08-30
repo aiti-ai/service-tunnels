@@ -29,6 +29,12 @@ export interface UiServerOptions {
   port?: number;
   /** Open browser automatically (default true). */
   openBrowser?: boolean;
+  /**
+   * 额外放行的 Host（如 "61.149.239.106:41148" / "ui.example.com"）——远程访问
+   * 场景（如经 portmap 暴露 UI）时，POST 的 loopback gate 按白名单放行。
+   * 未配置时维持 loopback-only（本机专用安全模型不变）。
+   */
+  allowedHosts?: string[];
 }
 
 /** Open the default browser. */
@@ -177,14 +183,19 @@ function createHandler(ctx: UiContext): RequestListener {
     const lang: Lang = resolveLang(url.searchParams.get("lang") ?? undefined, { LANG: acceptLang.split(",")[0] ?? "" });
     const path = url.pathname;
 
-    // ── CSRF / same-origin / loopback-host gate ─────────────────────────
+    // ── CSRF / same-origin / loopback-host gate（allowedHosts 远程放行）──
+    const hostOk = isLoopbackHost(req.headers.host) ||
+      (ctx.allowedHosts ?? []).includes(String(req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase());
     if (req.method === "POST") {
-      if (!isLoopbackHost(req.headers.host)) {
-        json(res, 403, { error: "non-loopback host rejected" });
+      if (!hostOk) {
+        json(res, 403, { error: "non-loopback host rejected (not in allowedHosts)" });
         return;
       }
       const origin = req.headers.origin;
-      if (origin !== undefined && origin !== `http://127.0.0.1:${ctx.port}` && origin !== `http://localhost:${ctx.port}`) {
+      const originHost = origin ? new URL(origin).host.replace(/:\d+$/, "").toLowerCase() : "";
+      const originOk = !origin || originHost === "127.0.0.1" || originHost === "localhost" ||
+        (ctx.allowedHosts ?? []).includes(originHost);
+      if (!originOk) {
         json(res, 403, { error: "cross-origin request rejected" });
         return;
       }
@@ -237,15 +248,16 @@ export interface UiServer {
 export async function startUi(st: ServiceTunnels, opts: UiServerOptions = {}): Promise<UiServer> {
   const port = opts.port ?? 4181;
   const csrfToken = randomBytes(32).toString("hex");
+  const allowedHosts = (opts.allowedHosts ?? []).map((h) => h.replace(/:\d+$/, "").toLowerCase()).filter(Boolean);
   const server = createServer();
   const actualPort = await new Promise<number>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
+    server.listen(port, allowedHosts.length ? "0.0.0.0" : "127.0.0.1", () => {
       const addr = server.address();
       resolve(typeof addr === "object" && addr ? addr.port : port);
     });
   });
-  server.on("request", createHandler({ st, port: actualPort, csrfToken }));
+  server.on("request", createHandler({ st, port: actualPort, csrfToken, allowedHosts }));
   console.log(`UI server listening on http://127.0.0.1:${actualPort}`);
   if (opts.openBrowser !== false) {
     openBrowser(`http://127.0.0.1:${actualPort}`);

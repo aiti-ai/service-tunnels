@@ -140,6 +140,8 @@ interface CliArgs {
   listenAddr?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
   policy?: string;
+  /** ui --ui-host <h>: additionally allowed Host for remote access (POST gate). */
+  uiHost?: string;
   /** ui --daemonize: detached re-spawn (survives shell session). */
   daemonize?: boolean;
   /** --proxy-port <p>: proxy transport port (mode proxy/both). */
@@ -410,6 +412,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--no-browser":
         args.noBrowser = true;
+        break;
+      case "--ui-host":
+        args.uiHost = argv[++i];
         break;
       case "--daemonize":
         args.daemonize = true;
@@ -1398,6 +1403,7 @@ async function main(): Promise<void> {
         if (args.cacheDir) passThrough.push("--cache-dir", args.cacheDir);
         if (args.configDir) passThrough.push("--config-dir", args.configDir);
         if (args.port) passThrough.push("--port", String(args.port));
+        if (args.uiHost) passThrough.push("--ui-host", args.uiHost);
         const child: import("child_process").ChildProcess = spawn(
           process.execPath,
           [process.argv[1]!, "ui", "--no-browser", ...passThrough],
@@ -1411,6 +1417,7 @@ async function main(): Promise<void> {
       const ui = startUi(st, {
         port: args.port ? Number(args.port) : undefined,
         openBrowser: !args.noBrowser,
+        allowedHosts: args.uiHost ? [args.uiHost] : undefined,
       });
       // Keep the process alive
       await new Promise(() => {});
