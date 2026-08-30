@@ -55,7 +55,6 @@ const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.j
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CSS = `
-<style>
 :root{--bg:#f5f5f5;--panel:#fff;--border:#ddd;--text:#333;--dim:#777;--accent:#667eea;--danger:#f87171;--ok:#16a34a}
 @media (prefers-color-scheme: dark){:root{--bg:#17181c;--panel:#202127;--border:#33353d;--text:#e6e6e6;--dim:#9a9aa3;--accent:#8b9cf7}}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -118,7 +117,6 @@ pre.log{max-height:140px;overflow:auto;padding:6px 8px;background:var(--bg);bord
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty{padding:28px;text-align:center;color:var(--dim)}
 .actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-</style>
 `;
 
 const SHELL = (lang: Lang, csrf: string) => {
