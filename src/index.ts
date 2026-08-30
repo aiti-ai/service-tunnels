@@ -42,6 +42,7 @@ import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAULT_SUFFIXES, type ProxyOptions } from "./proxy.ts";
 import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta , TUNNEL_SCHEMAS_VERSION } from "./tunnels.ts";
 import { customTunnelTemplates } from "./tunnels-custom.ts";
+import { readDdnsConfigs, updateBeacon } from "./ddns.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
@@ -101,6 +102,19 @@ export {
   stripBasePath,
 } from "./discovery.ts";
 export { findOnPath } from "./tools.ts";
+export {
+  DDNS_PROVIDERS,
+  ddnsConfigPath,
+  readDdnsConfigs,
+  writeDdnsConfigs,
+  resolvePublicIp,
+  updateDdnsRecord,
+  runDdnsOnce,
+  startDdnsLoop,
+  updateBeacon,
+  beaconValue,
+} from "./ddns.ts";
+export type { DdnsProviderKind, DdnsRecordConfig, DdnsUpdateResult, DdnsLoopHandle, BeaconTarget, DdnsEntry } from "./ddns.ts";
 export { createProxyServer, parseServiceHost, validBasicAuth, authHeader, proxyTarget, DEFAULT_SUFFIXES } from "./proxy.ts";
 export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 
@@ -292,7 +306,7 @@ export interface ServiceTunnels {
     noneAllowed(): boolean;
     /** Register an extra provider factory (plugins). */
     registerProvider(factory: AuthProviderFactory): void;
-    /** Expose with optional gateway auth (default provider: authelia). */
+    /** Expose with optional gateway auth (default provider: portal). */
     expose(port: number, opts?: Omit<ExposeOptions, "port">): Promise<ExposeResult>;
     /**
      * Provider-local users (no secrets). `provider` = "all" (default) →
@@ -517,11 +531,44 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     preferMirrors: opts.preferMirrors ?? file.preferMirrors,
     allowToolDownload,
   };
+  // DDNS dimension 2: tunnel discovery beacons — a ddns.json entry with
+  // `followTunnel: "<name>"` keeps its FIXED record pointing at the CURRENT
+  // url of that tunnel (nslookup finds the latest tunnel host even when
+  // nothing else is reachable). Wired via onEvent so tunnel restarts
+  // re-register the beacon automatically.
+  const ddnsEntries = readDdnsConfigs(dirs.configDir);
+  const beacons = ddnsEntries.filter((e) => typeof (e as { followTunnel?: string }).followTunnel === "string");
   const tm = new TunnelManager({
     cacheDir: dirs.cacheDir,
     resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
     registerPid,
     log: () => {},
+    onEvent: (evt) => {
+      if (evt.type === "url" && evt.url) {
+        for (const b of beacons) {
+          const follow = (b as { followTunnel?: string }).followTunnel;
+          if (follow !== evt.name) continue;
+          void updateBeacon(
+            {
+              provider: b.provider,
+              token: b.token,
+              secret: b.secret,
+              accessKeyId: b.accessKeyId,
+              zoneId: (b as { zoneId?: string }).zoneId,
+              username: (b as { username?: string }).username,
+              password: (b as { password?: string }).password,
+              zone: b.zone ?? "",
+              name: b.record,
+              type: ((b as { beaconType?: string }).beaconType === "TXT" ? "TXT" : "CNAME") as "CNAME" | "TXT",
+              baseUrl: b.baseUrl,
+            },
+            evt.url,
+          ).then((r) => {
+            if (!r.ok) console.error(`[ddns] beacon ${b.record} update failed: ${r.error}`);
+          });
+        }
+      }
+    },
   });
   for (const cfg of readTunnelConfigs(dirs.configDir)) tm.add(cfg);
   tm.hydrate(readState(cachePaths(dirs.cacheDir).stateFile).tunnels);
@@ -1003,7 +1050,9 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           return [...KNOWN.filter((p) => list.includes(p)), ...variants, ...rest];
         },
         defaultProvider: () => {
-          const order = ["authelia", "portal", "basic", "token", "oauth2-proxy"].filter((p) => registry.list().includes(p));
+          // portal is the platform-agnostic default; authelia only when the
+          // tool is present and explicitly preferred by callers iterating order
+          const order = ["portal", "authelia", "basic", "token", "oauth2-proxy"].filter((p) => registry.list().includes(p));
           for (const p of order) {
             // authelia ships no Windows binary and needs the tool present
             if (p === "authelia" && (platform() === "win32" || !resolveToolPath("authelia", toolOpts))) continue;

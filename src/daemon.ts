@@ -1,6 +1,6 @@
 import { spawnSync } from "child_process";
 import { connect } from "net";
-import { existsSync, mkdirSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, openSync, closeSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import type { ServicePortInfo } from "./discovery.ts";
@@ -112,10 +112,18 @@ export function startDaemon(
   }
 
   const logPath = opts.logFile ?? `${stateFile}.daemon.log`;
+  // 修复死代码：daemon 后台模式 stderr 落盘（此前 stdio 全 ignore——console.error
+  // 全丢，CLI 报错时 "check daemon logs" 却无日志可看）。
+  const logFd = openSync(logPath, "a");
   const child = spawnNode(opts.nodePath, [DAEMON_SERVER, stateFile, daemonSock, configDir, cacheDir], {
     detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "ignore", logFd],
     env: { ...process.env, ...opts.env },
+  });
+  child.on("exit", () => {
+    try {
+      closeSync(logFd);
+    } catch { /* already closed */ }
   });
   child.unref();
   return { running: true, pid: child.pid ?? null, ipc: null };

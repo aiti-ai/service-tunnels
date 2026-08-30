@@ -937,10 +937,19 @@ async function main(): Promise<void> {
         allowAuthNone: args.allowAuthNone,
       }, 90_000);
       if (res === null) {
-        // daemon threw at its boundary (e.g. auth-none banned via
-        // allow-auth-none false / SERVICE_TUNNELS_ALLOW_AUTH_NONE / config) or
-        // IPC failed — the daemon logs the exact reason.
-        console.error("expose rejected by daemon (auth-none banned or invalid request — check daemon logs)");
+        // daemon threw at its boundary — 展示 daemon 日志尾部（防火墙失败/认证禁用/
+        // 参数非法等具体原因都在那里；此前 stderr 全丢，用户只能看到笼统提示）。
+        console.error("expose rejected by daemon — 具体原因见 daemon 日志尾部：");
+        const { stateFile } = cachePaths(st.dirs.cacheDir);
+        try {
+          const lines = readFileSync(`${stateFile}.daemon.log`, "utf8").trim().split("\n");
+          // 优先展示错误消息行（[daemon] xxx failed: Error: ...），栈行省略
+          const errLines = lines.filter((l) => /\[daemon\].*(failed|error)|Error:/i.test(l));
+          const shown = (errLines.length ? errLines : lines).slice(-4).join("\n");
+          console.error(shown || "(daemon 日志为空)");
+        } catch {
+          console.error("(无法读取 daemon 日志)");
+        }
         process.exit(1);
       }
       jsonOut(res);

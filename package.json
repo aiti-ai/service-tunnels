@@ -75,5 +75,8 @@
     "typescript": "^5.8.3"
   },
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts"
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "ddns": "file:../ddns"
+  }
 }
