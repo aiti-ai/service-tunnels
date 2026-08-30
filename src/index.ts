@@ -44,6 +44,7 @@ import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, 
 import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
+import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
 import { GatewayController, type GatewayInject } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { AutheliaProvider } from "./authelia.ts";
@@ -260,6 +261,12 @@ export interface ServiceTunnels {
     /** Tunnel types that support raw TCP (for the UI: only these selectable
      *  when exposing a tcp port). */
     tcpSupport(): string[];
+  };
+  /** Router port-mapping (mode "portmap"): capability probe + live mapping control. */
+  portmap: {
+    probe(opts?: { gateway?: string; ssdpTimeoutMs?: number }): Promise<PortmapProbe>;
+    list(): Array<{ key: string; backend: "upnp" | "pcp" | "ssh-router"; gateway: string; externalIp: string; externalPort: number; internalPort: number }>;
+    stop(key: string): Promise<boolean>;
   };
   /** Provider/tunnel parameter schemas — data-driven forms for clients
    *  (host renders inputs from these; adding a type/provider needs no
@@ -572,6 +579,9 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     registry: authRegistry,
     gateway,
     getSites: () => readSites(dirs.configDir),
+    // IP:port 直连（mode portmap 外部入口）——仅命中已 enroll 的 open binding，
+    // enrollment(D4)与 auth 照常生效，无安全面扩大。
+    allowIpDirect: true,
     // persist enrollments (mode proxy/both) to state.json — the daemon restores
     // them on restart (P4). The arrow captures `proxy` (assigned after this
     // constructor returns; only ever invoked on later addBinding/removeBinding).
@@ -629,9 +639,11 @@ const r = await exposeFlow(port, { ...o, inject: effInject, allowAuthNone: effAl
   sshGatewayPort: (domain) => ssh.get(domain)?.port,
 });
 // record this expose's metadata for the lifecycle display (proxy-mode
-// records have no tunnel → synthetic key `proxy:port:label`)
+// records have no tunnel → synthetic key `proxy:port:label`; portmap-mode
+// records carry mode + portmap detail so the UI can tell them apart)
 exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   port,
+  mode: r.mode,
   tunnelName: r.tunnel || undefined,
   tunnelType: o.tunnelType,
   // ssh provider: the raw tcp tunnel records no provider on the
@@ -645,6 +657,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   localUrl: r.localUrl,
   baseUrl: r.baseUrl,
   domainUrl: r.domainUrl,
+  portmap: r.portmap,
   startedAt: Date.now(),
   });
   return r;
@@ -652,7 +665,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
 
   // Exposes made in this process lifecycle (port + tunnel type + auth
   // provider + url), for display. Not persisted across restarts.
-  const exposes = new Map<string, { port: number; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; startedAt?: number }>();
+  const exposes = new Map<string, { port: number; mode?: string; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; portmap?: { backend: string; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number }; startedAt?: number }>();
 
   /** Unregister the gateway host an expose registered (so stopping one expose
    *  doesn't leave a stale nginx server block — localhost:PORT hosts would
@@ -685,6 +698,19 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
       stop: () => stopDaemon(dirs.cacheDir),
       request: <T>(method: string, params?: unknown, timeoutMs = 5_000) =>
         requestDaemon<T>(dirs.cacheDir, method, params, timeoutMs),
+    },
+    portmap: {
+      probe: (o?: { gateway?: string; ssdpTimeoutMs?: number }) => portmapProbe(o),
+      list: () =>
+        listPortmaps().map(({ key, mapping, externalIp }) => ({
+          key,
+          backend: mapping.backend,
+          gateway: mapping.gateway,
+          externalIp,
+          externalPort: mapping.externalPort,
+          internalPort: mapping.internalPort,
+        })),
+      stop: (key: string) => stopPortmap(key),
     },
     tools: {
       ensure: (name: string) => {
@@ -1206,6 +1232,8 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           localUrl: m.localUrl,
           baseUrl: m.baseUrl,
           domainUrl: m.domainUrl,
+          mode: m.mode ?? null,
+          portmap: m.portmap ?? null,
           startedAt: m.startedAt ?? null,
         };
       }),

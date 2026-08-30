@@ -17,10 +17,11 @@ service-tunnels tunnel add nat --type natapp --target 4180 --token <authtoken>  
 service-tunnels tunnel add ssh1 --type ssh --target 4180 --host localhost --user wind --remote-port 8080  # ssh -R 到本机
 service-tunnels tunnel start web      # 启动隧道 → URL 自动解析
 
-# 暴露 = 三种模式 × 认证可选（D4：proxy 默认零转发，必须显式 enrollment）
+# 暴露 = 四种模式 × 认证可选（D4：proxy 默认零转发，必须显式 enrollment）
 service-tunnels expose 5173 --mode tunnel --auth auto     # 公网隧道 + 认证（默认）
 service-tunnels expose 5173 --mode proxy --auth portal   # 本地虚拟主机（无隧道）→ http://5173-portal.st.localhost:4180
 service-tunnels expose 5173 --mode both --auth auto      # 本地 + 公网，同一 site 同一批用户
+service-tunnels expose 5173 --mode portmap --auth auto   # 路由器动态端口映射 → http://<公网IP>:<随机端口>（过认证）
 service-tunnels expose 5173 --mode proxy --auth none     # 本地开放（显式 enrollment，可选 --password）
 service-tunnels expose 5173 --auth authelia --bypass-path /health --bypass-path /metrics  # 白名单免认证（健康检查/指标）
 
@@ -60,15 +61,21 @@ service-tunnels expose 5173 --mode proxy --auth portal --base-domain example.com
   # → baseUrl:  http://5173-portal.example.com      （无端口）
 ```
 
-## 暴露模式：tunnel / proxy / both
+## 暴露模式：tunnel / proxy / both / portmap
 
-`expose` 按"要不要公网隧道"区分三种模式，认证开关（`--auth none|auto|<provider>`）与之正交：
+`expose` 按"要不要公网隧道/路由器映射"区分四种模式，认证开关（`--auth none|auto|<provider>`）与之正交：
 
 | 模式 | 可达性 | 典型用途 |
 |---|---|---|
 | `tunnel` | 公网 URL（ngrok/cloudflared/bore/natapp…） | 公网演示、临时分享、无公网 IP 的机器 |
 | `proxy` | 仅本地/局域网虚拟主机（`*.st.localhost:4180`、baseDomain、site 域名） | 多服务固定域名、自建站点、开发联调 |
 | `both` | 上述两者同时，同一 site 同一批用户 | 本地固定入口 + 公网访问并存 |
+| `portmap` | 公网 IP:端口（路由器 UPnP/NAT-PMP/ssh-router 动态映射） | 有公网 IP + 可控路由器，想要 IP:端口直连 |
+
+**portmap 模式**：探测路由器能力（`sts portmap probe`）→ 自动建映射（外部端口 →
+本机 proxy transport，认证照常生效）→ 半衰期续租 + 退出清理 → 自动放行本机防火墙
+（ufw/firewalld/iptables）。外部访问 `http://<公网IP>:<端口>` 经 IP 直连命中
+binding（enrollment 与 auth 门禁不变）。详见 [docs/portmap-analysis.md](docs/portmap-analysis.md)。
 
 **proxy 模式是什么**：内置反向代理监听 proxy 端口（默认 4180），按 `Host` 头把
 `<port>[-<label>][.<site域名>].<后缀>` 路由到对应本地服务端口，认证统一由本地网关

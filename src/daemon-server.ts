@@ -11,7 +11,7 @@
  * NOT a library entry point.
  */
 import { createServer, type Socket } from "net";
-import { existsSync, unlinkSync, readdirSync } from "fs";
+import { existsSync, unlinkSync, readdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomBytes } from "crypto";
 import type { Server as HttpServer } from "http";
@@ -37,6 +37,7 @@ import { localizeSchemas, resolveLang } from "./i18n.ts";
 import { listPresets, getPreset, savePreset, removePreset, loadPresetsKey, type PresetKind } from "./presets.ts";
 import { DEFAULT_SUFFIXES } from "./proxy.ts";
 import { ProxyManager } from "./proxy-manager.ts";
+import { probePortmap, listPortmaps, stopPortmap, ensurePortmap } from "./portmap/index.ts";
 import { GatewayController } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
 import { SshManager } from "./ssh/manager.ts";
@@ -206,6 +207,16 @@ const methods = new Map<string, Handler>([
       } catch {
         // already gone
       }
+      // F8: portmap-mode 还持有路由器映射 + 续租定时器——一并停止，
+      // 否则 stop 后映射残留到 lease 到期（最长 30min）且定时器继续跑。
+      if (rec.mode === "portmap") {
+        const key = `${configDir}:portmap:${rec.port}:${rec.label ?? ""}`;
+        try {
+          await stopPortmap(key);
+        } catch {
+          // best effort — lease self-expires
+        }
+      }
     }
     exposeRegistry.delete(name);
     persistExposeRegistry();
@@ -228,6 +239,14 @@ const methods = new Map<string, Handler>([
         proxy.removeBinding(b.port, b.label);
       } catch {
         // already gone
+      }
+    }
+    // F8: 停所有 portmap 映射（续租定时器 + 路由器规则）
+    for (const h of listPortmaps()) {
+      try {
+        await stopPortmap(h.key);
+      } catch {
+        // best effort
       }
     }
     exposeRegistry.clear();
@@ -281,6 +300,9 @@ const methods = new Map<string, Handler>([
   ["proxy.stop", () => proxy.stop().then(() => ({ ok: true }))],
   ["proxy.status", () => proxy.status()],
   ["proxy.bindings", () => proxy.bindings()],
+  ["portmap.probe", (params) => probePortmap(params as { gateway?: string; ssdpTimeoutMs?: number } | undefined)],
+  ["portmap.list", () => listPortmaps().map(({ key, mapping, externalIp }) => ({ key, backend: mapping.backend, gateway: mapping.gateway, externalIp, externalPort: mapping.externalPort, internalPort: mapping.internalPort }))],
+  ["portmap.stop", async (params) => ({ stopped: await stopPortmap(String(params)) })],
   ["site.list", () => {
     const sites = readSites(configDir);
     return ["default", ...Object.keys(sites)].map((name) => ({ ...(sites[name] ?? defaultSiteConfig()), name }));
@@ -497,6 +519,33 @@ const methods = new Map<string, Handler>([
       if (o?.allowAuthNone !== undefined && typeof o.allowAuthNone !== "boolean") {
         throw new Error(`expose: allowAuthNone must be a boolean`);
       }
+      // portmap: mode=portmap 的参数对象——形状校验（method/gateway/端口/lease 类型），
+      // sshRouter 子对象同样校验（host 是 ssh 目标，必须有且为字符串）。
+      if (o?.portmap !== undefined && o?.portmap !== null) {
+        const pm = o.portmap as Record<string, unknown>;
+        if (typeof pm !== "object" || Array.isArray(pm)) throw new Error("expose: portmap must be an object");
+        const method = pm.method;
+        if (method !== undefined && method !== "auto" && method !== "upnp" && method !== "pcp" && method !== "ssh-router") {
+          throw new Error(`expose: portmap.method must be auto|upnp|pcp|ssh-router, got ${JSON.stringify(method)}`);
+        }
+        for (const f of ["externalPort", "leaseSeconds", "ssdpTimeoutMs"] as const) {
+          const v = pm[f];
+          if (v !== undefined && (typeof v !== "number" || !Number.isInteger(v) || v < 1 || v > 65535)) {
+            throw new Error(`expose: portmap.${f} must be an integer 1-65535`);
+          }
+        }
+        if (pm.gateway !== undefined && typeof pm.gateway !== "string") throw new Error("expose: portmap.gateway must be a string");
+        if (pm.controlUrl !== undefined && typeof pm.controlUrl !== "string") throw new Error("expose: portmap.controlUrl must be a string");
+        if (pm.sshRouter !== undefined) {
+          const sr = pm.sshRouter as Record<string, unknown>;
+          if (typeof sr !== "object" || Array.isArray(sr) || typeof sr.host !== "string" || !sr.host) {
+            throw new Error("expose: portmap.sshRouter requires { host, preset }");
+          }
+          if (sr.preset !== "openwrt" && sr.preset !== "routeros" && sr.preset !== "generic-iptables") {
+            throw new Error(`expose: portmap.sshRouter.preset must be openwrt|routeros|generic-iptables`);
+          }
+        }
+      }
       // inject 进 nginx 配置（sub_filter 替换串 / add_before_body 文件）——
       // 形状与大小做边界校验（内容本身经 nginxQuote 转义/落盘，不会注入配置；
       // 上限防超长字符串撑爆配置与内存）。
@@ -595,6 +644,7 @@ const methods = new Map<string, Handler>([
             tunnelType: o.tunnelType,
             tunnelName: r.tunnel,
             host: r.url ? new URL(r.url).host : undefined,
+            portmap: r.portmap,
             startedAt: Date.now(),
           });
         } else if (r && (r.localUrl || r.mode)) {
@@ -613,6 +663,7 @@ const methods = new Map<string, Handler>([
             url: r.url,
             loginUrl: r.loginUrl,
             tunnelType: o.tunnelType,
+            portmap: r.portmap,
             startedAt: Date.now(),
           });
         }
@@ -898,6 +949,8 @@ const proxy = new ProxyManager({
   baseDomains: resolveBaseDomains(configDir).list,
   registry: authRegistry,
   getSites: () => readSites(configDir),
+  // IP:port 直连（mode portmap 外部入口）——daemon 模式同样需要（F6）
+  allowIpDirect: true,
   // persist enrollments; the arrow captures `proxy` (assigned after this
   // constructor; only invoked on later addBinding/removeBinding)
   onChange: () => writeState(stateFile, { ...readState(stateFile), bindings: proxy.persisted() }),
@@ -909,6 +962,7 @@ const proxy = new ProxyManager({
 // restore persisted enrollments (P4): a restarted daemon re-serves the same
 // (port → site) bindings; providers come back lazily on first request.
 proxy.restore(readState(stateFile).bindings);
+
 
 // TODO-1 (fail-clean): SHARED nginx gateway + redis singletons. Previously
 // every expose created its own GatewayController (`ctx.gateway ?? new …`)
@@ -939,6 +993,50 @@ const exposeRegistry = new Map<string, ExposeRuntimeState>();
 for (const rec of readState(stateFile).exposes ?? []) {
   if (rec && typeof rec.name === "string" && typeof rec.port === "number") exposeRegistry.set(rec.name, rec);
 }
+// F7: restore portmap leases after a daemon restart — the binding is back via
+// proxy.restore, but the renewal handle lives in the process. Re-run
+// ensurePortmap for persisted mode=portmap exposes (idempotent: same external
+// port re-adds/refreshes the mapping; failures keep the record but log).
+// 注意：重启后 transport 端口变了——恢复的 binding 的 ipDirectPort 是旧端口，
+// 必须先把 transport 起起来、把 binding 的 ipDirectPort 更新为新端口，
+// 映射 internalPort 同样用新端口，否则外部请求到新 transport 查不到映射。
+for (const rec of exposeRegistry.values()) {
+  if (rec.mode !== "portmap" || !rec.portmap) continue;
+  const pm = rec.portmap; // 收窄：闭包内 rec.portmap 类型需局部变量
+  void (async () => {
+    const key = `${configDir}:portmap:${rec.port}:${rec.label ?? ""}`;
+    try {
+      // 1. 确保 transport 已启动（首次请求懒启动；恢复时显式起）
+      const transportPort = await proxy.start();
+      // 2. 更新 binding 的 ipDirectPort 为新 transport 端口（先删后加，
+      //    保留其他字段）
+      const existing = proxy.bindings().find((b) => b.port === rec.port && (b.label ?? "") === (rec.label ?? ""));
+      if (existing) {
+        proxy.removeBinding(rec.port, rec.label ?? "");
+        proxy.addBinding({ ...existing, ipDirectPort: transportPort });
+      }
+      // 3. 重建映射（同 externalPort 幂等刷新租约；internalPort 用新 transport 端口）
+      const h = await ensurePortmap(key, transportPort, {
+        method: (pm.method as "auto" | "upnp" | "pcp" | "ssh-router") ?? "auto",
+        gateway: pm.gateway,
+        externalPort: pm.externalPort,
+        leaseSeconds: pm.leaseSeconds,
+        forceReplace: true, // 718 = 旧映射内部目标已变（新 transport）——删除重加
+        ...(pm.sshRouter ? { sshRouter: pm.sshRouter as { host: string; preset: "openwrt" | "routeros" | "generic-iptables" } } : {}),
+        description: `service-tunnels:${rec.port}:${rec.label ?? ""}`,
+      });
+      console.error(`[service-tunnels] portmap restored: ${h.externalIp}:${h.mapping.externalPort} → :${transportPort}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[service-tunnels] portmap restore FAILED for ${key}: ${msg}`);
+      // 诊断可观测：写 state 同目录（daemon 后台 stderr 丢弃，恢复失败必须能查到）
+      try {
+        writeFileSync(`${stateFile}.portmap-restore.log`, `${new Date().toISOString()} ${key}: ${msg}\n`, { flag: "a" });
+      } catch { /* best effort */ }
+    }
+  })();
+}
+
 const persistExposeRegistry = () => {
   writeState(stateFile, { ...readState(stateFile), exposes: [...exposeRegistry.values()] });
 };

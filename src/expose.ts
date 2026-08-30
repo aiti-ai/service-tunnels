@@ -71,6 +71,7 @@ export function unflattenParams(params: Record<string, unknown>): Record<string,
  */
 
 import { ensurePortmap, PortmapUnavailableError, type MapHandle } from "./portmap/index.ts";
+import { openFirewall, removeFirewall } from "./portmap/firewall.ts";
 
 export interface ExposeOptions {
   port: number;
@@ -171,13 +172,24 @@ export interface ExposeOptions {
   force?: boolean;
   /** mode "portmap" options (docs/portmap-analysis.md §4.2). */
   portmap?: {
-    method?: "auto" | "upnp" | "pcp";
+    method?: "auto" | "upnp" | "pcp" | "ssh-router";
     gateway?: string;
     /** Manual UPnP SOAP control URL (skips SSDP discovery — test/dev). */
     controlUrl?: string;
     serviceType?: string;
     externalPort?: number;
     leaseSeconds?: number;
+    /** SSDP 探测等待预算（默认 3s；测试/排障可调小）。 */
+    ssdpTimeoutMs?: number;
+    /** ssh-router backend (method "ssh-router"): host/preset/key/... */
+    sshRouter?: {
+      host: string;
+      user?: string;
+      port?: number;
+      key?: string;
+      preset: "openwrt" | "routeros" | "generic-iptables";
+      connectTimeout?: number;
+    };
   };
 }
 
@@ -196,7 +208,18 @@ export interface ExposeResult {
   /** Mode used ("tunnel" | "proxy" | "both" | "portmap"). */
   mode?: "tunnel" | "proxy" | "both" | "portmap";
   /** Router mapping details when mode === "portmap". */
-  portmap?: { backend: "upnp" | "pcp"; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number };
+  portmap?: {
+    backend: "upnp" | "pcp" | "ssh-router";
+    gateway: string;
+    externalIp: string;
+    externalPort: number;
+    internalPort: number;
+    leaseSeconds: number;
+    /** 实际使用的 method（恢复用——ssh-router 映射重启后必须按原后端恢复）。 */
+    method?: "auto" | "upnp" | "pcp" | "ssh-router";
+    /** ssh-router 参数（method=ssh-router 时恢复必需：preset/host 等）。 */
+    sshRouter?: { host: string; user?: string; port?: number; key?: string; preset: "openwrt" | "routeros" | "generic-iptables"; connectTimeout?: number };
+  };
   /** Site (auth realm) the expose belongs to; "" for open bindings. */
   site?: string;
   /** Vhost dash label ("auth" for the default site, site name otherwise,
@@ -356,13 +379,30 @@ async function portmapExpose(
     }
   }
   // Local transport + enrollment identical to proxy mode — the router maps
-  // to THIS listener, never straight to the app.
-  const proxyResult = await proxyExpose(port, opts, ctx, siteCfg);
+  // to THIS listener, never straight to the app. 先解析/创建共享 proxy 实例并
+  // 注入 ctx，使失败回滚（F2）能对同一实例 removeBinding。
+  const proxyForPortmap =
+    ctx.proxy ??
+    new ProxyManager({
+      registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
+      log,
+      allowIpDirect: true, // portmap 外部入口是 IP:port（无 vhost 域名）
+    });
+  const proxyResult = await proxyExpose(port, opts, { ...ctx, proxy: proxyForPortmap }, siteCfg);
   const transportPort = Number(/:(\d+)$/.exec(proxyResult.localUrl ?? "")?.[1] ?? 0);
   if (!transportPort) {
+    // startTransport:false 时 proxyExpose 已注册 binding（无 transport 可映射）——
+    // 回滚 enrollment，不留孤儿 binding（与 F2 同类的泄漏路径）。
+    try {
+      if (proxyResult.label !== undefined) proxyForPortmap.removeBinding(port, proxyResult.label ?? "");
+    } catch { /* best effort */ }
     return { ...proxyResult, mode: "portmap", error: "portmap requires a started proxy transport (startTransport !== false)" };
   }
   try {
+    // 防火墙清理闭包：openFirewall 在本轮打开规则时才赋值——stop() 时删除
+    // 本次添加的规则（已存在的不动）。ensurePortmap 先建（handle.stop 挂回调），
+    // fw 结果后到——用 let 变量桥接。
+    let fwCleanup: (() => Promise<void>) | undefined;
     const handle: MapHandle = await ensurePortmap(`${ctx.configDir}:portmap:${port}:${proxyResult.label ?? ""}`, transportPort, {
       method: opts.portmap?.method,
       gateway: opts.portmap?.gateway,
@@ -370,11 +410,30 @@ async function portmapExpose(
       serviceType: opts.portmap?.serviceType,
       externalPort: opts.portmap?.externalPort,
       leaseSeconds: opts.portmap?.leaseSeconds,
+      ssdpTimeoutMs: opts.portmap?.ssdpTimeoutMs,
+      sshRouter: opts.portmap?.sshRouter,
+      onStopCleanup: () => (fwCleanup ? fwCleanup() : Promise.resolve()),
       description: `service-tunnels:${port}${proxyResult.label ? `-${proxyResult.label}` : ""}`,
     });
     const m = handle.mapping;
     const url = `http://${handle.externalIp}:${m.externalPort}`;
     log(`expose ${port} (portmap): ${url} → ${m.internalIp}:${transportPort} via ${m.backend} (lease ${m.leaseSeconds}s)`);
+    // 本机防火墙闭环（真实教训）：路由器 DNAT 建立后，本机防火墙（ufw/iptables）
+    // 不放行 `LAN IP:transportPort` 入站则外部源不可达——检查并尝试放行，
+    // 失败则回滚映射（不留"看似成功实际不可达"的映射）。
+    const fw = await openFirewall(m.internalIp, transportPort);
+    if (!fw.ensured) {
+      await handle.stop().catch(() => {});
+      throw new PortmapUnavailableError(
+        `router mapping established but host firewall blocks external access (${fw.detail}) — ` +
+        `open ${m.internalIp}:${transportPort} in the host firewall (e.g. sudo ufw allow in to ${m.internalIp} port ${transportPort} proto tcp) and retry`,
+      );
+    }
+    // 本次打开的规则 → stop 时删除（already allowed 的不动——那是既有配置）
+    if (fw.detail && !fw.detail.startsWith("already")) {
+      log(`expose ${port} (portmap): host firewall opened — ${fw.detail}`);
+      fwCleanup = () => removeFirewall(m.internalIp, transportPort);
+    }
     return {
       url,
       tunnel: "",
@@ -393,6 +452,9 @@ async function portmapExpose(
         externalPort: m.externalPort,
         internalPort: m.internalPort,
         leaseSeconds: m.leaseSeconds,
+        // F11: 恢复完整性——method/sshRouter 持久化，daemon 重启后按原后端恢复
+        method: opts.portmap?.method ?? (m.backend === "ssh-router" ? "ssh-router" : m.backend),
+        ...(m.backend === "ssh-router" && opts.portmap?.sshRouter ? { sshRouter: opts.portmap.sshRouter } : {}),
       },
     };
   } catch (e) {
@@ -400,6 +462,13 @@ async function portmapExpose(
       ? e.message
       : `router mapping failed: ${(e as Error).message}`;
     log(`expose ${port} (portmap): FAILED — ${hint}`);
+    // F2: 回滚 proxy 侧 enrollment（binding 由 proxyExpose 建好，映射失败时
+    // 不能留着——端口被占、UI 记录不一致）。transport 是共享的，只注销 binding。
+    try {
+      if (proxyResult.label !== undefined) {
+        proxyForPortmap.removeBinding(port, proxyResult.label ?? "");
+      }
+    } catch { /* best effort */ }
     return { url: null, tunnel: "", mode: "portmap", site: proxyResult.site, label: proxyResult.label, localUrl: proxyResult.localUrl, error: hint };
   }
 }
@@ -436,6 +505,8 @@ async function proxyExpose(
   const proxy = ctx.proxy ?? new ProxyManager({
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     log,
+    // portmap 模式的外部入口是 IP:port（无 vhost 域名），需要 IP 直连。
+    allowIpDirect: opts.mode === "portmap",
   });
   // Base domain (portless public URL). The proxy already carries the
   // constructor-resolved domains (createServiceTunnels opts / env
@@ -549,6 +620,8 @@ async function proxyExpose(
     providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
     ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
     ...(opts.serviceBasePath ? { serviceBasePath: opts.serviceBasePath } : {}),
+    // portmap 模式：IP:transportPort 直连映射到本 binding（router DNAT 后的入口）。
+    ...(opts.mode === "portmap" && transportPort ? { ipDirectPort: transportPort } : {}),
   });
   // proxy 模式同样注册 host 策略(与 tunnel 模式一致):auth-request 按 host
   // 查 policy,否则策略文件为空 → 默认 one_factor,deny/two_factor 不生效。

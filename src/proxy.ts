@@ -182,6 +182,17 @@ export interface ProxyOptions {
   allowedHosts?: string[];
   /** Strip this base path before forwarding (e.g. "/dev" → service sees "/"). */
   basePath?: string;
+  /**
+   * IP:port 直连（mode portmap 的外部入口）——Host 为纯 IPv4 时按端口查
+   * open binding（见 ServiceHostResolveContext.allowIpDirect）。默认 false。
+   */
+  allowIpDirect?: boolean;
+  /** transportPort → appPort（IP 直连映射；缺省时把 Host 端口当 app port）。 */
+  resolveIpDirectPort?: (transportPort: number) => number | null;
+  /** appPort → vhost 形式（IP 直连结果关联 vhost）。 */
+  resolveIpDirectVhost?: (port: number) => string | null;
+  /** IP 直连专用 site 解析（允许命中 labeled binding，见 ServiceHostResolveContext）。 */
+  resolveIpDirectSite?: SiteResolver;
   /** 真实服务的默认 base path(转发映射,见 mapServicePath)。 */
   serviceBasePath?: string;
   /** Optional Basic password (empty = disabled). Open vhosts only. */
@@ -275,7 +286,7 @@ function isBasePathPath(pathname: string, basePath: string): boolean {
 export type ServiceHostDecision =
   | { kind: "deny"; status: 403; body: string }
   | { kind: "deny-auth"; status: 401; wwwAuthenticate: string }
-  | { kind: "pipe"; port: number; url: string }
+  | { kind: "pipe"; port: number; url: string; vhost?: string }
   | { kind: "redirect"; location: string }
   | { kind: "forward"; target: string }
   | { kind: "static"; status: 200; contentType: string; body: string };
@@ -288,6 +299,8 @@ export interface ServiceHostResolveInput {
   cookie?: string;
   remoteAddress?: string;
   forwardedProto?: "http" | "https";
+  /** 请求实际到达的本地端口（DNAT 后 = transport 端口）。IP 直连映射键。 */
+  localPort?: number;
 }
 
 export interface ServiceHostResolveContext {
@@ -301,6 +314,24 @@ export interface ServiceHostResolveContext {
   basePath: string;
   /** 真实服务的 base path(转发映射:URL 带 deployBasePath,服务端服务在 serviceBasePath)。 */
   serviceBasePath?: string;
+  /**
+   * IP:port 直连（mode portmap 的外部入口）：Host 为纯 IPv4 时按端口查
+   * open binding（enrollment/D4 与 auth 照常生效，仅 Host 匹配方式不同）。
+   * 只匹配 open binding——labeled/site 绑定需要域名语义，不适用。
+   * IP 无 DNS rebinding 面，安全模型不受影响。默认 false。
+   *
+   * Host 端口是 proxy transport 端口（DNAT 后的内部端口），与 binding 的
+   * app port 不同——通过 resolveIpDirectPort 把 transportPort 映射回 appPort。
+   */
+  allowIpDirect?: boolean;
+  /** transportPort（IP 直连的 Host 端口）→ appPort。返回 null = 未映射。 */
+  resolveIpDirectPort?: (transportPort: number) => number | null;
+  /** appPort → 命中的 vhost 形式（`<port>[-<label>].<suffix>`），IP 直连结果
+   *  关联 vhost 用（决策 pipe 的 vhost 字段）。返回 null = 无 vhost。 */
+  resolveIpDirectVhost?: (port: number) => string | null;
+  /** IP 直连专用的 site 解析：与 resolveSite 相同语义，但允许命中 labeled
+   *  binding（IP 无 label 语义；open 形式的 vhost 请求仍必须严格 open）。 */
+  resolveIpDirectSite?: SiteResolver;
 }
 
 /**
@@ -331,13 +362,49 @@ export async function resolveServiceHost(
   input: ServiceHostResolveInput,
   ctx: ServiceHostResolveContext,
 ): Promise<ServiceHostDecision> {
+  const hostname = (input.host ?? "").split(":")[0]!.toLowerCase();
+  // IP:port 直连（mode portmap 的外部入口）：Host 为纯 IPv4 → 按端口查 open
+  // binding。与 open vhost 同路径（enrollment + auth 照常），只差 Host 解析。
+  if (ctx.allowIpDirect && /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
+    const hostPort = Number((input.host ?? "").split(":")[1] ?? "");
+    if (!Number.isFinite(hostPort) || hostPort < 1 || hostPort > 65535)
+      return { kind: "deny", status: 403, body: "invalid port on ip-direct host" };
+    // DNAT 只改包的目标地址/端口，HTTP Host 头仍是原始外部端口。真实到达端口是
+    // input.localPort（= transport 端口）——优先用它映射回 app port；Host 端口兜底
+    // （低层 createProxyServer 场景 localPort 与 Host 端口一致）。
+    const reachPort = input.localPort ?? hostPort;
+    const port = ctx.resolveIpDirectPort?.(reachPort) ?? hostPort;
+    if (!ctx.isAllowed(port)) {
+      return { kind: "deny", status: 403, body: `service port ${port} not allowed` };
+    }
+    let openBackend: ProxySiteBackend | null = null;
+    const siteResolver = ctx.resolveIpDirectSite ?? ctx.resolveSite;
+    if (siteResolver) {
+      openBackend = await siteResolver(port, undefined, undefined, hostname);
+      if (!openBackend) return { kind: "deny", status: 403, body: `port ${port} not enrolled` };
+      const via = await gateBackend(openBackend, input);
+      if (via) return via;
+    }
+    if (ctx.auth) {
+      const via = await gateForwardAuthDecision(ctx.auth, input);
+      if (via) return via;
+    } else if (ctx.password) {
+      if (!validBasicAuth(input.authorization, ctx.password)) {
+        return { kind: "deny-auth", status: 401, wwwAuthenticate: 'Basic realm="service-tunnels"' };
+      }
+    }
+    const sb = openBackend?.serviceBasePath ?? ctx.serviceBasePath ?? "";
+    // 解析结果关联 vhost：调用方（日志/嵌入方）能看到这个 IP:port 对应哪个 vhost。
+    const vhost = ctx.resolveIpDirectVhost?.(port) ?? undefined;
+    return { kind: "pipe", port, url: mapServicePath(input.url ?? "/", ctx.basePath, sb), ...(vhost ? { vhost } : {}) };
+  }
+
   const match = parseServiceHost(input.host, ctx.suffixes);
   if (!match) return { kind: "deny", status: 403, body: "unknown virtual host" };
   if (!ctx.isAllowed(match.port)) {
     return { kind: "deny", status: 403, body: `service port ${match.port} not allowed` };
   }
 
-  const hostname = (input.host ?? "").split(":")[0]!.toLowerCase();
   const suffixSite = !match.label ? (ctx.resolveSuffixSite?.(match.suffix) ?? null) : null;
   // open vhost 的 per-binding serviceBasePath(如 vite base=/dev/)——else 分支
   // 填充,末尾 forward 映射优先用它。
@@ -679,6 +746,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
         cookie: req.headers.cookie,
         remoteAddress: req.socket.remoteAddress,
         forwardedProto: (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http",
+        localPort: (req.socket as { localPort?: number }).localPort,
       },
       {
         suffixes,
@@ -690,6 +758,10 @@ export function createProxyServer(opts: ProxyOptions): Server {
         password,
         basePath,
         serviceBasePath,
+        allowIpDirect: opts.allowIpDirect,
+        resolveIpDirectPort: opts.resolveIpDirectPort,
+        resolveIpDirectVhost: opts.resolveIpDirectVhost,
+        resolveIpDirectSite: opts.resolveIpDirectSite,
       },
     );
 
@@ -707,7 +779,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
         res.end("Authentication required");
         return;
       case "pipe":
-        log(`pipe ${req.headers.host}${req.url ?? ""} → :${decision.port}`);
+        log(`pipe ${req.headers.host}${req.url ?? ""} → :${decision.port}${decision.vhost ? ` (vhost ${decision.vhost})` : ""}`);
         pipeTo(decision.port, req, res, transformResponse);
         return;
       case "redirect":
@@ -802,6 +874,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
           cookie: req.headers.cookie,
           remoteAddress: req.socket.remoteAddress,
           forwardedProto: (req.socket as { encrypted?: boolean }).encrypted ? "https" : "http",
+          localPort: (req.socket as { localPort?: number }).localPort,
         },
         {
           suffixes,
@@ -813,6 +886,10 @@ export function createProxyServer(opts: ProxyOptions): Server {
           password,
           basePath,
           serviceBasePath,
+          allowIpDirect: opts.allowIpDirect,
+          resolveIpDirectPort: opts.resolveIpDirectPort,
+          resolveIpDirectVhost: opts.resolveIpDirectVhost,
+          resolveIpDirectSite: opts.resolveIpDirectSite,
         },
       );
       switch (decision.kind) {

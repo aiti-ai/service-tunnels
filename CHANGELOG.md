@@ -1,3 +1,57 @@
+## 0.3.64 (2026-08-30)
+
+- **feat(portmap): 动态端口穿透第三种暴露模式（mode="portmap"）**——外网访问不再
+  依赖隧道/反向代理，直接在路由器上开动态端口映射（docs/portmap-analysis.md）。
+  - 三后端：UPnP IGD（SSDP 组播+单播双通道探测、AddPortMapping、718 冲突重试）、
+    NAT-PMP/PCP（RFC 6886 二进制编解码，同端口 5351）、ssh-router（openwrt/
+    routeros/generic-iptables 命令预设，comment tag 幂等增删 + sweep 清孤儿）。
+  - 半衰期续租循环（有限租约强制，崩溃自愈）+ 退出清理；`MapHandle.stop()` 幂等。
+  - 探测：`st portmap probe` / `st.portmap.probe()`——CGNAT/私网判定（RFC 6598），
+    ssh-router 路径拿真实公网 IP 后二次复核（F3），命中则回滚映射并报错。
+  - CLI `sts expose --mode portmap --portmap-set k=v ...` + `sts portmap probe|list|stop`；
+    daemon RPC `portmap.probe/list/stop` + expose portmap 参数 IPC 边界形状校验。
+- **feat(proxy): IP:port 直连（F1/F4/F5）**——`allowIpDirect` + `resolveIpDirectPort`：
+  Host 为纯 IPv4 时按 `socket.localPort`（DNAT 后真实到达端口）映射回 app port，
+  Host 端口兜底；只命中已 enroll 的 binding（D4 与 auth 照常），无 DNS rebinding 面。
+  `resolveIpDirectSite` 支持命中 labeled binding（portmap + auth 场景，IP 无 label
+  语义；open 形式的 vhost 请求仍严格 open）。决策结果携带 `vhost` 字段（IP 直连
+  关联到命中的 vhost）。exposes 记录带 mode + portmap 详情（UI 可区分）。
+- **fix(portmap): CLI 嵌套参数与防火墙清理（第五轮审核 F12/G7）**——F12：
+  `--portmap-set sshRouter.host=x sshRouter.preset=openwrt` 点号键嵌套为对象
+  （此前扁平键被 daemon 拒绝，CLI 无法配置 ssh-router 后端）；G7：防火墙放行
+  规则生命周期闭环——`removeFirewall` + `onStopCleanup`：expose 本次打开的
+  ufw/firewalld/iptables 规则在 stop 时自动删除（既有配置不受影响，真机验证）。
+- **fix(portmap): 恢复完整性与探测性能（第四轮审核 F11/G6）**——F11：
+  ExposeResult.portmap 补 method + sshRouter 持久化（ssh-router 映射重启后按原
+  后端恢复，不再退化为 auto 探测/缺参失败）；G6：probe 结果按 gateway 缓存 60s
+  （每次 expose 的 SSDP+NAT-PMP 探测从 ~3s 降到 14ms，真机验证）。
+- **fix(portmap): 续租锚定与边界清理（第三轮审核 F9/F10）**——F9：续租闭包
+  未锚定已分配的外部端口（NAT-PMP suggested=0 / UPnP 随机端口）→ gateway 可能
+  换端口、URL 静默失效——renew 固定 `externalPort: mapping.externalPort`；
+  F10：startTransport:false 时 proxyExpose 已注册 binding 但 portmap 提前返回
+  ——该分支回滚 removeBinding。
+- **fix(portmap): daemon 模式完整性（完成度审核 F6-F8）**——F6：daemon 的 proxy
+  未开 allowIpDirect，CLI 默认走 daemon 时 IP 直连必 403（库/daemon 行为分裂），
+  已修；F7：daemon 重启后 portmap 续租 handle 丢失（映射静默过期）——持久化
+  portmap 详情 + 启动恢复循环（transport 重启后端口变了：更新 binding.ipDirectPort
+  为新端口 + forceReplace 语义：718 冲突先 Delete 旧映射再重加**同一外部端口**，
+  真机验证端口保持 + 恢复后 IP 直连 200）；F8：expose.stop/stopAll 不停 portmap
+  映射（残留至 lease 到期）——已补 stopPortmap。恢复失败可观测：
+  `state.json.portmap-restore.log` 诊断文件。
+- **feat(portmap): 本机防火墙闭环（真实教训）**——路由器映射建立后自动检查+放行
+  本机防火墙 `LAN IP:transportPort` 入站：ufw / firewalld（firewall-cmd permanent
+  + reload）/ iptables（comment tag）/ pfctl（提示手动）。sudo 一律 `-n` 非交互
+  （未配 passwordless sudo 立即失败并给手动命令），10s 超时；失败回滚映射。
+  npm 调研结论：无可用的防火墙开端口包（iptables@0.0.4 等均陈旧）——自实现。
+- **test(portmap)**: 15 项通过——NAT-PMP 编解码/假 responder、UPnP 718 重试与回读、
+  CGNAT 拒绝+回滚、stop 幂等、IP 直连 localPort 优先（F4）+ vhost 关联、portmap+
+  auth（F5：IP 直连 302 到 portal 登录 + exposes 记录区分）、ssh-router 三预设命令
+  断言 + 注入拒绝、daemon RPC、防火墙 firewalld/ufw 序列（fake 命令 PATH 注入）；
+  e2e（transport 注册 + IP 直连 200 + stop 清理）。
+- **test(portmap-external)**: 外部连通性真实验证（`ST_TESTSERVER` env 门控，未设
+  置自动 skip）——真实路由器映射 + 公网 SSH 主机 curl 反向验证，全链路（app →
+  transport → 路由器 DNAT → 互联网 → 公网主机）实测通过。
+
 ## 0.3.63 (2026-08-23)
 
 - **refactor(portal): bootstrap admin 自动创建彻底移除**——`prepare()` 不再根据 `opts.user`

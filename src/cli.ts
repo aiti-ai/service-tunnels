@@ -33,7 +33,8 @@ function usage(lang: Lang = "en"): void {
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--portmap-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both|portmap] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
+  portmap probe [--gateway <ip>] | list | stop <key>   # router UPnP/NAT-PMP mapping (mode portmap)
   ssh domain list | create <name> --forward-port <p> [--ssh-port <p>] [--reverse-port <p>] [--host <h>] |
                remove <name> | key list|add|generate|remove | host fingerprints [--domain <d>] [--public-key <k>] [--fingerprint <fp>] [--type ed25519|rsa|ecdsa] [--bits <n>] [--count <n>] [--comment <c>]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...] | auth biometric status|disable|enroll-url <user> [--site <s>] [--method face|voice] [--provider portal]
@@ -70,10 +71,8 @@ interface CliArgs {
   token?: string;
   user?: string;
   remotePort?: number;
-  provider?: string;
   record?: string;
   zone?: string;
-  secret?: string;
   accessKeyId?: string;
   ttl?: number;
   interval?: number;
@@ -86,6 +85,8 @@ interface CliArgs {
   tunnelSets?: Record<string, string>;
   /** --provider-set key=value (expose auth-provider params). */
   providerSets?: Record<string, string>;
+  /** --portmap-set key=value (expose mode=portmap params). */
+  portmapSets?: Record<string, string>;
   /** -i / --interactive: prompt each schema param (readline). */
   interactive?: boolean;
   tunnelArgs?: string[];
@@ -118,6 +119,8 @@ interface CliArgs {
   comment?: string;
   /** expose --ssh-gateway <domain>: tcp tunnel target = SSH gateway port. */
   sshGateway?: string;
+  /** portmap probe --gateway <ip>: explicit router gateway for capability probe. */
+  gateway?: string;
   /** ssh domain create --listen-addr: gateway bind IP (127.0.0.1 / 172.17.0.1 / 0.0.0.0). */
   listenAddr?: string;
   /** --policy <one_factor|two_factor|deny> (site add). */
@@ -244,6 +247,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--provider-set":
         addSet(args, "providerSets", argv[++i]);
         break;
+      case "--portmap-set":
+        addSet(args, "portmapSets", argv[++i]);
+        break;
       case "-i":
       case "--interactive":
         args.interactive = true;
@@ -333,6 +339,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--ssh-gateway":
         args.sshGateway = argv[++i]!;
         break;
+      case "--gateway":
+        args.gateway = argv[++i]!;
+        break;
       case "--listen-addr":
         args.listenAddr = argv[++i]!;
         break;
@@ -372,11 +381,11 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
 }
 
 /** Parse `--set key=value` into a per-namespace map. */
-function addSet(args: CliArgs, key: "sets" | "tunnelSets" | "providerSets", raw: string | undefined): void {
+function addSet(args: CliArgs, key: "sets" | "tunnelSets" | "providerSets" | "portmapSets", raw: string | undefined): void {
   if (!raw) return;
   const eq = raw.indexOf("=");
   if (eq < 0) {
-    console.error(`--${key === "sets" ? "set" : key === "tunnelSets" ? "tunnel-set" : "provider-set"} expects key=value, got "${raw}"`);
+    console.error(`--${key === "sets" ? "set" : key === "tunnelSets" ? "tunnel-set" : key === "providerSets" ? "provider-set" : "portmap-set"} expects key=value, got "${raw}"`);
     process.exit(2);
   }
   (args[key] ??= {})[raw.slice(0, eq).trim()] = raw.slice(eq + 1).trim();
@@ -822,6 +831,33 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "portmap": {
+      // st portmap probe [--gateway <ip>]  |  st portmap list  |  st portmap stop <key>
+      const op = cmd[1] ?? "probe";
+      if (op === "probe") {
+        try {
+          const report = await st.portmap.probe({ gateway: args.gateway as string | undefined });
+          jsonOut(report);
+        } catch (e) {
+          console.error(String(e instanceof Error ? e.message : e));
+          process.exit(1);
+        }
+      } else if (op === "list") {
+        jsonOut(st.portmap.list());
+      } else if (op === "stop") {
+        const key = cmd[2];
+        if (!key) {
+          console.error("portmap stop <key>");
+          process.exit(2);
+        }
+        jsonOut({ stopped: await st.portmap.stop(key) });
+      } else {
+        usage(lang);
+        process.exit(2);
+      }
+      break;
+    }
+
     case "expose": {
       const port = Number(cmd[1]);
       if (!Number.isFinite(port) || port <= 0) {
@@ -839,9 +875,31 @@ async function main(): Promise<void> {
       }
       let tunnelParams: Record<string, unknown> | undefined;
       let providerParams: Record<string, unknown> | undefined;
+      let portmapParams: Record<string, unknown> | undefined;
       try {
         tunnelParams = await applyExposeSets(st, "tunnel", args.tunnel ?? "ngrok", args.tunnelSets ?? {});
         providerParams = await applyExposeSets(st, "provider", typeof args.auth === "string" ? args.auth : "", args.providerSets ?? {});
+        // portmap-set: 数字字段数字化；点号键嵌套（sshRouter.host → {sshRouter:{host}}）
+        const pm = args.portmapSets ?? {};
+        if (Object.keys(pm).length) {
+          portmapParams = {};
+          for (const [k, v] of Object.entries(pm)) {
+            const val = /^(externalPort|leaseSeconds|port|ssdpTimeoutMs)$/.test(k) ? Number(v) : v;
+            if (k.includes(".")) {
+              // sshRouter.host → { sshRouter: { host } }（合并多层）
+              const parts = k.split(".");
+              let cur = portmapParams;
+              for (let i = 0; i < parts.length - 1; i++) {
+                const seg = parts[i]!;
+                if (typeof cur[seg] !== "object" || cur[seg] === null) cur[seg] = {};
+                cur = cur[seg] as Record<string, unknown>;
+              }
+              cur[parts[parts.length - 1]!] = val;
+            } else {
+              portmapParams[k] = val;
+            }
+          }
+        }
       } catch (err) {
         console.error(String(err instanceof Error ? err.message : err));
         process.exit(2);
@@ -872,6 +930,7 @@ async function main(): Promise<void> {
         basePath: args.basePath,
         tunnelParams,
         providerParams,
+        ...(portmapParams ? { portmap: portmapParams } : {}),
         sshGateway: args.sshGateway,
         force: args.force,
         allowToolDownload: args.allowToolDownload,

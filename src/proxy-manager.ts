@@ -38,6 +38,8 @@ import type { AuthPolicy, AuthProvider } from "./auth-provider.ts";
 export interface ProxyBinding {
   /** App port behind the vhost. */
   port: number;
+  /** IP 直连（mode portmap）的 transport 监听端口——Host 为 IP:此端口时映射到 port。 */
+  ipDirectPort?: number;
   /** "" = open form; else the dash label (e.g. "portal", "host", "auth"). */
   label: string;
   /** Site name the binding belongs to ("default" for the reserved auth label). */
@@ -78,6 +80,8 @@ export interface ProxyManagerOptions {
   serviceBasePath?: string;
   /** Optional Basic password gate for OPEN vhosts. */
   password?: string;
+  /** IP:port 直连（mode portmap 的外部入口），见 ServiceHostResolveContext.allowIpDirect。 */
+  allowIpDirect?: boolean;
   /** Allow-list source (discovery). Default: allow all (caller must gate). */
   isPortAllowed?: (port: number) => boolean;
   /** Auth provider registry (lazy provider starts). */
@@ -298,6 +302,10 @@ export class ProxyManager {
       basePath: this.#opts.basePath,
       serviceBasePath: this.#opts.serviceBasePath,
       password: this.#opts.password,
+      allowIpDirect: this.#opts.allowIpDirect,
+      resolveIpDirectPort: (tp) => this.#resolveIpDirectPort(tp),
+      resolveIpDirectVhost: (p) => this.#resolveIpDirectVhost(p),
+      resolveIpDirectSite: (p, s, l, v) => this.#resolveIpDirectSite(p, s, l, v),
       transformResponse: this.#opts.transformResponse,
       isPortAllowed: this.#opts.isPortAllowed,
       resolveLabel: (label) => this.#resolveLabel(label),
@@ -342,7 +350,44 @@ export class ProxyManager {
       password: this.#opts.password ?? "",
       basePath: this.#opts.basePath ?? "",
       serviceBasePath: this.#opts.serviceBasePath,
+      allowIpDirect: this.#opts.allowIpDirect,
+      resolveIpDirectPort: (tp) => this.#resolveIpDirectPort(tp),
+      resolveIpDirectVhost: (p) => this.#resolveIpDirectVhost(p),
+      resolveIpDirectSite: (p, s, l, v) => this.#resolveIpDirectSite(p, s, l, v),
     });
+  }
+
+  /** transportPort → appPort（mode portmap 的 IP 直连映射）。 */
+  #resolveIpDirectPort(transportPort: number): number | null {
+    for (const b of this.#bindings.values()) {
+      if (b.ipDirectPort === transportPort) return b.port;
+    }
+    return null;
+  }
+
+  /** appPort → vhost 形式（IP 直连命中的 binding 对应的 vhost）。 */
+  #resolveIpDirectVhost(port: number): string | null {
+    for (const b of this.#bindings.values()) {
+      if (b.port === port) return this.vhost(b.port, b.label);
+    }
+    return null;
+  }
+
+  /** IP 直连专用 site 解析：open binding 优先；查不到时允许命中 labeled binding
+   *  （IP 无 label 语义——portmap + auth 的 binding 是 label="auth"），
+   *  走 labeled 分支（site auth 照常生效）。open 形式的 vhost 请求不受影响。 */
+  async #resolveIpDirectSite(
+    port: number,
+    _site: string | undefined,
+    _label: string | undefined,
+    vhost: string,
+  ): Promise<ProxySiteBackend | null> {
+    const open = await this.#resolveSite(port, undefined, undefined, vhost);
+    if (open) return open;
+    const labeled = [...this.#bindings.values()].find((x) => x.port === port && x.label);
+    if (!labeled) return null;
+    const backend = await this.#resolveSite(port, labeled.site, labeled.label, vhost);
+    return backend ? { ...backend, serviceBasePath: labeled.serviceBasePath ?? backend.serviceBasePath } : null;
   }
 
   /** In-process vhost parse — same suffix set as the transport (#allSuffixes,

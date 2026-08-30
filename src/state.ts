@@ -61,6 +61,17 @@ export interface ExposeRuntimeState {
   tunnelType?: string;
   tunnelName?: string;
   host?: string;
+  /** mode=portmap 的映射详情（重启恢复续租用）。 */
+  portmap?: {
+    backend: string;
+    gateway: string;
+    externalIp: string;
+    externalPort: number;
+    internalPort: number;
+    leaseSeconds: number;
+    method?: string;
+    sshRouter?: { host: string; user?: string; port?: number; key?: string; preset: string; connectTimeout?: number };
+  };
   startedAt: number;
 }
 
