@@ -90,7 +90,8 @@ export interface RegistrationEntry {
   txt?: boolean;
   /** Kind: tunnel — register the URL host as a CNAME. */
   cname?: boolean;
-  /** Kind: tunnel — register the full URL as a TXT. */
+  /** Kind: tunnel — register the full URL as a TXT (txtUrl preferred;
+   *  plain `txt` also accepted for config-doc compatibility). */
   txtUrl?: boolean;
 }
 
@@ -219,7 +220,8 @@ export async function registerTunnel(
       const r = await setBeaconSafe(resolved, { name: base, type: "CNAME", value: host });
       actions.push({ type: "CNAME", name: base, value: host, ok: r.ok, error: r.error });
     }
-    if (entry.txtUrl) {
+    // tunnel 条目：TXT 触发字段接受 txtUrl（推荐）或 txt（文档兼容）
+    if (entry.txtUrl || entry.txt) {
       const txtName = resolved.txtName || base;
       const r = await setBeaconSafe(resolved, { name: txtName, type: "TXT", value: info.url });
       actions.push({ type: "TXT", name: txtName, value: info.url, ok: r.ok, error: r.error });

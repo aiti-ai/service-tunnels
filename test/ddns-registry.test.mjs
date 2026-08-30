@@ -146,6 +146,33 @@ test("urlHost: strips scheme/path/port (CNAME-safe)", () => {
   assert.equal(urlHost("abc.trycloudflare.com"), "abc.trycloudflare.com");
 });
 
+test("registerTunnel: txt (doc syntax) triggers TXT like txtUrl", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { startCloudflareMock } = await import("ddns/src/mocks/cloudflare.ts");
+  const dir = mkdtempSync(join(tmpdir(), "st-reg-txt-"));
+  const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
+  const zoneId = [...mock.state.zones.values()][0].id;
+  writeFileSync(join(dir, "ddns.json"), JSON.stringify({
+    providerProfiles: { cf: { provider: "cloudflare", token: "tk", zoneId, baseUrl: mock.url } },
+    profiles: { home: { providerProfile: "cf", zone: "example.com", record: "t.example.com", type: "CNAME" } },
+    entries: [{ name: "t1", profile: "home", kind: "tunnel", followTunnel: "web", cname: true, txt: true, txtName: "t-txt.example.com" }],
+  }, null, 2));
+  try {
+    const cfg = readRegistryConfig(dir);
+    const rs = await registerTunnel(cfg, { tunnelName: "web", url: "https://abc123.trycloudflare.com" });
+    const types = rs[0].actions.map((a) => a.type);
+    assert.ok(types.includes("CNAME") && types.includes("TXT"), `doc-syntax txt triggers TXT (got ${types})`);
+    const records = mock.state.zones.get("example.com").records;
+    const txt = records.find((r) => r.type === "TXT");
+    assert.equal(txt?.content, "https://abc123.trycloudflare.com");
+  } finally {
+    await mock.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("legacy plain array config reads as empty registry (no entries)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "st-dnsreg-legacy-"));
   try {
