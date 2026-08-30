@@ -20,12 +20,22 @@ function renderTools(){
 window.downloadTool=async(name)=>{
   const btn=document.getElementById('dl-'+name);
   if(btn){btn.disabled=true;btn.textContent='…';}
+  // npm install / 工具下载耗时较长（5min 上限），失败信息持久显示（不随轮询消失）
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(),5*60*1000);
   try{
-    const r=await api('/api/tools-ensure',{method:'POST',body:{name}});
-    toast(name+' → '+(r.path||'ok'));
+    const res=await fetch('/api/tools-ensure',{method:'POST',signal:ctrl.signal,
+      headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken()},
+      body:JSON.stringify({name})});
+    const d=await res.json().catch(()=>({}));
+    if(!res.ok)throw new Error(d.error||('HTTP '+res.status));
+    toast(name+' ✓ '+(d.path||''),false,10000);
     refreshAll();
   }catch(err){
-    toast(name+': '+(err.message||'download failed'),true);
-    if(btn){btn.disabled=false;btn.textContent='↻';}
-  }
+    // 失败信息持久（12000ms）——轮询不会清 modalRoot，但 toast 会自动消失，
+    // 长下载失败后用户必须能看到原因
+    const msg=name+': '+(err.message||'download failed');
+    toast(msg,true,12000);
+    if(btn){btn.disabled=false;btn.textContent=tr('ui.tools.download');}
+  }finally{clearTimeout(timer);}
 };

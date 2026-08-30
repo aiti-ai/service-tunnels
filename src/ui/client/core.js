@@ -17,7 +17,7 @@ let pollTimer=null;
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fmtAddr(a){return a.includes(':')?'['+a+']':a;}
-function toast(msg,err){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),4000);}
+function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
 function confirmDlg(title,body,confirmLabel,onOk){
   const root=document.getElementById('modalRoot');
   root.innerHTML='<div class="modal-ov"><div class="modal"><h3>⚠ '+esc(title)+'</h3><div class="muted" style="line-height:1.7">'+body+'</div><div class="actions" style="margin-top:14px;justify-content:flex-end"><button class="btn" onclick="this.closest(\'.modal-ov\').remove()">'+esc(tr('ui.cancel'))+'</button><button class="btn btn-danger" id="confirmOk">'+esc(confirmLabel)+'</button></div></div></div>';

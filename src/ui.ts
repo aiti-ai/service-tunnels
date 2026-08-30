@@ -184,16 +184,22 @@ function createHandler(ctx: UiContext): RequestListener {
     const path = url.pathname;
 
     // ── CSRF / same-origin / loopback-host gate（allowedHosts 远程放行）──
-    const hostOk = isLoopbackHost(req.headers.host) ||
+    // 来自本机 transport 的转发请求（TCP 源 = 127.0.0.1，portal 认证已在
+    // transport 完成）→ 视为可信。TCP 源地址不可伪造（对比 Host 头）。
+    const fromLocalTransport = /^(127\.0\.0\.1|::1|::ffff:127\.0\.0\.1)$/.test(req.socket.remoteAddress ?? "");
+    const hostOk = isLoopbackHost(req.headers.host) || fromLocalTransport ||
       (ctx.allowedHosts ?? []).includes(String(req.headers.host ?? "").replace(/:\d+$/, "").toLowerCase());
     if (req.method === "POST") {
       if (!hostOk) {
         json(res, 403, { error: "non-loopback host rejected (not in allowedHosts)" });
         return;
       }
+      // fromLocalTransport：portal 认证已在 transport 完成，本机转发来的请求
+      // origin 就是用户访问 UI 的地址（公网 IP:端口 / 内网 IP:端口，不可枚举）——
+      // 不按 origin 限制（CSRF token 校验仍然生效，防 CSRF 的本质是 token 不是 origin）。
       const origin = req.headers.origin;
       const originHost = origin ? new URL(origin).host.replace(/:\d+$/, "").toLowerCase() : "";
-      const originOk = !origin || originHost === "127.0.0.1" || originHost === "localhost" ||
+      const originOk = fromLocalTransport || !origin || originHost === "127.0.0.1" || originHost === "localhost" ||
         (ctx.allowedHosts ?? []).includes(originHost);
       if (!originOk) {
         json(res, 403, { error: "cross-origin request rejected" });
