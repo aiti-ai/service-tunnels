@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { resolveLang, type Lang } from "./i18n.ts";
 import { parseTokenExpiry } from "./providers/token.ts";
 import { json, readJson, daemonOrLocal, maskParams, findExpose, sshDomainFor, type UiContext } from "./ui-helpers.ts";
+import { listPortmaps, stopPortmap } from "./portmap/index.ts";
 
 export async function createApiHandler(
   ctx: UiContext,
@@ -127,7 +128,19 @@ if (path === "/api/expose-stop" && req.method === "POST") {
   const body = await readJson<{ name?: string }>(req);
   const name = String(body.name ?? "");
   if (!name) { json(res, 400, { error: "name required" }); return true; }
-  const r = await daemonOrLocal<any>(ctx, "expose.stop", name, () => ctx.st.tunnels.stop(name));
+  const r = await daemonOrLocal<any>(ctx, "expose.stop", name, () => {
+    // portmap 条目（name = proxy:port:label）：停路由器映射 + 删 binding
+    if (name.startsWith("proxy:")) {
+      const port = Number(name.split(":")[1]);
+      const label = name.split(":")[2] ?? "";
+      return (async () => {
+        const m = listPortmaps().find((x) => x.mapping.internalPort === port || x.key.endsWith(`:${port}:${label}`));
+        if (m) await stopPortmap(m.key);
+        ctx.st.proxy.removeBinding(port, label);
+      })();
+    }
+    return ctx.st.tunnels.stop(name);
+  });
   if (r === null) { json(res, 400, { error: "stop failed (daemon unavailable)" }); return true; }
   json(res, 200, { stopped: name });
   return true;
@@ -138,6 +151,10 @@ if (path === "/api/expose-stop-all" && req.method === "POST") {
     await ctx.st.tunnels.stopAll();
     for (const b of ctx.st.proxy.bindings()) {
       try { ctx.st.proxy.removeBinding(b.port, b.label); } catch { /* gone */ }
+    }
+    // portmap 条目：停全部映射（续租定时器 + 路由器规则）
+    for (const m of listPortmaps()) {
+      try { await stopPortmap(m.key); } catch { /* gone */ }
     }
   });
   json(res, 200, { ok: true });
