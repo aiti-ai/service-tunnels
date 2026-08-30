@@ -16,3 +16,4 @@ test/perf/rust-proxy-bench/target/
 test/perf/cross-client/goclient
 test/perf/cross-client/goproxy-server
 test/perf/cross-client/gobare-server
+data/
