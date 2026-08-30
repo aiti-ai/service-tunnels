@@ -6,6 +6,18 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensurePortmap, PortmapUnavailableError, SshRouterBackend } from "../src/portmap/index.ts";
+
+/** POSIX fake 命令（仅 Linux/macOS 的 ufw/firewalld/iptables 后端测试用——这些后端
+ *  在 Windows 不存在，对应测试已平台门控 skip）。 */
+async function writeFake(dir, name, shBody) {
+  const { writeFileSync, chmodSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const file = join(dir, name);
+  const logPath = dir.replace(/\\/g, "\\\\");
+  writeFileSync(file, `#!/bin/sh\necho "$@" >> "${logPath}/calls.log"\n${shBody}\n`, "utf8");
+  chmodSync(file, 0o755);
+  return file;
+}
 import { encodeMapRequest, decodeResponse, NatPmpBackend, splitGateway } from "../src/portmap/natpmp.ts";
 
 /* ---------------- NAT-PMP codec ---------------- */
@@ -386,6 +398,8 @@ test('expose mode="portmap": transport enrollment + router mapping + stop cleanu
   } finally {
     await new Promise((res) => app.close(res));
     await igd.close();
+    // F14: 清理共享 transport（Windows 无 SO_REUSEADDR——不关则下一个测试 EADDRINUSE）
+    try { await st.proxy.stop(); } catch { /* best effort */ }
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -490,6 +504,7 @@ test('expose mode="portmap" + auth: IP-direct hits the portal gate (302 login), 
   } finally {
     await new Promise((res) => app.close(res));
     await igd.close();
+    try { await st.proxy.stop(); } catch { /* best effort */ }
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -557,24 +572,20 @@ test("SshRouterBackend: getExternalIp multi-fallback (uci → ifstatus → curl)
   assert.match(cmds3[0], /\/ip firewall nat remove \[find comment~"service-tunnels"\]/);
 });
 
-test("firewall: iptables open sequence (check → insert ACCEPT, comment tag)", async () => {
+test("firewall: iptables open sequence (check → insert ACCEPT, comment tag)", { skip: process.platform === "win32" }, async () => {
   const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { checkFirewall, openFirewall } = await import("../src/portmap/firewall.ts");
   const dir = mkdtempSync(join(tmpdir(), "st-fw-ipt-"));
-  const fake = join(dir, "iptables");
-  writeFileSync(fake, `#!/bin/sh
-echo "$@" >> "${dir}/calls.log"
-case "$1" in
+  const fake = await writeFake(dir, "iptables",
+    `case "$1" in
   -C) [ -f "${dir}/opened" ] && exit 0 || exit 1 ;;
   -I) touch "${dir}/opened"; exit 0 ;;
 esac
-exit 0
-`, "utf8");
-  chmodSync(fake, 0o755);
+exit 0`);
   const oldPath = process.env.PATH;
-  process.env.PATH = `${dir}:${oldPath}`;
+  process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
   try {
     const c1 = await checkFirewall("192.168.1.50", 4180, "iptables");
     assert.equal(c1.allowed, false);
@@ -592,7 +603,7 @@ exit 0
 
 /* ---------------- host firewall (ufw/firewalld/iptables) ---------------- */
 
-test("firewall: firewalld open sequence (query → permanent add → reload) + idempotent", async () => {
+test("firewall: firewalld open sequence (query → permanent add → reload) + idempotent", { skip: process.platform === "win32" }, async () => {
   const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -602,31 +613,17 @@ test("firewall: firewalld open sequence (query → permanent add → reload) + i
   const calls = [];
   // fake firewall-cmd: 记录调用；query-port 先 no 后 yes（第一次 open 后变 allowed）
   let opened = false;
-  const fake = join(dir, "firewall-cmd");
-  writeFileSync(fake, `#!/bin/sh
-echo "$@" >> "${dir}/calls.log"
-case "$1" in
-  --query-port=*) [ "$opened" = "1" ] && exit 0 || exit 1 ;;
-  --permanent) opened=1; exit 0 ;;
-  --reload) exit 0 ;;
-esac
-`, "utf8");
-  chmodSync(fake, 0o755);
-  // opened 变量在子 shell 不共享——改用文件标记
-  writeFileSync(fake, `#!/bin/sh
-echo "$@" >> "${dir}/calls.log"
-case "$1" in
+  const fake = await writeFake(dir, "firewall-cmd",
+    `case "$1" in
   --query-port=*)
     [ -f "${dir}/opened" ] && exit 0 || exit 1 ;;
   --permanent) touch "${dir}/opened"; exit 0 ;;
   --reload) exit 0 ;;
   *) exit 1 ;;
-esac
-`, "utf8");
-  chmodSync(fake, 0o755);
+esac`);
 
   const oldPath = process.env.PATH;
-  process.env.PATH = `${dir}:${oldPath}`;
+  process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
   try {
     // 未放行：query-port 失败
     const check1 = await checkFirewall("192.168.1.50", 4180, "firewalld");
@@ -653,7 +650,7 @@ esac
   }
 });
 
-test("firewall: ufw detect + open sequence (allow in to ip port)", async () => {
+test("firewall: ufw detect + open sequence (allow in to ip port)", { skip: process.platform === "win32" }, async () => {
   const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -661,18 +658,14 @@ test("firewall: ufw detect + open sequence (allow in to ip port)", async () => {
 
   const dir = mkdtempSync(join(tmpdir(), "st-fw-ufw-"));
   const calls = [];
-  const fake = join(dir, "ufw");
-  writeFileSync(fake, `#!/bin/sh
-echo "$@" >> "${dir}/calls.log"
-case "$1" in
+  const fake = await writeFake(dir, "ufw",
+    `case "$1" in
   status) exit 0 ;;   # 无规则 → blocked
   allow) touch "${dir}/opened"; exit 0 ;;
 esac
-exit 0
-`, "utf8");
-  chmodSync(fake, 0o755);
+exit 0`);
   const oldPath = process.env.PATH;
-  process.env.PATH = `${dir}:${oldPath}`;
+  process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
   try {
     const check1 = await checkFirewall("192.168.1.50", 4180, "ufw");
     assert.equal(check1.allowed, false);
@@ -759,6 +752,7 @@ test("F11: expose result carries method + sshRouter (daemon restore needs them)"
   try {
     const r = await st.auth.expose(appPort, {
       mode: "portmap", auth: false, allowAuthNone: true, force: true,
+      proxyPort: 0, // 随机 transport 端口——Windows 上前一个 daemon 测试的 4180 可能未释放
       portmap: { method: "upnp", gateway: "127.0.0.1", controlUrl: `http://127.0.0.1:${igd.port}/ctl/IPConn`, leaseSeconds: 600, ssdpTimeoutMs: 200 },
     });
     assert.equal(r.mode, "portmap");
@@ -774,6 +768,7 @@ test("F11: expose result carries method + sshRouter (daemon restore needs them)"
   } finally {
     await new Promise((res) => app.close(res));
     await igd.close();
+    try { await st.proxy.stop(); } catch { /* best effort */ }
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -807,24 +802,17 @@ test("G6: probe result cached per gateway (second ensurePortmap skips re-probe)"
 
 /* ---------------- 第四轮：firewall remove + CLI 点号嵌套 ---------------- */
 
-test("firewall: removeFirewall deletes the rule opened this round (ufw delete)", async () => {
+test("firewall: removeFirewall deletes the rule opened this round (ufw delete)", { skip: process.platform === "win32" }, async () => {
   const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const { removeFirewall } = await import("../src/portmap/firewall.ts");
   const dir = mkdtempSync(join(tmpdir(), "st-fw-rm-"));
-  const fake = join(dir, "ufw");
-  writeFileSync(fake, `#!/bin/sh
-echo "$@" >> "${dir}/calls.log"
-exit 0
-`, "utf8");
-  chmodSync(fake, 0o755);
+  const fake = await writeFake(dir, "ufw", `exit 0`);
   // fake sudo：返回非 0 → sudoRun 探测失败 → removeFirewall 走非 sudo 分支（bin 路径）
-  const fakeSudo = join(dir, "sudo");
-  writeFileSync(fakeSudo, "#!/bin/sh\nexit 1\n", "utf8");
-  chmodSync(fakeSudo, 0o755);
+  await writeFake(dir, "sudo", `exit 1`);
   const oldPath = process.env.PATH;
-  process.env.PATH = `${dir}:${oldPath}`;
+  process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
   try {
     await removeFirewall("192.168.1.50", 4180, "ufw");
     const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));

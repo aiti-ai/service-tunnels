@@ -12,7 +12,7 @@
  */
 import { execFile } from "node:child_process";
 
-export type FirewallBackend = "ufw" | "firewalld" | "iptables" | "pfctl" | "none" | "unsupported";
+export type FirewallBackend = "ufw" | "firewalld" | "iptables" | "pfctl" | "windows" | "none" | "unsupported";
 
 export interface FirewallCheck {
   backend: FirewallBackend;
@@ -31,7 +31,9 @@ export interface FirewallOpenResult {
 
 function run(cmd: string, args: string[], timeoutMs = 8000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs }, (err, stdout, stderr) => {
+    // Windows 的 .cmd/.bat 不能直接 spawn——经 shell 执行
+    const shell = process.platform === "win32" && /\.(cmd|bat)$/i.test(cmd);
+    execFile(cmd, args, { timeout: timeoutMs, ...(shell ? { shell: true } : {}) }, (err, stdout, stderr) => {
       resolve({ ok: !err, stdout: String(stdout), stderr: String(stderr) });
     });
   });
@@ -52,6 +54,14 @@ const SYS_BINS = new Map([
 
 /** 解析命令完整路径：PATH → 常见系统目录（ufw/iptables 常不在普通用户 PATH）。 */
 async function resolveCmd(name: string): Promise<string | null> {
+  if (process.platform === "win32") {
+    // Windows：where 替代 which；PATH 里的 .cmd/.exe 都要找
+    const w = await run("where", [name]);
+    if (w.ok && w.stdout.trim()) return w.stdout.trim().split(/\r?\n/)[0]!;
+    const w2 = await run("where", [`${name}.cmd`]);
+    if (w2.ok && w2.stdout.trim()) return w2.stdout.trim().split(/\r?\n/)[0]!;
+    return null;
+  }
   const w = await run("which", [name]);
   if (w.ok) return name;
   for (const p of SYS_BINS.get(name) ?? []) {
@@ -80,6 +90,14 @@ export async function detectFirewall(): Promise<FirewallBackend> {
   if (await found(["firewall-cmd"])) return "firewalld";
   if (await found(["iptables"])) return "iptables";
   if (await found(["pfctl"])) return "pfctl";
+  // Windows: netsh advfirewall（F13——无 ufw/iptables/pfctl 时必须有 Windows 后端，
+  // 否则 portmap expose 在 Windows 上全部失败）
+  if (process.platform === "win32") {
+    const ns = await run("netsh", ["advfirewall", "firewall", "show", "rule", "name=all"], 5000);
+    if (ns.ok) return "windows";
+    const w = await run("where", ["netsh"]);
+    if (w.ok) return "windows";
+  }
   return "none";
 }
 
@@ -128,6 +146,13 @@ export async function checkFirewall(ip: string, port: number, backend?: Firewall
     const allowed = r.ok && new RegExp(`dport\\\\s*=\\\\s*${port}`).test(r.stdout);
     return { backend: "pfctl", allowed, detail: allowed ? "pf anchor rule allows" : "pf ruleset: no explicit allow (or unreadable)" };
   }
+  if (b === "windows") {
+    // netsh advfirewall：规则名 service-tunnels:<port> 存在 → 已放行（我们自己建的，
+    // 名字即身份）。show rule 无需管理员。
+    const r = await run("netsh", ["advfirewall", "firewall", "show", "rule", `name=service-tunnels:${port}`], 8000);
+    const enabled = r.ok && /Enabled\s+Yes/i.test(r.stdout);
+    return { backend: "windows", allowed: enabled, detail: enabled ? "netsh rule allows" : "netsh: no service-tunnels rule (or not enabled)" };
+  }
   return { backend: "none", allowed: false, detail: "no firewall backend detected" };
 }
 
@@ -140,6 +165,21 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
 
   // 命令解析一次（ufw/iptables 可能在 /usr/sbin，普通用户 PATH 不含）
   const bin = await resolveCmd(b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? "iptables" : "pfctl");
+  if (b === "windows") {
+    // 添加规则（规则名 = service-tunnels:<port>，dir=in + TCP + localport）——
+    // 需要管理员权限（UAC 提权后的进程）；失败给出手动命令。
+    const r = await run(
+      "netsh",
+      ["advfirewall", "firewall", "add", "rule", `name=service-tunnels:${port}`, "dir=in", "action=allow", "protocol=TCP", `localport=${port}`],
+      10_000,
+    );
+    if (r.ok) return { backend: "windows", ensured: true, detail: `netsh rule service-tunnels:${port}` };
+    return {
+      backend: "windows",
+      ensured: false,
+      detail: `netsh add rule failed (needs admin): ${(r.stderr || r.stdout).trim() || `run as administrator — netsh advfirewall firewall add rule name="service-tunnels:${port}" dir=in action=allow protocol=TCP localport=${port}`}`,
+    };
+  }
   const tryRun = async (args: string[], sudo = false): Promise<{ ok: boolean; stderr: string }> => {
     // sudo 一律 -n 非交互：未配 passwordless sudo 时立即失败，绝不挂起等密码。
     const r = sudo ? await sudoRun(args) : await run(args[0]!, args.slice(1));
@@ -221,5 +261,9 @@ export async function removeFirewall(ip: string, port: number, backend?: Firewal
     const args = ["-D", "INPUT", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT", "-m", "comment", "--comment", `service-tunnels:${port}`];
     if (sudoOk) await tryRun(args, true);
     else await tryRun(args);
+  } else if (b === "windows") {
+    try {
+      await run("netsh", ["advfirewall", "firewall", "delete", "rule", `name=service-tunnels:${port}`], 10_000);
+    } catch { /* best effort */ }
   }
 }
