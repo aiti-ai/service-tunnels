@@ -53,6 +53,25 @@
 
 ## 0.3.64 (2026-08-30)
 
+- **feat(ui): Tools 页 missing 工具可点击下载**——missing 行加 Download 按钮
+  （下载禁用时 disabled + 提示）；新 API `POST /api/tools-ensure {name}`
+  （工具名白名单校验 + allowToolDownload 门控 + ensure 安装，返回解析路径）；
+  行内 ↻ 进度 + toast 反馈（失败持久 12s）+ refreshAll。
+- **feat(ui): 远程访问 UI 的 POST 放行**——UI 经 portmap 暴露后，远程操作的
+  POST 被 loopback/origin gate 拒绝（"non-loopback host rejected"）。
+  修复：POST gate 信任来自本机 transport 的转发（TCP 源 127.0.0.1，
+  portal 认证已在 transport 完成；TCP 源不可伪造），CSRF token 双保险保留；
+  `sts ui --ui-host <host>` 作为非 transport 部署的显式补充。
+- **fix(ui): 嵌套 <style> 标签导致 CSS 解析截断**——CSS 常量自带
+  <style>...</style> 且 SHELL 模板又包一层 → :root 变量规则被吞 →
+  --panel/--border 解析为空 → 暴露详情弹窗透明（"遮罩把弹窗也遮了"）。
+  去掉内层标签（真机 headless 浏览器验证：modal 背景 rgb(255,255,255)）。
+- **fix(tools): Windows 杀软隔离的准确提示**——真机诊断：bore.exe 下载/
+  解压/magic 全部正确，但被 Defender 判风险软件隔离（ThreatID 2147939874），
+  spawn UNKNOWN/0xc000007b。verify 失败时按 spawn 错误类型区分提示：
+  UNKNOWN → "被杀软隔离，从保护历史恢复或加排除后重试"（不自动改杀软策略，
+  避免连带标记）；非 UNKNOWN（精简系统缺 UCRT）→ 自动装 VC++ Redistributable
+  后重试一次。
 - **feat(portmap): 动态端口穿透第三种暴露模式（mode="portmap"）**——外网访问不再
   依赖隧道/反向代理，直接在路由器上开动态端口映射（docs/portmap-analysis.md）。
   - 三后端：UPnP IGD（SSDP 组播+单播双通道探测、AddPortMapping、718 冲突重试）、

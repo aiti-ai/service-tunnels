@@ -388,8 +388,11 @@ if (path === "/api/ssh-keys" && req.method === "POST") {
 }
 
 // ── settings ───────────────────────────────────────────────────────
+// 进行中的工具下载（并发去重：同名 ensure 同时跑会导致 npm/下载缓存冲突）
+const toolsEnsuring = new Set<string>();
+
 if (path === "/api/tools-ensure" && req.method === "POST") {
-  // 下载缺失工具（长耗时——HTTP 层无超时限制，前端轮询状态刷新）。
+  // 下载缺失工具（长耗时——HTTP 层无超时限制，前端按钮在完成前保持禁用）。
   // allowDownload 关闭时拒绝（与 expose 的下载门控一致）。
   if (!ctx.st.tools.allowDownload()) {
     json(res, 403, { error: "on-demand downloads are disabled — enable 'Allow on-demand tool downloads' first" });
@@ -401,11 +404,18 @@ if (path === "/api/tools-ensure" && req.method === "POST") {
     json(res, 400, { error: `unknown tool: ${name || "(empty)"}` });
     return true;
   }
+  if (toolsEnsuring.has(name)) {
+    json(res, 409, { error: `${name} download already in progress` });
+    return true;
+  }
+  toolsEnsuring.add(name);
   try {
-    const path = await ctx.st.tools.ensure(name);
-    json(res, 200, { ok: true, name, path: path ?? null });
+    const toolPath = await ctx.st.tools.ensure(name);
+    json(res, 200, { ok: true, name, path: toolPath ?? null });
   } catch (err) {
     json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    toolsEnsuring.delete(name);
   }
   return true;
 }
