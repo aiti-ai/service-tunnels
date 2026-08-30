@@ -10,7 +10,7 @@
  * 年停更）、iptables2@0.2.0（同样陈旧）、nftables-napi（native binding，
  * 违背零依赖约定）。自实现（~150 行）符合项目约定。
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 
 export type FirewallBackend = "ufw" | "firewalld" | "iptables" | "pfctl" | "windows" | "none" | "unsupported";
 
@@ -101,6 +101,43 @@ export async function detectFirewall(): Promise<FirewallBackend> {
   return "none";
 }
 
+/**
+ * 是否有交互式桌面（Windows：explorer.exe 在跑 = 有登录用户桌面；服务/无头会话无）。
+ * 用于日志/降级决策：有桌面 → 用户可手动处理；无桌面（服务运行）→ 静默降级，
+ * 不尝试任何会弹 UAC 的路径（execFile 直接调 netsh 本来就不弹——仅 ShellExecute
+ * runas 会弹，本实现不走该路径）。
+ */
+export async function hasDesktop(): Promise<boolean> {
+  if (process.platform === "win32") {
+    // 关键：进程自身能否与桌面交互（能被 UAC 弹窗）——不是"系统有没有 explorer"。
+    // [Environment]::UserInteractive 是 .NET 标准：检查进程的 window station
+    // 是否为 WinSta0。服务（session 0）/SSH/计划任务启动的进程 → False，即使
+    // 同一台机器有别人 RDP 登录的桌面（explorer.exe 在跑）——那是别人的会话。
+    const r = await run(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", "[Environment]::UserInteractive"],
+      5000,
+    );
+    return r.ok && /True/i.test(r.stdout);
+  }
+  // POSIX：服务（systemd/launchd）无 DISPLAY；有 X/Wayland 会话才视为可交互
+  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+}
+
+/**
+ * 异步发起防火墙命令（fire-and-forget）：spawn + unref，立即返回不阻塞。
+ * 用户语义："开了就行"——规则最终生效由 checkFirewall 兜底（下次操作验证）。
+ * sudo 场景：命令带 sudo -n（非交互，绝不挂起等密码）。
+ */
+function fireAsync(cmd: string, args: string[], sudo = false): void {
+  const realCmd = sudo ? "sudo" : cmd;
+  const realArgs = sudo ? ["-n", ...(cmd ? [cmd, ...args] : args)] : args;
+  try {
+    const child = spawn(realCmd, realArgs, { stdio: "ignore", windowsHide: true, detached: process.platform !== "win32" });
+    child.unref();
+  } catch { /* best effort — checkFirewall 兜底 */ }
+}
+
 /** 检查 `ip:port`（入站，任意源）是否已被本机防火墙放行。 */
 export async function checkFirewall(ip: string, port: number, backend?: FirewallBackend): Promise<FirewallCheck> {
   const b = backend ?? (await detectFirewall());
@@ -174,67 +211,41 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
 
   // 命令解析一次（ufw/iptables 可能在 /usr/sbin，普通用户 PATH 不含）
   const bin = await resolveCmd(b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? "iptables" : "pfctl");
-  if (b === "windows") {
-    // 添加规则（规则名 = service-tunnels:<port>，dir=in + TCP + localport）——
-    // 需要管理员权限（UAC 提权后的进程）；失败给出手动命令。
-    const r = await run(
-      "netsh",
-      ["advfirewall", "firewall", "add", "rule", `name=service-tunnels:${port}`, "dir=in", "action=allow", "protocol=TCP", `localport=${port}`],
-      10_000,
-    );
-    if (r.ok) return { backend: "windows", ensured: true, detail: `netsh rule service-tunnels:${port}` };
-    return {
-      backend: "windows",
-      ensured: false,
-      detail: `netsh add rule failed (needs admin): ${(r.stderr || r.stdout).trim() || `run as administrator — netsh advfirewall firewall add rule name="service-tunnels:${port}" dir=in action=allow protocol=TCP localport=${port}`}`,
-    };
-  }
-  const tryRun = async (args: string[], sudo = false): Promise<{ ok: boolean; stderr: string }> => {
-    // sudo 一律 -n 非交互：未配 passwordless sudo 时立即失败，绝不挂起等密码。
-    const r = sudo ? await sudoRun(args) : await run(args[0]!, args.slice(1));
-    return { ok: r.ok, stderr: r.stderr };
-  };
-  const full = (args: string[]) => (bin ? [bin, ...args] : args);
-  // 一次探测 passwordless sudo（-n true）；false 时直接给手动命令，不再反复试。
+  // 一次探测 passwordless sudo（-n true）；false 时直接给手动命令。
   const sudoAvailable = (await sudoRun(["true"])).ok;
 
+  // 所有后端统一异步 fire-and-forget：spawn 发起即返回（不阻塞 expose 流程），
+  // 规则最终生效由 checkFirewall 兜底。非 admin/sudo 不可用时命令会失败——
+  // 不弹 UAC（spawn 不走 ShellExecute runas），服务场景（无桌面）也安全。
+  const desktop = await hasDesktop();
+  const desktopNote = desktop ? "desktop: yes" : "desktop: no — service mode, no interactive prompt";
+
+  if (b === "windows") {
+    const addArgs = ["advfirewall", "firewall", "add", "rule", `name=service-tunnels:${port}`, "dir=in", "action=allow", "protocol=TCP", `localport=${port}`];
+    fireAsync("netsh", addArgs);
+    return {
+      backend: "windows",
+      ensured: true,
+      detail: `netsh add rule dispatched async (${desktopNote}) — verify with checkFirewall; manual: netsh advfirewall firewall add rule name="service-tunnels:${port}" dir=in action=allow protocol=TCP localport=${port}`,
+    };
+  }
+  // root（uid 0）不需要 sudo；非 root 且 passwordless sudo 可用才加 -n
+  const needSudo = process.platform !== "win32" && process.getuid?.() !== 0 && sudoAvailable;
   if (b === "ufw") {
-    const direct = await tryRun(full(["allow", "in", "to", ip, "port", String(port), "proto", "tcp"]));
-    if (direct.ok) return { backend: "ufw", ensured: true, detail: `ufw allow in to ${ip} port ${port}` };
-    // 权限不足 → passwordless sudo 可用则自动放行；否则报错给手动命令
-    if (sudoAvailable) {
-      const sudoRun = await tryRun(full(["allow", "in", "to", ip, "port", String(port), "proto", "tcp"]), true);
-      if (sudoRun.ok) return { backend: "ufw", ensured: true, detail: `sudo ufw allow in to ${ip} port ${port}` };
-    }
-    return { backend: "ufw", ensured: false, detail: `ufw blocked and no passwordless sudo (run manually: sudo ufw allow in to ${ip} port ${port} proto tcp): ${direct.stderr.trim()}` };
+    const args = ["allow", "in", "to", ip, "port", String(port), "proto", "tcp"];
+    fireAsync(bin ?? "ufw", args, needSudo);
+    return { backend: "ufw", ensured: true, detail: `ufw allow dispatched async (${desktopNote}); manual: sudo ufw allow in to ${ip} port ${port} proto tcp` };
   }
   if (b === "firewalld") {
-    // zone 维度放行端口（firewalld 不绑 IP——比 ufw 宽，但 transport 只监听本机，
-    // 外部源到 本机IP:port 即可达）。永久规则 + reload 才真正落盘。
-    const perm = await tryRun(full(["--permanent", `--add-port=${port}/tcp`]));
-    if (perm.ok) {
-      const reload = await tryRun(full(["--reload"]));
-      if (reload.ok) return { backend: "firewalld", ensured: true, detail: `firewall-cmd --permanent --add-port=${port}/tcp` };
-      return { backend: "firewalld", ensured: false, detail: `firewalld add ok but reload failed: ${reload.stderr.trim() || "run firewall-cmd --reload"}` };
-    }
-    if (sudoAvailable) {
-      const sudoPerm = await tryRun(full(["--permanent", `--add-port=${port}/tcp`]), true);
-      if (sudoPerm.ok) {
-        const sudoReload = await tryRun(full(["--reload"]), true);
-        if (sudoReload.ok) return { backend: "firewalld", ensured: true, detail: `sudo firewall-cmd --permanent --add-port=${port}/tcp` };
-      }
-    }
-    return { backend: "firewalld", ensured: false, detail: `firewalld blocked and no passwordless sudo (run manually: sudo firewall-cmd --permanent --add-port=${port}/tcp && sudo firewall-cmd --reload): ${perm.stderr.trim()}` };
+    const args = ["--permanent", `--add-port=${port}/tcp`];
+    fireAsync(bin ?? "firewall-cmd", args, needSudo);
+    fireAsync(bin ?? "firewall-cmd", ["--reload"], needSudo);
+    return { backend: "firewalld", ensured: true, detail: `firewall-cmd --permanent --add-port=${port}/tcp + reload dispatched async (${desktopNote})` };
   }
   if (b === "iptables") {
-    const args = full(["-I", "INPUT", "1", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT", "-m", "comment", "--comment", `service-tunnels:${port}`]);
-    const direct = await tryRun(args);
-    if (direct.ok) return { backend: "iptables", ensured: true, detail: `iptables ACCEPT ${port}` };
-    if (sudoAvailable) {
-      const sudoRun = await tryRun(args, true);
-      if (sudoRun.ok) return { backend: "iptables", ensured: true, detail: `sudo iptables ACCEPT ${port}` };
-    }
-    return { backend: "iptables", ensured: false, detail: `iptables blocked and no passwordless sudo (run manually: sudo iptables -I INPUT 1 -p tcp --dport ${port} -j ACCEPT): ${direct.stderr.trim()}` };
+    const args = ["-I", "INPUT", "1", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT", "-m", "comment", "--comment", `service-tunnels:${port}`];
+    fireAsync(bin ?? "iptables", args, needSudo);
+    return { backend: "iptables", ensured: true, detail: `iptables ACCEPT ${port} dispatched async (${desktopNote}); manual: sudo iptables -I INPUT 1 -p tcp --dport ${port} -j ACCEPT` };
   }
   if (b === "pfctl") {
     return { backend: "pfctl", ensured: false, detail: "macOS pf: manual rule required (pf.conf anchor)" };
@@ -245,7 +256,7 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
 /** 删除放行规则（stop 映射时清理本次添加的规则；只删不报错——best effort）。 */
 export async function removeFirewall(ip: string, port: number, backend?: FirewallBackend): Promise<void> {
   const b = backend ?? (await detectFirewall());
-  const bin = await resolveCmd(b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? "iptables" : "pfctl");
+  const bin = await resolveCmd(b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? "iptables" : b === "windows" ? "netsh" : "pfctl");
   if (!bin) return;
   // 注意：sudo 重置 PATH（secure_path）——sudo 分支必须用命令名而非解析出的
   // 绝对路径，否则测试的 PATH 注入 fake 无效、真机上也找不到非标准路径。
@@ -271,8 +282,13 @@ export async function removeFirewall(ip: string, port: number, backend?: Firewal
     if (sudoOk) await tryRun(args, true);
     else await tryRun(args);
   } else if (b === "windows") {
-    try {
-      await run("netsh", ["advfirewall", "firewall", "delete", "rule", `name=service-tunnels:${port}`], 10_000);
-    } catch { /* best effort */ }
+    // 删除重试 2 次：异步 add（fire-and-forget）可能晚于 delete 完成——删了又被
+    // 加回。重试 + 间隔消除该竞态（stop 路径不要求即时，可稍等）。
+    for (let i = 0; i < 2; i++) {
+      try {
+        await run("netsh", ["advfirewall", "firewall", "delete", "rule", `name=service-tunnels:${port}`], 10_000);
+      } catch { /* best effort */ }
+      if (i === 0) await new Promise((r) => setTimeout(r, 500));
+    }
   }
 }

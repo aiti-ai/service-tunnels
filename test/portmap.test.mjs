@@ -9,6 +9,16 @@ import { ensurePortmap, PortmapUnavailableError, SshRouterBackend } from "../src
 
 /** POSIX fake 命令（仅 Linux/macOS 的 ufw/firewalld/iptables 后端测试用——这些后端
  *  在 Windows 不存在，对应测试已平台门控 skip）。 */
+/** 等待异步命令落地（fire-and-forget 后轮询，最多 3s）。 */
+async function waitFor(cond, label, timeoutMs = 3000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    if (await cond()) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`timeout waiting for ${label}`);
+}
+
 async function writeFake(dir, name, shBody) {
   const { writeFileSync, chmodSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -578,6 +588,9 @@ test("firewall: iptables open sequence (check → insert ACCEPT, comment tag)", 
   const { join } = await import("node:path");
   const { checkFirewall, openFirewall } = await import("../src/portmap/firewall.ts");
   const dir = mkdtempSync(join(tmpdir(), "st-fw-ipt-"));
+  // fake sudo 阻断 passwordless（否则 fireAsync 走 sudo -n fake，sudo 的 secure_path
+  // 找不到 /tmp 下的 fake → 命令静默失败）
+  await writeFake(dir, "sudo", `exit 1`);
   const fake = await writeFake(dir, "iptables",
     `case "$1" in
   -C) [ -f "${dir}/opened" ] && exit 0 || exit 1 ;;
@@ -591,8 +604,13 @@ exit 0`);
     assert.equal(c1.allowed, false);
     const o = await openFirewall("192.168.1.50", 4180, "iptables");
     assert.equal(o.ensured, true);
-    const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
-    assert.match(log, /-I INPUT 1 -p tcp --dport 4180 -j ACCEPT -m comment --comment service-tunnels:4180/);
+    // 异步 fire-and-forget：轮询等命令落地
+    await waitFor(async () => {
+      try {
+        const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
+        return /-I INPUT 1 -p tcp --dport 4180 -j ACCEPT -m comment --comment service-tunnels:4180/.test(log);
+      } catch { return false; }
+    }, "iptables -I dispatched");
     const c2 = await checkFirewall("192.168.1.50", 4180, "iptables");
     assert.equal(c2.allowed, true);
   } finally {
@@ -611,8 +629,8 @@ test("firewall: firewalld open sequence (query → permanent add → reload) + i
 
   const dir = mkdtempSync(join(tmpdir(), "st-fw-"));
   const calls = [];
+  await writeFake(dir, "sudo", `exit 1`);
   // fake firewall-cmd: 记录调用；query-port 先 no 后 yes（第一次 open 后变 allowed）
-  let opened = false;
   const fake = await writeFake(dir, "firewall-cmd",
     `case "$1" in
   --query-port=*)
@@ -632,6 +650,13 @@ esac`);
     const openedRes = await openFirewall("192.168.1.50", 4180, "firewalld");
     assert.equal(openedRes.ensured, true);
     assert.match(openedRes.detail, /--add-port=4180\/tcp/);
+    // 异步 fire-and-forget：轮询等 permanent add + reload 落地
+    await waitFor(async () => {
+      try {
+        const l = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
+        return l.includes("--permanent --add-port=4180/tcp") && l.includes("--reload");
+      } catch { return false; }
+    }, "firewalld add+reload dispatched");
     // 命令序列
     const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
     const lines = log.trim().split("\n");
@@ -658,6 +683,7 @@ test("firewall: ufw detect + open sequence (allow in to ip port)", { skip: proce
 
   const dir = mkdtempSync(join(tmpdir(), "st-fw-ufw-"));
   const calls = [];
+  await writeFake(dir, "sudo", `exit 1`);
   const fake = await writeFake(dir, "ufw",
     `case "$1" in
   status) exit 0 ;;   # 无规则 → blocked
@@ -671,6 +697,13 @@ exit 0`);
     assert.equal(check1.allowed, false);
     const opened = await openFirewall("192.168.1.50", 4180, "ufw");
     assert.equal(opened.ensured, true);
+    // 异步 fire-and-forget：轮询等 allow 落地
+    await waitFor(async () => {
+      try {
+        const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
+        return /allow in to 192\.168\.1\.50 port 4180 proto tcp/.test(log);
+      } catch { return false; }
+    }, "ufw allow dispatched");
     const log = await import("node:fs").then((f) => f.readFileSync(join(dir, "calls.log"), "utf8"));
     assert.match(log, /allow in to 192\.168\.1\.50 port 4180 proto tcp/);
   } finally {
