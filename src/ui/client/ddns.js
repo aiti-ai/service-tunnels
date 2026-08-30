@@ -44,12 +44,17 @@ async function renderDdns(){
       +'<table><tbody>'
       +entries.map((e,i)=>'<tr><td class="mono">'+esc(e.name)+'</td>'
         +'<td>'+esc(e.kind||'')+'</td>'
-        +'<td>profile: '+esc(e.profile||e.providerProfile||'-')+'</td>'
+        +'<td>'+(e.profile?'profile: '+esc(e.profile):(e.provider?'provider: '+esc(e.provider):(e.providerProfile?'pp: '+esc(e.providerProfile):'-')))+'</td>'
+        +'<td>'+(e.zone?esc(e.zone):'-')+'</td>'
+        +'<td class="mono">'+esc(e.record||'-')+'</td>'
+        +'<td class="mono">txt: '+esc(e.txtName||'-')+'</td>'
         +'<td>follow: '+esc(e.followTunnel||'-')+'</td>'
         +'<td>'+(e.ip?'A ':'')+(e.txt?'TXT(ip:port) ':'')+(e.cname?'CNAME ':'')+(e.txtUrl?'TXT(url) ':'')+'</td>'
         +'<td><button data-del-entry="'+i+'">删除</button></td></tr>').join('')
       +'</tbody></table>'
-      +'<div style="margin-top:6px"><input id="ddns-e-name" placeholder="条目名" style="width:90px"> '
+      // 添加表单：profile 引用（快捷）
+      +'<div class="section-label" style="margin-top:10px">添加（profile 引用）</div>'
+      +'<div style="margin-top:4px"><input id="ddns-e-name" placeholder="条目名" style="width:90px"> '
       +'<input id="ddns-e-profile" placeholder="profile" style="width:100px"> '
       +'<select id="ddns-e-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option></select> '
       +'<input id="ddns-e-follow" placeholder="followTunnel" style="width:110px"> '
@@ -57,7 +62,22 @@ async function renderDdns(){
       +'<label><input type="checkbox" id="ddns-e-txturl"> TXT(url)</label> '
       +'<label><input type="checkbox" id="ddns-e-ip"> A</label> '
       +'<label><input type="checkbox" id="ddns-e-txt"> TXT(ip:port)</label> '
-      +'<button id="ddns-e-add">+ 添加</button></div></div>';
+      +'<button id="ddns-e-add">+ 添加</button></div>'
+      // 添加表单：完整信息直填（不依赖 profile）
+      +'<div class="section-label" style="margin-top:10px">添加（完整信息，单独注册）</div>'
+      +'<div style="margin-top:4px"><input id="ddns-e2-name" placeholder="条目名" style="width:90px"> '
+      +'<input id="ddns-e2-provider" placeholder="provider" style="width:110px"> '
+      +'<input id="ddns-e2-token" type="password" placeholder="token" style="width:140px"> '
+      +'<input id="ddns-e2-zone" placeholder="zone" style="width:130px"> '
+      +'<input id="ddns-e2-record" placeholder="record" style="width:140px"> '
+      +'<input id="ddns-e2-txtname" placeholder="txtName" style="width:130px"> '
+      +'<select id="ddns-e2-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option></select> '
+      +'<input id="ddns-e2-follow" placeholder="followTunnel" style="width:110px"> '
+      +'<label><input type="checkbox" id="ddns-e2-cname"> CNAME</label> '
+      +'<label><input type="checkbox" id="ddns-e2-txturl"> TXT(url)</label> '
+      +'<label><input type="checkbox" id="ddns-e2-ip"> A</label> '
+      +'<label><input type="checkbox" id="ddns-e2-txt"> TXT(ip:port)</label> '
+      +'<button id="ddns-e2-add">+ 添加</button></div></div>';
     c.innerHTML=h;
 
     c.querySelectorAll('[data-del-pp]').forEach((b)=>b.onclick=async()=>{
@@ -95,6 +115,23 @@ async function renderDdns(){
         txtUrl:document.getElementById('ddns-e-txturl').checked,
         ip:document.getElementById('ddns-e-ip').checked,
         txt:document.getElementById('ddns-e-txt').checked,
+      });
+      await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
+    };
+    document.getElementById('ddns-e2-add').onclick=async()=>{
+      entries.push({
+        name:document.getElementById('ddns-e2-name').value,
+        provider:document.getElementById('ddns-e2-provider').value||undefined,
+        token:document.getElementById('ddns-e2-token').value||undefined,
+        zone:document.getElementById('ddns-e2-zone').value||undefined,
+        record:document.getElementById('ddns-e2-record').value||undefined,
+        txtName:document.getElementById('ddns-e2-txtname').value||undefined,
+        kind:document.getElementById('ddns-e2-kind').value,
+        followTunnel:document.getElementById('ddns-e2-follow').value||undefined,
+        cname:document.getElementById('ddns-e2-cname').checked,
+        txtUrl:document.getElementById('ddns-e2-txturl').checked,
+        ip:document.getElementById('ddns-e2-ip').checked,
+        txt:document.getElementById('ddns-e2-txt').checked,
       });
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
     };

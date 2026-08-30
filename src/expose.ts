@@ -170,6 +170,35 @@ export interface ExposeOptions {
   providerParams?: Record<string, unknown>;
   /** When true, skip the port ownership check (allow tunneling other users' ports). */
   force?: boolean;
+  /** DDNS registration bound to this expose (dimension 2): when the port is
+   *  exposed via portmap or tunnel, the outcome (external IP / tunnel URL)
+   *  is registered to DNS records automatically. `profile` references a
+   *  ddns.json profile (provider + domain target); actions select which
+   *  records to write. */
+  ddns?: {
+    /** Profile name (ddns.json profiles) or providerProfile name. */
+    profile?: string;
+    providerProfile?: string;
+    /** Inline provider config (when not using a profile). */
+    provider?: string;
+    token?: string;
+    secret?: string;
+    accessKeyId?: string;
+    zoneId?: string;
+    username?: string;
+    password?: string;
+    zone?: string;
+    record?: string;
+    txtName?: string;
+    /** portmap: register external IP as A record. */
+    ip?: boolean;
+    /** portmap: register "ip:port" as TXT. */
+    txt?: boolean;
+    /** tunnel: register URL host as CNAME. */
+    cname?: boolean;
+    /** tunnel: register full URL as TXT. */
+    txtUrl?: boolean;
+  };
   /** mode "portmap" options (docs/portmap-analysis.md §4.2). */
   portmap?: {
     method?: "auto" | "upnp" | "pcp" | "ssh-router";
@@ -207,6 +236,12 @@ export interface ExposeResult {
   error?: string;
   /** Mode used ("tunnel" | "proxy" | "both" | "portmap"). */
   mode?: "tunnel" | "proxy" | "both" | "portmap";
+  /** DDNS registration result for this expose (dimension 2): what was
+   *  registered after the port/tunnel came up. */
+  ddns?: {
+    profile?: string;
+    actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }>;
+  };
   /** Router mapping details when mode === "portmap". */
   portmap?: {
     backend: "upnp" | "pcp" | "ssh-router";

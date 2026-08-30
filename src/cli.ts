@@ -92,6 +92,7 @@ interface CliArgs {
   txt?: boolean;
   cname?: boolean;
   txtUrl?: boolean;
+  ddnsProfile?: string;
   cmd?: string;
   /** --set key=value (tunnel params, validated against the type schema). */
   sets?: Record<string, string>;
@@ -281,6 +282,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--txt-url":
         args.txtUrl = true;
+        break;
+      case "--ddns-profile":
+        args.ddnsProfile = argv[++i];
         break;
       case "--set":
         addSet(args, "sets", argv[++i]);
@@ -975,6 +979,9 @@ async function main(): Promise<void> {
         tunnelParams,
         providerParams,
         ...(portmapParams ? { portmap: portmapParams } : {}),
+        ...(args.ddnsProfile || args.ip || args.txt || args.cname || args.txtUrl
+          ? { ddns: { profile: args.ddnsProfile, ip: args.ip, txt: args.txt, cname: args.cname, txtUrl: args.txtUrl } }
+          : {}),
         sshGateway: args.sshGateway,
         force: args.force,
         allowToolDownload: args.allowToolDownload,

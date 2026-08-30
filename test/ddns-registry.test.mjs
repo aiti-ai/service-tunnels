@@ -186,3 +186,80 @@ test("legacy plain array config reads as empty registry (no entries)", async () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("expose-bound ddns: portmap + ddns option registers A/TXT and exposes record carries it", async () => {
+  // createServiceTunnels with a ddns.json profile + expose(port, {mode:portmap, ddns})
+  const { createServiceTunnels } = await import("../src/index.ts");
+  const { startCloudflareMock } = await import("ddns/src/mocks/cloudflare.ts");
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { createServer } = await import("node:http");
+
+  const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
+  const zoneId = [...mock.state.zones.values()][0].id;
+
+  // fake UPnP IGD (portmap backend)
+  const igd = await new Promise((resolve) => {
+    const mappings = new Map();
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "text/xml" });
+        const action = /<m:([A-Za-z]+)>/.exec(body)?.[1] ?? "";
+        if (action === "AddPortMapping") {
+          const port = Number(/<NewExternalPort>(\d+)<\/NewExternalPort>/.exec(body)?.[1] ?? 0);
+          mappings.set(port, { internalPort: Number(/<NewInternalPort>(\d+)<\/NewInternalPort>/.exec(body)?.[1] ?? 0) });
+          res.end(`<u:AddPortMappingResponse xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1"></u:AddPortMappingResponse>`);
+        } else {
+          res.end(`<u:${action}Response xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1"><NewExternalIPAddress>203.0.113.7</NewExternalIPAddress></u:${action}Response>`);
+        }
+      });
+    });
+    server.listen(0, "127.0.0.1", () => resolve({ server, mappings, port: server.address().port }));
+  });
+
+  const base = mkdtempSync(join(tmpdir(), "st-ddns-exp-"));
+  mkdirSync(join(base, "config"));
+  writeFileSync(join(base, "config", "ddns.json"), JSON.stringify({
+    providerProfiles: { cf: { provider: "cloudflare", token: "tk", zoneId, baseUrl: mock.url } },
+    profiles: { home: { providerProfile: "cf", zone: "example.com", record: "home.example.com", txtName: "home-txt.example.com" } },
+    entries: [],
+  }));
+
+  const app = createServer((_q, r) => { r.writeHead(200); r.end("ok"); });
+  await new Promise((r) => app.listen(0, "127.0.0.1", r));
+  const appPort = app.address().port;
+
+  try {
+    const st = createServiceTunnels({ configDir: join(base, "config"), cacheDir: join(base, "cache"), guardian: false });
+    const r = await st.auth.expose(appPort, {
+      mode: "portmap", auth: false, allowAuthNone: true, force: true,
+      portmap: { method: "upnp", gateway: "127.0.0.1", controlUrl: `http://127.0.0.1:${igd.port}/ctl/IPConn`, leaseSeconds: 600, ssdpTimeoutMs: 200 },
+      ddns: { profile: "home", ip: true, txt: true },
+    });
+    assert.equal(r.mode, "portmap");
+    // wait for the async registration
+    await new Promise((res2) => setTimeout(res2, 800));
+    const records = mock.state.zones.get("example.com").records;
+    assert.ok(records.some((x) => x.type === "A" && x.content === "203.0.113.7"), "A record registered");
+    assert.ok(records.some((x) => x.type === "TXT" && x.content === "203.0.113.7:" + r.portmap.externalPort), "TXT ip:port registered");
+    // exposes record carries ddns info
+    const ex = st.exposes().find((e) => e.port === appPort && e.mode === "portmap");
+    assert.ok(ex, "expose recorded");
+    // ddns actions may be written back async — poll briefly
+    let ddnsSeen = false;
+    for (let i = 0; i < 20 && !ddnsSeen; i++) {
+      const cur = st.exposes().find((e) => e.port === appPort && e.mode === "portmap");
+      if (cur?.ddns?.actions?.length) ddnsSeen = true;
+      await new Promise((res2) => setTimeout(res2, 100));
+    }
+    assert.ok(ddnsSeen, "exposes record shows ddns actions");
+  } finally {
+    await new Promise((r) => app.close(r));
+    await new Promise((r) => igd.server.close(r));
+    await mock.stop();
+    rmSync(base, { recursive: true, force: true });
+  }
+});

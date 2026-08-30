@@ -664,6 +664,60 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     log: () => {},
   });
   // In-memory record of exposes made in THIS process lifecycle
+/** Register a portmap/tunnel outcome from an expose's own ddns option.
+ *  Resolves the profile/inline config and writes the records directly
+ *  (no entry-matching — the expose itself IS the binding). */
+async function registerExposeDdns(
+  ddns: NonNullable<ExposeOptions["ddns"]>,
+  info: { kind: "portmap" | "tunnel"; externalIp?: string; externalPort?: number; url?: string },
+): Promise<{ name: string; actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> } | null> {
+  const { readRegistryConfig, resolveEntry, urlHost } = await import("./ddns-registry.ts");
+  const { setBeacon, upsertRecord } = await import("ddns");
+  const cfg = readRegistryConfig(dirs.configDir);
+  const entry: RegistrationEntry = {
+    name: ddns.profile ?? ddns.providerProfile ?? "expose",
+    profile: ddns.profile,
+    providerProfile: ddns.providerProfile,
+    provider: ddns.provider,
+    token: ddns.token,
+    secret: ddns.secret,
+    accessKeyId: ddns.accessKeyId,
+    zoneId: ddns.zoneId,
+    username: ddns.username,
+    password: ddns.password,
+    zone: ddns.zone,
+    record: ddns.record,
+    txtName: ddns.txtName,
+    kind: info.kind,
+  };
+  const resolved = resolveEntry(cfg, entry);
+  if (!resolved) {
+    return { name: "expose", actions: [{ type: "A", name: "?", value: "", ok: false, error: "unresolved ddns profile (check profile/providerProfile/zone)" }] };
+  }
+  const actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> = [];
+  const provider = resolved.provider as never;
+  const zone = resolved.zone;
+  const base = resolved.record || `${entry.name}.${zone}`;
+  const doWrite = async (type: "A" | "CNAME" | "TXT", name: string, value: string) => {
+    try {
+      if (type === "A") await upsertRecord(provider, zone, { type: "A", name, value });
+      else await setBeacon({ provider, zone, name, type, value });
+      actions.push({ type, name, value, ok: true });
+    } catch (err) {
+      actions.push({ type, name, value, ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  if (info.kind === "portmap" && info.externalIp) {
+    if (ddns.ip) await doWrite("A", base, info.externalIp);
+    if (ddns.txt) await doWrite("TXT", resolved.txtName || base, `${info.externalIp}:${info.externalPort}`);
+  }
+  if (info.kind === "tunnel" && info.url) {
+    if (ddns.cname) await doWrite("CNAME", base, urlHost(info.url));
+    if (ddns.txtUrl) await doWrite("TXT", resolved.txtName || base, info.url);
+  }
+  return { name: ddns.profile ?? ddns.providerProfile ?? "expose", actions };
+}
+
 const authExposeFn = async (port: number, o: Omit<ExposeOptions, "port"> = {}) => {
 // per-call false tightens; per-call true can't loosen the instance/
 // env/config ban (sticky) — exposeFlow re-resolves with env+config
@@ -730,29 +784,46 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   portmap: r.portmap,
   startedAt: Date.now(),
   });
-  // DDNS dimension 2: portmap registration — router mapping established →
-  // entries with kind:"portmap" register external IP (A) and ip:port (TXT)
-  // automatically. Re-runs on every expose (restarts re-register).
-  if (r.mode === "portmap" && r.portmap?.externalIp) {
-    void registerPortmap(ddnsRegistryCfg, {
-      externalIp: r.portmap.externalIp,
-      externalPort: r.portmap.externalPort,
-      label: r.label,
-    }).then((rs) => {
-      for (const reg of rs) {
-        for (const a of reg.actions) {
-          if (!a.ok) console.error(`[ddns] ${reg.name} ${a.type} ${a.name} failed: ${a.error}`);
-          else console.error(`[ddns] ${reg.name} registered ${a.type} ${a.name} → ${a.value}`);
+  // DDNS dimension 2: registration bound to THIS expose — if the expose
+  // carries a `ddns` option (profile + actions), register the portmap or
+  // tunnel outcome to DNS records. Results are written back onto the
+  // exposes record so the UI shows what this port registered.
+  const ddnsOpt = o.ddns;
+  if (ddnsOpt && (r.mode === "portmap" || r.url)) {
+    void (async () => {
+      try {
+        const res = ddnsOpt.profile || ddnsOpt.providerProfile || ddnsOpt.provider
+          ? await registerExposeDdns(ddnsOpt, {
+              kind: r.mode === "portmap" ? "portmap" : "tunnel",
+              externalIp: r.portmap?.externalIp,
+              externalPort: r.portmap?.externalPort,
+              url: r.url ?? undefined,
+            })
+          : null;
+        if (res?.actions?.length) {
+          // write back onto the exposes record (find by port+label)
+          for (const [k, v] of exposes) {
+            if (v.port === port && (v.label ?? "") === (o.label ?? "")) {
+              v.ddns = { profile: ddnsOpt.profile ?? ddnsOpt.providerProfile, actions: res.actions };
+              break;
+            }
+          }
+          for (const a of res.actions) {
+            if (!a.ok) console.error(`[ddns] ${res.name} ${a.type} ${a.name} failed: ${a.error}`);
+            else console.error(`[ddns] ${res.name} registered ${a.type} ${a.name} → ${a.value}`);
+          }
         }
+      } catch (err) {
+        console.error(`[ddns] registration error: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }).catch((err) => console.error(`[ddns] portmap registration error: ${err instanceof Error ? err.message : String(err)}`));
+    })();
   }
   return r;
 };
 
   // Exposes made in this process lifecycle (port + tunnel type + auth
   // provider + url), for display. Not persisted across restarts.
-  const exposes = new Map<string, { port: number; mode?: string; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; portmap?: { backend: string; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number }; startedAt?: number }>();
+  const exposes = new Map<string, { port: number; mode?: string; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; portmap?: { backend: string; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number }; ddns?: { profile?: string; actions: Array<{ type: string; name: string; value: string; ok: boolean; error?: string }> }; startedAt?: number }>();
 
   /** Unregister the gateway host an expose registered (so stopping one expose
    *  doesn't leave a stale nginx server block — localhost:PORT hosts would
@@ -1322,6 +1393,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           baseUrl: m.baseUrl,
           domainUrl: m.domainUrl,
           mode: m.mode ?? null,
+          ddns: m.ddns,
           portmap: m.portmap ?? null,
           startedAt: m.startedAt ?? null,
         };

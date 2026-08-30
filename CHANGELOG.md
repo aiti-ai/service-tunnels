@@ -1,3 +1,16 @@
+## 0.3.68 (2026-08-30)
+
+- **feat(ddns): DDNS 注册绑定到端口/tunnel（expose 级）**——`expose(port, {ddns})`
+  或 `st expose --ddns-profile <p> --ddns-ip/--ddns-txt/--ddns-cname/--ddns-txt-url`：
+  - portmap 建立 → 按该 expose 的 ddns 选项注册 A（externalIp）+ TXT（ip:port）；
+  - tunnel 拿到 URL → 注册 CNAME（host）+ TXT（完整 url）；
+  - exposes 记录携带 ddns 注册结果（UI 端口列表新增 DDNS 列：profile + 记录类型
+    ok/失败），写回 st.exposes() 与 /api/live；
+  - UI DDNS tab：Registration Entries 支持两种添加——profile 引用（快捷）与
+    完整信息直填（provider/token/zone/record/txtName，单独注册用）；
+  - 测试：expose-bound ddns 端到端（假 UPnP IGD + cloudflare mock → A/TXT 注册
+    + exposes 记录 ddns 回写）。
+
 ## 0.3.67 (2026-08-30)
 
 - **fix(ddns-audit): 深度审核修复**
