@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
 import { updateEntry, runOnce, startLoop } from "ddns";
 import { resolvePublicIp } from "ddns";
-import { setBeacon as ddnsSetBeacon, beaconValue } from "ddns";
+import { setBeacon as ddnsSetBeacon, beaconValue, providerMetas } from "ddns";
 import type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "ddns";
 
 export type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "ddns";
@@ -26,16 +26,23 @@ export type { ProviderName } from "ddns";
 // -- legacy aliases (pre-integration names; kept for callers) --------------
 
 export type DdnsProviderKind = string;
-/** All provider names known to the ddns engine. */
-export const DDNS_PROVIDERS: readonly string[] = [
+/** All provider names known to the ddns engine (dynamic from the ddns
+ *  package; static fallback keeps callers working even if the package
+ *  fails to enumerate). */
+export const DDNS_PROVIDERS: readonly string[] = (() => {
+  try {
+    const metas = providerMetas();
+    if (metas.length) return metas.map((m) => m.name);
+  } catch { /* fall through to static list */ }
+  return [
   "cloudflare", "dnspod", "aliyun", "duckdns", "custom", "freedns",
   "dreamhost", "dondominio", "netcup", "namesilo", "spaceship", "route53", "gcp",
   "namecheap", "dnsmadeeasy", "ultradns", "constellix", "dnsservices",
   "aurora", "cloudxns", "yandex", "gratisdns", "transip", "qcloud",
   "hostingde", "httpnet", "wedos", "nfsn", "yandexcloud", "valuedomain",
   "rackspace", "memset", "gehirn", "rcodezero", "devnomads", "misaka",
-  "dinahosting", "joker", "powerdns", "linode4", "zeit",
-];
+  "dinahosting", "joker", "powerdns", "linode4", "zeit"];
+})();
 
 /** Legacy config type = ddns package DdnsEntry. */
 export type DdnsRecordConfig = DdnsEntry;

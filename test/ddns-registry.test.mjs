@@ -138,9 +138,11 @@ test("registerTunnel: non-matching tunnel name ignored; providerProfile+inline w
   }
 });
 
-test("urlHost: strips scheme/path", () => {
+test("urlHost: strips scheme/path/port (CNAME-safe)", () => {
   assert.equal(urlHost("https://abc.trycloudflare.com/foo"), "abc.trycloudflare.com");
-  assert.equal(urlHost("http://localhost:8080/x"), "localhost:8080");
+  // CNAME values cannot carry a port — stripped
+  assert.equal(urlHost("http://localhost:8080/x"), "localhost");
+  assert.equal(urlHost("tcp://203.0.113.7:49152"), "203.0.113.7");
   assert.equal(urlHost("abc.trycloudflare.com"), "abc.trycloudflare.com");
 });
 

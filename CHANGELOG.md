@@ -1,3 +1,13 @@
+## 0.3.67 (2026-08-30)
+
+- **fix(ddns-audit): 深度审核修复**
+  - UI DDNS tab 添加按钮崩溃（`c.getElementById` 不存在 → `document.getElementById`）；
+  - CNAME 信标值去端口（tcp://host:port 的 CNAME 非法，urlHost 剥离端口）；
+  - DDNS_PROVIDERS 动态枚举（ddns 包 86 家，替代硬编码 42 家）；
+  - registerPortmap/Tunnel 未解析 profile 时结果带明确 error（不再静默）；
+  - portmap/tunnel 注册 promise 补 .catch（防 unhandled rejection）；
+  - registry 与 legacy beacon 双轨去重（同 tunnel 不重复注册）。
+
 ## 0.3.66 (2026-08-30)
 
 - **feat(ddns): 预配置体系 + 自动注册闭环（CLI + UI）**——ddns.json 支持

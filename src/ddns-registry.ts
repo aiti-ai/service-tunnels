@@ -178,7 +178,10 @@ export async function registerPortmap(
   for (const entry of cfg.entries ?? []) {
     if (entry.kind !== "portmap") continue;
     const resolved = resolveEntry(cfg, entry);
-    if (!resolved) continue;
+    if (!resolved) {
+      results.push({ name: entry.name, kind: "portmap", actions: [{ type: "A", name: entry.record ?? `${entry.name}.${entry.zone ?? "?"}`, value: "", ok: false, error: "unresolved profile/provider (check profile/providerProfile/zone)" }] });
+      continue;
+    }
     const actions: RegistrationResult["actions"] = [];
     if (entry.ip) {
       const name = resolved.record || `${entry.name}.${resolved.zone}`;
@@ -205,7 +208,10 @@ export async function registerTunnel(
   for (const entry of cfg.entries ?? []) {
     if (entry.kind !== "tunnel" || entry.followTunnel !== info.tunnelName) continue;
     const resolved = resolveEntry(cfg, entry);
-    if (!resolved) continue;
+    if (!resolved) {
+      results.push({ name: entry.name, kind: "tunnel", actions: [{ type: "CNAME", name: entry.record ?? `${entry.name}.${entry.zone ?? "?"}`, value: "", ok: false, error: "unresolved profile/provider (check profile/providerProfile/zone)" }] });
+      continue;
+    }
     const base = resolved.record || `${entry.name}.${resolved.zone}`;
     const actions: RegistrationResult["actions"] = [];
     if (entry.cname) {
@@ -223,12 +229,15 @@ export async function registerTunnel(
   return results;
 }
 
-/** Extract the host from a URL ("https://abc.trycloudflare.com/x" → host). */
+/** Extract the host from a URL ("https://abc.trycloudflare.com/x" → host).
+ *  CNAME values must be bare hostnames — a port (tcp://host:port, ssh -R)
+ *  is stripped because DNS CNAME cannot carry one. */
 export function urlHost(url: string): string {
   try {
-    return new URL(url).host;
+    const host = new URL(url).hostname;
+    return host || url;
   } catch {
-    return url.replace(/^https?:\/\//, "").split("/")[0] ?? url;
+    return (url.replace(/^https?:\/\//, "").split("/")[0] ?? url).split(":")[0] || url;
   }
 }
 

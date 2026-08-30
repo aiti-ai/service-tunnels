@@ -30,6 +30,10 @@ function usage(lang: Lang = "en"): void {
        --record <fqdn> --zone <z> [--token <t>] [--secret <s>] [--access-key-id <k>]
        [--ttl <n>] [--interval <sec>] | remove <name>
   ddns update [--name <n>] [--loop] | ip    # keep a stable name on a dynamic IP
+  ddns provider-profile-add <name> --provider <p> [--token <t>] [--secret <s>] [--zone-id <zid>]
+  ddns profile-add <name> --provider-profile <pp> --zone <z> [--record <r>] [--txt-name <tn>]
+  ddns entry-add <name> --profile <p>|(--provider-profile <pp> --zone <z>) --kind portmap|tunnel
+       [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url] | registry-list
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>

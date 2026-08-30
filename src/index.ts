@@ -540,7 +540,15 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   // automatically.
   const ddnsRegistryCfg = readRegistryConfig(dirs.configDir);
   const ddnsEntries = readDdnsConfigs(dirs.configDir);
-  const beacons = ddnsEntries.filter((e) => typeof (e as { followTunnel?: string }).followTunnel === "string");
+  // Legacy beacons: entries with `followTunnel` on a plain DdnsEntry. If the
+  // registry already has a kind:"tunnel" entry for the same tunnel, skip the
+  // legacy path (avoid double-registering the same record).
+  const registryTunnelNames = new Set(
+    (ddnsRegistryCfg.entries ?? []).filter((e) => e.kind === "tunnel" && e.followTunnel).map((e) => e.followTunnel!),
+  );
+  const beacons = ddnsEntries.filter(
+    (e) => typeof (e as { followTunnel?: string }).followTunnel === "string" && !registryTunnelNames.has((e as { followTunnel?: string }).followTunnel as string),
+  );
   const tm = new TunnelManager({
     cacheDir: dirs.cacheDir,
     resolveTool: async (name: string) => st_tools_ensure(name, toolOpts),
@@ -580,7 +588,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
                 else console.error(`[ddns] ${r.name} registered ${a.type} ${a.name} → ${a.value}`);
               }
             }
-          });
+          }).catch((err) => console.error(`[ddns] tunnel registration error: ${err instanceof Error ? err.message : String(err)}`));
         }
       }
     },
@@ -737,7 +745,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           else console.error(`[ddns] ${reg.name} registered ${a.type} ${a.name} → ${a.value}`);
         }
       }
-    });
+    }).catch((err) => console.error(`[ddns] portmap registration error: ${err instanceof Error ? err.message : String(err)}`));
   }
   return r;
 };

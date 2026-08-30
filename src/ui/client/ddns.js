@@ -69,32 +69,32 @@ async function renderDdns(){
     c.querySelectorAll('[data-del-entry]').forEach((b)=>b.onclick=async()=>{
       entries.splice(Number(b.dataset.delEntry),1); await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
     });
-    c.getElementById('ddns-pp-add').onclick=async()=>{
-      pps[c.getElementById('ddns-pp-name').value]={
-        provider:c.getElementById('ddns-pp-provider').value,
-        token:c.getElementById('ddns-pp-token').value,
+    document.getElementById('ddns-pp-add').onclick=async()=>{
+      pps[document.getElementById('ddns-pp-name').value]={
+        provider:document.getElementById('ddns-pp-provider').value,
+        token:document.getElementById('ddns-pp-token').value,
       };
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
     };
-    c.getElementById('ddns-pf-add').onclick=async()=>{
-      profs[c.getElementById('ddns-pf-name').value]={
-        providerProfile:c.getElementById('ddns-pf-pp').value,
-        zone:c.getElementById('ddns-pf-zone').value,
-        record:c.getElementById('ddns-pf-record').value||undefined,
-        txtName:c.getElementById('ddns-pf-txt').value||undefined,
+    document.getElementById('ddns-pf-add').onclick=async()=>{
+      profs[document.getElementById('ddns-pf-name').value]={
+        providerProfile:document.getElementById('ddns-pf-pp').value,
+        zone:document.getElementById('ddns-pf-zone').value,
+        record:document.getElementById('ddns-pf-record').value||undefined,
+        txtName:document.getElementById('ddns-pf-txt').value||undefined,
       };
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
     };
-    c.getElementById('ddns-e-add').onclick=async()=>{
+    document.getElementById('ddns-e-add').onclick=async()=>{
       entries.push({
-        name:c.getElementById('ddns-e-name').value,
-        profile:c.getElementById('ddns-e-profile').value||undefined,
-        kind:c.getElementById('ddns-e-kind').value,
-        followTunnel:c.getElementById('ddns-e-follow').value||undefined,
-        cname:c.getElementById('ddns-e-cname').checked,
-        txtUrl:c.getElementById('ddns-e-txturl').checked,
-        ip:c.getElementById('ddns-e-ip').checked,
-        txt:c.getElementById('ddns-e-txt').checked,
+        name:document.getElementById('ddns-e-name').value,
+        profile:document.getElementById('ddns-e-profile').value||undefined,
+        kind:document.getElementById('ddns-e-kind').value,
+        followTunnel:document.getElementById('ddns-e-follow').value||undefined,
+        cname:document.getElementById('ddns-e-cname').checked,
+        txtUrl:document.getElementById('ddns-e-txturl').checked,
+        ip:document.getElementById('ddns-e-ip').checked,
+        txt:document.getElementById('ddns-e-txt').checked,
       });
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
     };
