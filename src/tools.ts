@@ -1,5 +1,6 @@
 import {
   createWriteStream,
+  writeFileSync,
   existsSync,
   mkdirSync,
   chmodSync,
@@ -15,7 +16,7 @@ import {
 import { createRequire } from "module";
 import { execFileSync, spawnSync } from "child_process";
 import { platform, arch, tmpdir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { mkdtempSync } from "fs";
 // justget 打包进单文件（src/vendor/justget/justget.mjs，scripts/build-justget.mjs 生成）——
 // 消除裸导入链（node-fetch 等）：宿主扩展 vendored 时 jiti 从宿主上下文解析裸说明符会失败。
@@ -278,6 +279,31 @@ export async function downloadTo(
   }
 }
 
+/**
+ * Windows：确保 UCRT（api-ms-win-crt-*）可用。
+ * 精简/老系统缺这组 DLL 时，msvc 编译的工具（bore 等）spawn 报 UNKNOWN
+ * （0xc000007b）。检测缺失 → 静默安装 VC++ Redistributable（含 UCRT，
+ * 需管理员；服务场景无法弹 UAC → 安装失败给出手动指引）。
+ */
+let ucrtChecked = false; // 每进程只查/装一次
+export async function ensureWindowsUCRT(): Promise<void> {
+  if (platform() !== "win32" || ucrtChecked) return;
+  ucrtChecked = true;
+  try {
+    const sys32 = join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+    if (existsSync(join(sys32, "api-ms-win-crt-runtime-l1-1-0.dll"))) return; // UCRT 在
+    const installer = join(tmpdir(), "vc_redist.x64.exe");
+    // aka.ms 短链 302 → 最新 VC++ 2015-2022 redist（含 UCRT 引导）
+    const res = await fetch("https://aka.ms/vs/17/release/vc_redist.x64.exe", { redirect: "follow" });
+    if (!res.ok) return;
+    writeFileSync(installer, Buffer.from(await res.arrayBuffer()));
+    // 静默安装（需 admin；服务场景无 UAC → 失败即放弃，交手动）
+    execFileSync(installer, ["/install", "/quiet", "/norestart"], { stdio: "ignore", timeout: 300_000 });
+  } catch {
+    // best effort — 后续 verify 失败的错误信息会给手动安装指引
+  }
+}
+
 /** Extract .tar.gz (tar -xzf) or .zip (unzip/tar/PowerShell) into work. */
 export function extractInto(archive: string, work: string, kind: ToolKind): void {
   if (kind === "tar.gz") {
@@ -286,12 +312,24 @@ export function extractInto(archive: string, work: string, kind: ToolKind): void
   }
   if (kind === "zip") {
     if (process.platform === "win32") {
-      execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Force -Path '${archive}' -DestinationPath '${work}'`],
-        { stdio: "ignore" },
-      );
-      return;
+      // Expand-Archive 慢且错误被吞——首选 tar（Win10+ 自带 bsdtar，支持 zip），
+      // 失败再回退 PowerShell（捕获 stderr 报真实原因）。
+      try {
+        execFileSync("tar", ["-xf", archive, "-C", work], { stdio: "ignore" });
+        return;
+      } catch { /* fall through to PowerShell */ }
+      try {
+        execFileSync(
+          "powershell.exe",
+          ["-NoProfile", "-NonInteractive", "-Command", `Expand-Archive -Force -Path '${archive}' -DestinationPath '${work}'`],
+          { stdio: ["ignore", "ignore", "pipe"] },
+        );
+        return;
+      } catch (err) {
+        const ee = err as { stderr?: Buffer; message: string };
+        const stderr = String(ee.stderr ?? "").slice(0, 200);
+        throw new ToolError(`zip extract failed (Expand-Archive): ${stderr || ee.message}`);
+      }
     }
     if (process.platform === "darwin") {
       execFileSync("ditto", ["-x", "-k", archive, work], { stdio: "ignore" });
@@ -339,6 +377,21 @@ export async function extractArchive(
   mkdirSync(destDir, { recursive: true });
   const isWin = platform() === "win32";
   const kind = detectArchiveKind(archive, def.download.kind);
+  // magic 硬校验：镜像竞速可能写入 404/HTML 错误页（HTTP 200 + 垃圾内容）——
+  // 按 fallback kind 硬解会得到晦涩的解压错误。这里给出明确原因。
+  {
+    const fd = openSync(archive, "r");
+    const buf = Buffer.alloc(2);
+    readSync(fd, buf, 0, 2, 0);
+    closeSync(fd);
+    const isZip = buf[0] === 0x50 && buf[1] === 0x4b;
+    const isGzip = buf[0] === 0x1f && buf[1] === 0x8b;
+    if ((kind === "zip" && !isZip) || (kind === "tar.gz" && !isGzip)) {
+      throw new ToolError(
+        `${def.name}: downloaded file is not a valid ${kind} archive (got ${[...buf].join(" ")}) — a mirror likely returned an error page; retry or set toolPaths.${def.name}`,
+      );
+    }
+  }
   const strip = def.download.strip ?? 1;
   const work = mkdtempSync(join(tmpdir(), "st-tool-"));
   try {
@@ -513,10 +566,31 @@ async function ensureDownloadedTool(def: ToolDef, opts: ToolRegistryOptions): Pr
     const final = await extractArchive(archive, def, join(opts.cacheDir, "bin"));
     rmSync(archive, { force: true });
     if (def.verifyArgs) {
+      let hint = "";
+      let verified = false;
       try {
         execFileSync(final, def.verifyArgs, { stdio: "ignore" });
-      } catch {
-        throw new ToolError(`${def.name} downloaded via justget failed verification`);
+        verified = true;
+      } catch (err) {
+        // Windows spawn UNKNOWN：多为杀软（Defender）把隧道类工具当风险软件隔离——
+        // 这不是下载/解压问题。照常保留文件让用户自行处理（加排除/恢复隔离）后重试。
+        const isUnknown = /UNKNOWN/i.test(err instanceof Error ? err.message : String(err));
+        if (platform() === "win32" && isUnknown) {
+          hint =
+            " — the binary was likely quarantined by antivirus (tunnel tools are commonly flagged). " +
+            `Restore it from Windows Security → Protection history, or add an exclusion for "${dirname(final)}", then retry the download`;
+        }
+        // UCRT 缺失（精简系统）也会 0xc000007b——自动装 VC++ Redistributable 后重试一次
+        if (platform() === "win32" && !isUnknown) {
+          await ensureWindowsUCRT();
+          try {
+            execFileSync(final, def.verifyArgs, { stdio: "ignore" });
+            verified = true;
+          } catch { /* fall through to error */ }
+        }
+      }
+      if (!verified) {
+        throw new ToolError(`${def.name} downloaded via justget failed verification${hint}`);
       }
     }
     return final;
