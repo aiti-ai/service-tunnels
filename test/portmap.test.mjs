@@ -712,6 +712,35 @@ exit 0`);
   }
 });
 
+/* ---------------- pfctl（macOS：默认 Disabled = 无需放行） ---------------- */
+
+test("firewall: pfctl disabled = allowed (macOS default), enabled needs rule", { skip: process.platform === "win32" }, async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { checkFirewall, openFirewall } = await import("../src/portmap/firewall.ts");
+  const dir = mkdtempSync(join(tmpdir(), "st-fw-pf-"));
+  // fake pfctl：-s info 输出 Disabled
+  await writeFake(dir, "pfctl", `case "$1" in
+  -s) echo "Status: Disabled"; exit 0 ;;
+  *) exit 0 ;;
+esac`);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${dir}${process.platform === "win32" ? ";" : ":"}${oldPath}`;
+  try {
+    // pf Disabled → 无拦截，视为已放行
+    const c = await checkFirewall("192.168.1.50", 4180, "pfctl");
+    assert.equal(c.allowed, true, "pf disabled = allowed");
+    const o = await openFirewall("192.168.1.50", 4180, "pfctl");
+    assert.equal(o.ensured, true, "pf disabled = nothing to open");
+    // check 已放行 → 幂等短路（already allowed）——pf Disabled 语义生效
+    assert.match(o.detail, /already allowed|pf disabled/);
+  } finally {
+    process.env.PATH = oldPath;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ---------------- daemon 模式 portmap 生命周期（F6/F8） ---------------- */
 
 test("daemon mode portmap: expose → IP-direct 200 → expose.stop cleans mapping (F6/F8)", { timeout: 60_000 }, async () => {

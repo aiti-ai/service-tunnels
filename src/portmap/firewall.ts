@@ -120,7 +120,13 @@ export async function hasDesktop(): Promise<boolean> {
     );
     return r.ok && /True/i.test(r.stdout);
   }
-  // POSIX：服务（systemd/launchd）无 DISPLAY；有 X/Wayland 会话才视为可交互
+  if (process.platform === "darwin") {
+    // macOS：launchctl managername —— "Aqua" = GUI 登录会话（可交互），
+    // "System" = launchd daemon（无桌面交互，即使有用户登录着）。macOS 无 DISPLAY。
+    const r = await run("launchctl", ["managername"], 5000);
+    return r.ok && /Aqua/i.test(r.stdout);
+  }
+  // Linux：服务（systemd）无 DISPLAY；有 X/Wayland 会话才视为可交互
   return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 }
 
@@ -176,12 +182,16 @@ export async function checkFirewall(ip: string, port: number, backend?: Firewall
     return { backend: "iptables", allowed: ufwChain.ok, detail: ufwChain.ok ? "ufw-user-input allows" : "no ACCEPT rule" };
   }
   if (b === "pfctl") {
-    // macOS: pf 规则不易精确匹配，pfctl -sr 输出解析太脆；返回"未确认"由调用方决定。
+    // macOS：pf **默认未启用**（Disabled）——无防火墙拦截，入站端口天然可达，
+    // 视为已放行。仅 pf Enabled 时才需要解析规则（且规则匹配太脆，尽力而为）。
     const cmd = await resolveCmd("pfctl");
     if (!cmd) return { backend: "pfctl", allowed: false, detail: "pfctl detected but not executable" };
+    const info = await run(cmd, ["-s", "info"]);
+    const enabled = /Status:\s+Enabled/i.test(info.stdout);
+    if (!enabled) return { backend: "pfctl", allowed: true, detail: "pf disabled — no firewall filtering (macOS default)" };
     const r = await run(cmd, ["-sr"]);
-    const allowed = r.ok && new RegExp(`dport\\\\s*=\\\\s*${port}`).test(r.stdout);
-    return { backend: "pfctl", allowed, detail: allowed ? "pf anchor rule allows" : "pf ruleset: no explicit allow (or unreadable)" };
+    const allowed = r.ok && new RegExp(`dport\\s*=\\s*${port}`).test(r.stdout);
+    return { backend: "pfctl", allowed, detail: allowed ? "pf anchor rule allows" : "pf enabled but no explicit allow for this port" };
   }
   if (b === "windows") {
     // netsh advfirewall：规则名 service-tunnels:<port> 存在 → 已放行（我们自己建的，
@@ -248,7 +258,17 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
     return { backend: "iptables", ensured: true, detail: `iptables ACCEPT ${port} dispatched async (${desktopNote}); manual: sudo iptables -I INPUT 1 -p tcp --dport ${port} -j ACCEPT` };
   }
   if (b === "pfctl") {
-    return { backend: "pfctl", ensured: false, detail: "macOS pf: manual rule required (pf.conf anchor)" };
+    // pf Disabled（macOS 默认）→ 无拦截，无需放行。Enabled → 需手动 anchor 规则
+    // （修改 pf.conf 需 root 且语法复杂，不给自动执行——给手动指引）。
+    const info = await run("pfctl", ["-s", "info"], 5000);
+    if (!/Status:\s+Enabled/i.test(info.stdout)) {
+      return { backend: "pfctl", ensured: true, detail: "pf disabled — no firewall filtering (macOS default)" };
+    }
+    return {
+      backend: "pfctl",
+      ensured: false,
+      detail: `macOS pf enabled — manual anchor rule required (sudo pfctl -a service-tunnels -f <(echo "pass in proto tcp from any to any port ${port}") && sudo pfctl -e)`,
+    };
   }
   return { backend: "none", ensured: false, detail: "no firewall backend detected — cannot verify/open" };
 }
