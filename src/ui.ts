@@ -48,7 +48,7 @@ function clientDir(): string {
   return join(dirname(import.meta.dirname), "src", "ui", "client");
 }
 
-const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.js", "sites.js", "tools.js", "config.js", "main.js"];
+const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.js", "sites.js", "tools.js", "config.js", "ddns.js", "main.js"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA shell — HTML + CSS only; 前端 JS 全部外置到 /ui/*.js（模块化）
@@ -161,6 +161,7 @@ window.UI_CSRF = '${csrf}';
 <script src="/ui/tokens.js"></script>
 <script src="/ui/sites.js"></script>
 <script src="/ui/tools.js"></script>
+<script src="/ui/ddns.js"></script>
 <script src="/ui/config.js"></script>
 <script src="/ui/main.js"></script>
 </body>

@@ -1,10 +1,10 @@
 ## 0.3.65 (2026-08-30)
 
-- **feat(ddns): 集成 ddns 包（107 家 provider）**——内置薄版适配器替换为
+- **feat(ddns): 集成 ddns 包（120 家 provider）**——内置薄版适配器替换为
   `ddns` 包（file:../ddns，多供应商 DDNS + DNS 记录管理引擎）。
   - 维度 1（设备直连）：`st ddns add/list/remove/update/ip` 保持原命令，
     底层走 ddns 包的 updateEntry/runOnce/startLoop（cloudflare/dnspod/aliyun/
-    duckdns/custom/freedns/…107 家），配置仍为 `<configDir>/ddns.json`（0600）。
+    duckdns/custom/freedns/…120 家），配置仍为 `<configDir>/ddns.json`（0600）。
   - 维度 2（tunnel 信标）：ddns.json 条目加 `followTunnel: "<tunnel名>"`——
     tunnel 拿到新 URL 时自动把固定信标名（CNAME 剥 host / TXT 存完整 URL）更新
     为当前 tunnel 域名，`nslookup <信标>` 即可定位最新 tunnel（无人值守、

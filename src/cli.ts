@@ -74,10 +74,20 @@ interface CliArgs {
   record?: string;
   zone?: string;
   accessKeyId?: string;
+  zoneId?: string;
+  profile?: string;
   ttl?: number;
   interval?: number;
   proxied?: boolean;
   loop?: boolean;
+  providerProfile?: string;
+  txtName?: string;
+  kind?: string;
+  followTunnel?: string;
+  ip?: boolean;
+  txt?: boolean;
+  cname?: boolean;
+  txtUrl?: boolean;
   cmd?: string;
   /** --set key=value (tunnel params, validated against the type schema). */
   sets?: Record<string, string>;
@@ -226,6 +236,12 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--access-key-id":
         args.accessKeyId = argv[++i];
         break;
+      case "--zone-id":
+        args.zoneId = argv[++i];
+        break;
+      case "--profile":
+        args.profile = argv[++i];
+        break;
       case "--ttl":
         args.ttl = Number(argv[++i]!);
         break;
@@ -237,6 +253,30 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--loop":
         args.loop = true;
+        break;
+      case "--provider-profile":
+        args.providerProfile = argv[++i];
+        break;
+      case "--txt-name":
+        args.txtName = argv[++i];
+        break;
+      case "--kind":
+        args.kind = argv[++i];
+        break;
+      case "--follow-tunnel":
+        args.followTunnel = argv[++i];
+        break;
+      case "--ip":
+        args.ip = true;
+        break;
+      case "--txt":
+        args.txt = true;
+        break;
+      case "--cname":
+        args.cname = true;
+        break;
+      case "--txt-url":
+        args.txtUrl = true;
         break;
       case "--set":
         addSet(args, "sets", argv[++i]);
@@ -1216,6 +1256,72 @@ async function main(): Promise<void> {
         }
         const results = await runDdnsOnce(cfgs);
         jsonOut(args.json ? results : results.map(({ name: n, record, type, ip, changed, skipped, error }) => ({ name: n, record, type, ip, changed, skipped, error })));
+      } else if (op === "provider-profile-add") {
+        // st ddns provider-profile-add <name> --provider <p> [--token t] [--secret s] [--access-key-id k] [--zone-id zid]
+        const { readRegistryConfig, writeRegistryConfig } = await import("./ddns-registry.ts");
+        if (!name || !args.provider) {
+          console.error("ddns provider-profile-add <name> --provider <cloudflare|...> [--token <t>] [--secret <s>] [--access-key-id <k>] [--zone-id <zid>]");
+          process.exit(2);
+        }
+        const cfg = readRegistryConfig(st.dirs.configDir);
+        cfg.providerProfiles ??= {};
+        cfg.providerProfiles[name] = {
+          provider: args.provider as string,
+          token: args.token,
+          secret: args.secret,
+          accessKeyId: args.accessKeyId,
+          zoneId: args.zoneId,
+        };
+        writeRegistryConfig(st.dirs.configDir, cfg);
+        jsonOut({ added: name, provider: args.provider });
+      } else if (op === "profile-add") {
+        // st ddns profile-add <name> --provider-profile <pp> --zone <z> [--record <r>] [--txt-name <tn>]
+        const { readRegistryConfig, writeRegistryConfig } = await import("./ddns-registry.ts");
+        if (!name || !args.providerProfile || !args.zone) {
+          console.error("ddns profile-add <name> --provider-profile <pp> --zone <z> [--record <r>] [--txt-name <tn>]");
+          process.exit(2);
+        }
+        const cfg = readRegistryConfig(st.dirs.configDir);
+        cfg.profiles ??= {};
+        cfg.profiles[name] = {
+          providerProfile: args.providerProfile,
+          zone: args.zone,
+          record: args.record,
+          txtName: args.txtName,
+        };
+        writeRegistryConfig(st.dirs.configDir, cfg);
+        jsonOut({ added: name, zone: args.zone, record: args.record ?? null });
+      } else if (op === "entry-add") {
+        // st ddns entry-add <name> --profile <p> --kind portmap|tunnel [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url] [--record <r>] [--txt-name <tn>] [--zone <z>]
+        const { readRegistryConfig, writeRegistryConfig } = await import("./ddns-registry.ts");
+        if (!name || !args.kind || (!args.profile && !args.zone)) {
+          console.error("ddns entry-add <name> --profile <p>|(--provider-profile <pp> --zone <z>) --kind portmap|tunnel [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url]");
+          process.exit(2);
+        }
+        const cfg = readRegistryConfig(st.dirs.configDir);
+        cfg.entries ??= [];
+        cfg.entries.push({
+          name,
+          profile: args.profile,
+          providerProfile: args.providerProfile,
+          provider: args.provider as string | undefined,
+          token: args.token,
+          secret: args.secret,
+          zone: args.zone,
+          record: args.record,
+          txtName: args.txtName,
+          kind: args.kind as "portmap" | "tunnel",
+          followTunnel: args.followTunnel,
+          ip: args.ip === true,
+          txt: args.txt === true,
+          cname: args.cname === true,
+          txtUrl: args.txtUrl === true,
+        });
+        writeRegistryConfig(st.dirs.configDir, cfg);
+        jsonOut({ added: name, kind: args.kind, profile: args.profile ?? null });
+      } else if (op === "registry-list") {
+        const { readRegistryConfig } = await import("./ddns-registry.ts");
+        jsonOut(readRegistryConfig(st.dirs.configDir));
       } else {
         usage(lang);
         process.exit(2);

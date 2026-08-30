@@ -468,6 +468,25 @@ if (path === "/api/config" && req.method === "GET") {
   return true;
 }
 
+// -- DDNS registry (provider profiles + profiles + registration entries) --
+if (path === "/api/ddns-registry" && req.method === "GET") {
+  const { readRegistryConfig } = await import("./ddns-registry.ts");
+  json(res, 200, readRegistryConfig(ctx.st.dirs.configDir));
+  return true;
+}
+if (path === "/api/ddns-registry" && req.method === "POST") {
+  const body = await readJson<Record<string, unknown>>(req);
+  const { writeRegistryConfig } = await import("./ddns-registry.ts");
+  writeRegistryConfig(ctx.st.dirs.configDir, body as never);
+  json(res, 200, { saved: true });
+  return true;
+}
+if (path === "/api/ddns-providers" && req.method === "GET") {
+  const { DDNS_PROVIDERS } = await import("./ddns.ts");
+  json(res, 200, { providers: DDNS_PROVIDERS });
+  return true;
+}
+
   json(res, 404, { error: "Not Found" });
   return false;
 }

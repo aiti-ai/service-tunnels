@@ -11,6 +11,8 @@
  */
 
 import { readConfig, writeConfig, configPath as ddnsConfigPath } from "ddns";
+import { readFileSync } from "node:fs";
+import { join as pathJoin } from "node:path";
 import { updateEntry, runOnce, startLoop } from "ddns";
 import { resolvePublicIp } from "ddns";
 import { setBeacon as ddnsSetBeacon, beaconValue } from "ddns";
@@ -43,7 +45,17 @@ export type DdnsRecordConfig = DdnsEntry;
 export { ddnsConfigPath };
 
 export function readDdnsConfigs(configDir: string): DdnsRecordConfig[] {
-  return readConfig(configDir);
+  // ddns.json may hold either a plain DdnsEntry[] (legacy) or the registry
+  // object { providerProfiles, profiles, entries } — the ddns package's
+  // readConfig only handles arrays, so read the raw file here.
+  try {
+    const raw = JSON.parse(readFileSync(pathJoin(configDir, "ddns.json"), "utf8")) as unknown;
+    if (Array.isArray(raw)) return raw as DdnsRecordConfig[];
+    if (Array.isArray((raw as { entries?: unknown })?.entries)) return (raw as { entries: unknown[] }).entries as DdnsRecordConfig[];
+    return [];
+  } catch {
+    return [];
+  }
 }
 export function writeDdnsConfigs(configDir: string, cfgs: DdnsRecordConfig[]): void {
   writeConfig(configDir, cfgs);

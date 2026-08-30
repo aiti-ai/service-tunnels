@@ -11,8 +11,8 @@ async function api(path,opts){
 }
 // ── state ────────────────────────────────────────────────────────────────
 const state={status:null,live:null,lang:(document.documentElement.lang==='zh-CN'?'zh':'en'),expanded:new Set(),logsFor:null,logsData:null,tab:'ports',protoDetect:{},authDefault:'',presets:{tunnelPresets:{},authPresets:{}},_tunnelPresetName:null,_authPresetName:null};
-const TABS=['ports','exposes','users','tokens','sites','tools','config'];
-const TAB_LABELS={ports:tr('ui.nav.dashboard'),exposes:tr('ui.nav.expose'),users:tr('ui.nav.users'),tokens:tr('ui.nav.tokens'),sites:tr('ui.nav.sites'),tools:tr('ui.tools.tab'),config:tr('ui.nav.config')};
+const TABS=['ports','exposes','users','tokens','sites','tools','config','ddns'];
+const TAB_LABELS={ports:tr('ui.nav.dashboard'),exposes:tr('ui.nav.expose'),users:tr('ui.nav.users'),tokens:tr('ui.nav.tokens'),sites:tr('ui.nav.sites'),tools:tr('ui.tools.tab'),config:tr('ui.nav.config'),ddns:tr('ui.nav.ddns')};
 let pollTimer=null;
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -52,5 +52,5 @@ function renderTabs(){
   el.innerHTML=TABS.map((t)=>'<button class="tab'+(state.tab===t?' active':'')+'" data-tab="'+t+'">'+esc(TAB_LABELS[t])+'</button>').join('');
   el.querySelectorAll('.tab').forEach((b)=>b.onclick=()=>{state.tab=b.dataset.tab;location.hash='#/'+state.tab;renderTabs();renderTab();});
 }
-function renderTab(){const f={ports:renderPorts,exposes:renderExposes,users:renderUsers,tokens:renderTokens,sites:renderSites,tools:renderTools,config:renderConfig}[state.tab];f();}
+function renderTab(){const f={ports:renderPorts,exposes:renderExposes,users:renderUsers,tokens:renderTokens,sites:renderSites,tools:renderTools,config:renderConfig,ddns:renderDdns}[state.tab];f();}
 // ── ports tab ────────────────────────────────────────────────────────────

@@ -43,6 +43,7 @@ import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAU
 import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta , TUNNEL_SCHEMAS_VERSION } from "./tunnels.ts";
 import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readDdnsConfigs, updateBeacon } from "./ddns.ts";
+import { readRegistryConfig, registerTunnel, registerPortmap, type RegistrationEntry } from "./ddns-registry.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
@@ -531,11 +532,13 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     preferMirrors: opts.preferMirrors ?? file.preferMirrors,
     allowToolDownload,
   };
-  // DDNS dimension 2: tunnel discovery beacons — a ddns.json entry with
-  // `followTunnel: "<name>"` keeps its FIXED record pointing at the CURRENT
-  // url of that tunnel (nslookup finds the latest tunnel host even when
-  // nothing else is reachable). Wired via onEvent so tunnel restarts
-  // re-register the beacon automatically.
+  // DDNS registration engine — dimension 2: tunnel discovery beacons +
+  // portmap registration. ddns.json entries with `followTunnel` (or
+  // kind:"tunnel") re-register the tunnel's current URL as CNAME/TXT;
+  // kind:"portmap" entries register externalIp/port as A/TXT. Wired via
+  // onEvent so tunnel restarts and expose() re-runs re-register
+  // automatically.
+  const ddnsRegistryCfg = readRegistryConfig(dirs.configDir);
   const ddnsEntries = readDdnsConfigs(dirs.configDir);
   const beacons = ddnsEntries.filter((e) => typeof (e as { followTunnel?: string }).followTunnel === "string");
   const tm = new TunnelManager({
@@ -545,6 +548,7 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     log: () => {},
     onEvent: (evt) => {
       if (evt.type === "url" && evt.url) {
+        // legacy beacon entries (followTunnel on a plain DdnsEntry)
         for (const b of beacons) {
           const follow = (b as { followTunnel?: string }).followTunnel;
           if (follow !== evt.name) continue;
@@ -565,6 +569,17 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
             evt.url,
           ).then((r) => {
             if (!r.ok) console.error(`[ddns] beacon ${b.record} update failed: ${r.error}`);
+          });
+        }
+        // registry entries (kind:"tunnel" with followTunnel)
+        if (ddnsRegistryCfg.entries?.some((e) => e.kind === "tunnel" && e.followTunnel === evt.name)) {
+          void registerTunnel(ddnsRegistryCfg, { tunnelName: evt.name, url: evt.url }).then((rs) => {
+            for (const r of rs) {
+              for (const a of r.actions) {
+                if (!a.ok) console.error(`[ddns] ${r.name} ${a.type} ${a.name} failed: ${a.error}`);
+                else console.error(`[ddns] ${r.name} registered ${a.type} ${a.name} → ${a.value}`);
+              }
+            }
           });
         }
       }
@@ -707,6 +722,23 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   portmap: r.portmap,
   startedAt: Date.now(),
   });
+  // DDNS dimension 2: portmap registration — router mapping established →
+  // entries with kind:"portmap" register external IP (A) and ip:port (TXT)
+  // automatically. Re-runs on every expose (restarts re-register).
+  if (r.mode === "portmap" && r.portmap?.externalIp) {
+    void registerPortmap(ddnsRegistryCfg, {
+      externalIp: r.portmap.externalIp,
+      externalPort: r.portmap.externalPort,
+      label: r.label,
+    }).then((rs) => {
+      for (const reg of rs) {
+        for (const a of reg.actions) {
+          if (!a.ok) console.error(`[ddns] ${reg.name} ${a.type} ${a.name} failed: ${a.error}`);
+          else console.error(`[ddns] ${reg.name} registered ${a.type} ${a.name} → ${a.value}`);
+        }
+      }
+    });
+  }
   return r;
 };
 
