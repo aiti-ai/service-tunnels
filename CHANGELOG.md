@@ -16,6 +16,15 @@
   `resolveIpDirectSite` 支持命中 labeled binding（portmap + auth 场景，IP 无 label
   语义；open 形式的 vhost 请求仍严格 open）。决策结果携带 `vhost` 字段（IP 直连
   关联到命中的 vhost）。exposes 记录带 mode + portmap 详情（UI 可区分）。
+- **fix(portmap): Windows 防火墙后端与跨平台测试（远程真机 F13-F15）**——
+  F13：Windows 无 ufw/iptables/pfctl，portmap expose 全挂——新增 **netsh
+  advfirewall 后端**（add/show/delete rule，规则名 `service-tunnels:<port>`）；
+  resolveCmd 支持 `where` + .cmd 解析；run() 对 .cmd 走 shell。F14：e2e 测试
+  泄漏 transport（Windows EADDRINUSE）——finally 清理 + 随机端口。F15：netsh
+  输出本地化（中文系统"已启用: 是"）+ 无匹配规则也 exit 0——改为规则名存在
+  + 非"否/No"判定，不依赖英文正则。POSIX 防火墙测试平台门控（win32 skip），
+  Windows netsh 由真机验证覆盖。真机验证：Windows 公网端口转发 + portal 登录
+  全链路（公网主机 curl 200 + test:test123 登录通过）。
 - **fix(portmap): CLI 嵌套参数与防火墙清理（第五轮审核 F12/G7）**——F12：
   `--portmap-set sshRouter.host=x sshRouter.preset=openwrt` 点号键嵌套为对象
   （此前扁平键被 daemon 拒绝，CLI 无法配置 ssh-router 后端）；G7：防火墙放行

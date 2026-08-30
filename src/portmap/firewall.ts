@@ -148,10 +148,19 @@ export async function checkFirewall(ip: string, port: number, backend?: Firewall
   }
   if (b === "windows") {
     // netsh advfirewall：规则名 service-tunnels:<port> 存在 → 已放行（我们自己建的，
-    // 名字即身份）。show rule 无需管理员。
+    // 名字即身份）。注意（F15）：① netsh show 对无匹配规则也 exit 0——必须解析
+    // 输出而非看退出码；② 输出随系统语言变化（中文："已启用: 是"）——不能只
+    // 匹配英文 Enabled/Yes。规则存在且启用字段非"否/No"即视为放行。
     const r = await run("netsh", ["advfirewall", "firewall", "show", "rule", `name=service-tunnels:${port}`], 8000);
-    const enabled = r.ok && /Enabled\s+Yes/i.test(r.stdout);
-    return { backend: "windows", allowed: enabled, detail: enabled ? "netsh rule allows" : "netsh: no service-tunnels rule (or not enabled)" };
+    const hasRule = r.ok && r.stdout.includes(`service-tunnels:${port}`);
+    const disabled =
+      /(?:已启用|Enabled)\s*[:：]\s*(?:否|No)/i.test(r.stdout);
+    const allowed = hasRule && !disabled;
+    return {
+      backend: "windows",
+      allowed,
+      detail: allowed ? "netsh rule allows" : "netsh: no service-tunnels rule (or disabled)",
+    };
   }
   return { backend: "none", allowed: false, detail: "no firewall backend detected" };
 }
