@@ -76,6 +76,7 @@ if (path === "/api/expose" && req.method === "POST") {
     site?: string; policy?: string; protocol?: string; tunnelParams?: Record<string, unknown>;
     providerParams?: Record<string, unknown>; user?: { name: string; password: string };
     ngrokAuthtoken?: string; allowAuthNone?: boolean; allowToolDownload?: boolean;
+    ipv6?: { address?: string };
   }>(req);
   const port = Number(body.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -101,6 +102,7 @@ if (path === "/api/expose" && req.method === "POST") {
     ngrokAuthtoken: body.ngrokAuthtoken,
     allowAuthNone: body.allowAuthNone,
     allowToolDownload: body.allowToolDownload,
+    ...(body.ipv6?.address ? { ipv6: { address: body.ipv6.address } } : {}),
   }, () => ctx.st.auth.expose(port, {
     mode: body.mode as never,
     auth: body.auth,
@@ -115,6 +117,7 @@ if (path === "/api/expose" && req.method === "POST") {
     ngrokAuthtoken: body.ngrokAuthtoken,
     allowAuthNone: body.allowAuthNone,
     allowToolDownload: body.allowToolDownload,
+    ...(body.ipv6?.address ? { ipv6: { address: body.ipv6.address } } : {}),
   }), 90_000);
   if (result === null) {
     json(res, 400, { error: "expose rejected (daemon unavailable or invalid config)" });
@@ -139,6 +142,10 @@ if (path === "/api/expose-stop" && req.method === "POST") {
         ctx.st.proxy.removeBinding(port, label);
       })();
     }
+    // ipv6 条目（name = ipv6:port:label）：停独立 transport + 撤防火墙
+    if (name.startsWith("ipv6:")) {
+      return ctx.st.ipv6.stop(name);
+    }
     return ctx.st.tunnels.stop(name);
   });
   if (r === null) { json(res, 400, { error: "stop failed (daemon unavailable)" }); return true; }
@@ -155,6 +162,10 @@ if (path === "/api/expose-stop-all" && req.method === "POST") {
     // portmap 条目：停全部映射（续租定时器 + 路由器规则）
     for (const m of listPortmaps()) {
       try { await stopPortmap(m.key); } catch { /* gone */ }
+    }
+    // ipv6 条目：停全部独立 transport（关 transport + 撤防火墙）
+    for (const t of ctx.st.ipv6.list()) {
+      try { await ctx.st.ipv6.stop(t.key); } catch { /* gone */ }
     }
   });
   json(res, 200, { ok: true });

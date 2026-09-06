@@ -443,6 +443,84 @@ sleep 60
   }
 });
 
+test("frpc: IPv6 server [v6]:port + ::1 local target → ini stays intact", { timeout: 20_000 }, async () => {
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  try {
+    const frpcScript = `#!/bin/sh
+echo 'start frpc service success'
+sleep 60
+`;
+    fakeTool(base, "frpc", "");
+    writeFileSync(join(base, "bin", "frpc"), frpcScript, "utf8");
+    chmodSync(join(base, "bin", "frpc"), 0o755);
+
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (name) => join(base, "bin", name) });
+    // 之前 #writeFrpcIni 用 split(":") 会把 [2001:db8::1]:7000 拆坏
+    tm.add({ name: "frp6", type: "frpc", target: 4180, server: "[2001:db8::1]:7000", token: "t6", domain: "v6.example.com", targetHost: "::1" });
+    await tm.start("frp6");
+    const ini = readFileSync(join(cacheDir, "tmp", "frpc-frp6.ini"), "utf8");
+    assert.match(ini, /server_addr = 2001:db8::1/);
+    assert.match(ini, /server_port = 7000/);
+    assert.match(ini, /token = t6/);
+    assert.match(ini, /local_ip = ::1/);
+    assert.match(ini, /local_port = 4180/);
+    assert.match(ini, /custom_domains = v6\.example\.com/);
+    await tm.stop("frp6");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("ssh: IPv6 host is bracketed in dest + forward local side + synth URL", { timeout: 20_000 }, async () => {
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  const origPath = process.env.PATH;
+  try {
+    fakeTool(base, "ssh", "");
+    process.env.PATH = `${join(base, "bin")}${pathDelimiter}${process.env.PATH}`;
+    const argvFile = join(base, "bin", "args-ssh");
+    const tm = new TunnelManager({ cacheDir, resolveTool: async () => "", sshUrlSynthDelayMs: 50 });
+    // IPv6 服务器主机 + app 只绑 ::1 → dest 与 -R 本地侧都要带方括号
+    tm.add({ name: "v6", type: "ssh", host: "2001:db8::1", user: "op", target: 4180, remotePort: 8080, targetHost: "::1" });
+    await tm.start("v6");
+    const dl = Date.now() + 5_000;
+    while (Date.now() < dl && !existsSync(argvFile)) await sleep(50);
+    const argv = readFileSync(argvFile, "utf8").trim().split("\n");
+    assert.ok(argv.includes("-R"), "-R present");
+    assert.equal(argv[argv.indexOf("-R") + 1], "8080:[::1]:4180", "forward local side brackets ::1");
+    assert.equal(argv[argv.length - 1], "op@[2001:db8::1]", "dest brackets IPv6 host");
+    // synth URL 也用方括号
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !tm.get("v6")?.url) await sleep(50);
+    assert.equal(tm.get("v6")?.url, "http://[2001:db8::1]:8080");
+    await tm.stop("v6");
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("cloudflared: --url host follows targetHost (IPv6 loopback)", { timeout: 20_000 }, async () => {
+  const { TunnelManager } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+  try {
+    fakeTool(base, "cloudflared", "https://x.trycloudflare.com");
+    const tm = new TunnelManager({ cacheDir, resolveTool: async (name) => join(base, "bin", name) });
+    tm.add({ name: "cf6", type: "cloudflared", target: 4180, targetHost: "::1" });
+    await tm.start("cf6");
+    const argvFile = join(base, "bin", "args-cloudflared");
+    const dl = Date.now() + 5_000;
+    while (Date.now() < dl && !existsSync(argvFile)) await sleep(50);
+    const argv = readFileSync(argvFile, "utf8").trim().split("\n");
+    assert.ok(argv.includes("--url"), "--url present");
+    assert.equal(argv[argv.indexOf("--url") + 1], "http://[::1]:4180");
+    await tm.stop("cf6");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("hydrate restores URLs from persisted state (restart scenario)", async () => {
   const { TunnelManager } = await loadSubject();
   const { cacheDir, base } = tempDirs();

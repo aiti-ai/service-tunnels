@@ -37,6 +37,7 @@ import {
 } from "./daemon.ts";
 import { readState } from "./state.ts";
 import { platform } from "os";
+import { join } from "path";
 import { ensureTool, resolveToolPath, findOnPath, TOOLS, mergeToolPaths, type ToolRegistryOptions } from "./tools.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAULT_SUFFIXES, type ProxyOptions } from "./proxy.ts";
@@ -45,7 +46,7 @@ import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readDdnsConfigs, updateBeacon } from "./ddns.ts";
 import { readRegistryConfig, registerTunnel, registerPortmap, type RegistrationEntry } from "./ddns-registry.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
-import { expose as exposeFlow, type ExposeOptions, type ExposeResult } from "./expose.ts";
+import { expose as exposeFlow, listIpv6Transports, stopIpv6Transport, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
 import { GatewayController, type GatewayInject } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
@@ -53,7 +54,10 @@ import { AutheliaProvider } from "./authelia.ts";
 import { AuthRegistry, loadProviderPlugins, authProviderSchemas, authProviderMetas, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
 import { localizeSchemas, localizeSpecs, resolveLang } from "./i18n.ts";
 import { ProxyManager, type ProxyBinding } from "./proxy-manager.ts";
+import { InternalTokenRing, type InternalTokenRingOptions } from "./internal-token.ts";
+import { createProcessProbe } from "./internal-process-probe.ts";
 import { readSites, writeSites, defaultSiteConfig, validateSiteName, type SiteConfig, type SiteInfo } from "./sites.ts";
+import { classifyIpv6, isGlobalIpv6, listIpv6Addresses, globalIpv6Addresses, detectPublicIpv6, ipv6Diagnose } from "./ipv6.ts";
 import type { AuthProvider, AuthProviderFactory, ProviderContext } from "./auth-provider.ts";
 import type { AuthUser, AuthToken } from "./auth-provider.ts";
 
@@ -95,6 +99,29 @@ export { RedisController } from "./redis.ts";
 export { startUi } from "./ui.ts";
 
 export {
+  isBareIpv6,
+  isIpv6Host,
+  isIpv4Host,
+  isIpHost,
+  bracketHost,
+  unbracketHost,
+  hostnameOnly,
+  parseHostPort,
+  formatHostPort,
+  resolveTargetHost,
+} from "./net-utils.ts";
+
+export {
+  classifyIpv6,
+  isGlobalIpv6,
+  listIpv6Addresses,
+  globalIpv6Addresses,
+  detectPublicIpv6,
+  ipv6Diagnose,
+};
+export type { Ipv6Scope, Ipv6AddressInfo } from "./ipv6.ts";
+
+export {
   expandListeningAddresses,
   decodeIpv4,
   decodeIpv6,
@@ -120,6 +147,8 @@ export { createProxyServer, parseServiceHost, validBasicAuth, authHeader, proxyT
 export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 
 export { InternalRegistry } from "./internal.ts";
+export { InternalTokenRing, type InternalTokenRingOptions } from "./internal-token.ts";
+export { createProcessProbe, createLinuxProcessProbe, createMacProcessProbe, type ProcessProbeOptions } from "./internal-process-probe.ts";
 
 export interface ServiceTunnelsOptions extends DirOptions {
   /** Child-process env marker prefix (default "service-tunnels"). */
@@ -176,6 +205,20 @@ export interface ServiceTunnelsOptions extends DirOptions {
    * "/dev/portal/login" — plain "/portal/login" when unset.
    */
   deployBasePath?: string;
+  /** 进程凭证旁路（Linux 优先）：给定请求 remoteAddress，反查发起 pid 的
+   *  environ 是否带 SERVICE_TUNNELS_MARKER → 命中放行（子进程无需带 token）。
+   *  与 autoWireProcessProbe 互斥：显式传入优先。非 Linux/macOS 或探测失败
+   *  返回 false（降级为纯 token 校验）。createProcessProbe() 按平台分发。 */
+  verifyInternalProcess?: (remoteAddress: string | undefined) => boolean;
+  /** 自动 wire 进程凭证探针（想法②，免 token 旁路）。默认 false（不启用，
+   *  避免核心路径引入进程表扫描开销）。true 时库内自动接 createProcessProbe()
+   *  到 verifyInternalProcess——Linux 用 /proc（可靠）、macOS 用 lsof+ps
+   *  （实验性）、Windows 不支持恒 false。与显式 verifyInternalProcess 互斥。
+   *  命中条件：回环请求 + 发起进程继承了 SERVICE_TUNNELS_MARKER env（宿主
+   *  spawn 的后代，含 AI 自创建的孙进程）。 */
+  autoWireProcessProbe?: boolean;
+  /** 内部 token ring 配置（TTL/轮换间隔/ring 大小）。 */
+  internalToken?: InternalTokenRingOptions;
   /** 真实服务的默认 base path(转发映射)。 */
   serviceBasePath?: string;
   /**
@@ -281,6 +324,18 @@ export interface ServiceTunnels {
   portmap: {
     probe(opts?: { gateway?: string; ssdpTimeoutMs?: number }): Promise<PortmapProbe>;
     list(): Array<{ key: string; backend: "upnp" | "pcp" | "ssh-router"; gateway: string; externalIp: string; externalPort: number; internalPort: number }>;
+    stop(key: string): Promise<boolean>;
+  };
+  /** IPv6 direct exposure (mode "ipv6"): public-address diagnosis + live
+   *  dedicated-transport control. */
+  ipv6: {
+    /** 诊断本机 IPv6 状况（分类地址列表 + 是否有 global 地址）。 */
+    diagnose(): ReturnType<typeof ipv6Diagnose>;
+    /** 检测可用的公网 IPv6 地址（显式 > 枚举 > external 探测）。 */
+    detect(prefer?: string): Promise<string[]>;
+    /** 当前存活的 ipv6 直连 transport 列表。 */
+    list(): ReturnType<typeof listIpv6Transports>;
+    /** 停止一个 ipv6 直连 transport（撤销防火墙 + 关 transport）。 */
     stop(key: string): Promise<boolean>;
   };
   /** Provider/tunnel parameter schemas — data-driven forms for clients
@@ -414,6 +469,33 @@ export interface ServiceTunnels {
     }): Promise<{ provider: string; token: AuthToken }[]>;
     /** Revoke a token by id across `provider` (default "all"). */
     revokeToken(id: string, provider?: string | string[], site?: string): Promise<string[]>;
+    /**
+     * 仅认证模式（auth-only）：启动一个独立的 forward-auth 认证服务
+     * （portal provider，固定端口 + basePath + site 存储），供外部系统 nginx
+     * `auth_request` 接入（替换 authelia）。服务本身无管理界面。用户/site
+     * 由管理界面（`st ui`）或 user/addUser 管理——同 site 同用户库。
+     */
+    server: {
+      /** 启动（幂等：已运行直接返回当前状态）。port 缺省随机；basePath 缺省
+       *  provider 随机名；site 缺省 "default"。返回实际端口/basePath。 */
+      start(opts?: {
+        site?: string;
+        port?: number;
+        basePath?: string;
+        policy?: "one_factor" | "two_factor" | "deny";
+        /** 会话密钥持久化文件（缺省 site 存储目录下 session.secret，0600）。 */
+        secretFile?: string;
+        /** 监听地址（缺省 127.0.0.1）。跨机接入时显式传。 */
+        host?: string;
+        /** 信任回环代理的 X-Forwarded-For（缺省 false）。仅认证模式经外部
+         *  nginx 转发时开——per-IP 封禁取真实客户端 IP。 */
+        trustProxy?: boolean;
+      }): Promise<{ running: boolean; port: number; basePath: string; site: string }>;
+      /** 停止某 site 的仅认证服务。 */
+      stop(site?: string): Promise<void>;
+      /** 某 site 的仅认证服务状态。 */
+      status(site?: string): { running: boolean; port?: number };
+    };
   };
   /** Auth realms (sites): independent provider instances + user dbs. */
   sites: {
@@ -462,6 +544,27 @@ export interface ServiceTunnels {
     allowHosts(): string[];
     setAllowHosts(hosts: string[]): void;
     isDirectAccessAllowed(host: string | undefined): boolean;
+  };
+  /** 内部可信客户端放行（不落盘内存轮换 token）。嵌入方（如 pi-work
+   *  service-tunnels 扩展）接管登录、拦截所有请求后，AI 内部 curl/fetch
+   *  的请求也会被阻断；宿主把当前 token 通过 envForChild() 注入子进程，
+   *  子进程请求带上 `Authorization: Bearer $ST_INTERNAL_TOKEN` 即放行
+   *  （gateBackend 的内部旁路，覆盖所有 vhost）。命名 internalTokens
+   *  避开已占用的 internal（InternalRegistry）。 */
+  internalTokens: {
+    /** 当前 token 原文（供宿主注入子进程环境变量；TTL 内稳定，随轮换更新）。 */
+    currentToken(): string;
+    /** 环境变量片段：spawn(cmd, args, { env: { ...process.env, ...envForChild() } })。
+     *  子进程 curl 带上 `Authorization: Bearer $ST_INTERNAL_TOKEN` 即放行。 */
+    envForChild(): { ST_INTERNAL_TOKEN: string; ST_INTERNAL_TOKEN_EXPIRES: string };
+    /** 进程内校验 `Authorization` 是否为有效内部 token（嵌入方 middleware 可直接调）。 */
+    verify(authorization: string | undefined): boolean;
+    /** 立即轮换（测试 / 怀疑泄露时手动）。 */
+    rotate(): void;
+    /** ring 状态（调试/UI，不含秘密）。 */
+    status(): { size: number; ttlMs: number; rotateIntervalMs: number; current: { issuedAt: number; expiresAt: number; rotatesAt: number } | null };
+    /** 停止定时器并清空 ring（shutdown）。 */
+    stop(): void;
   };
   /** Current runtime state (tunnels/auth) from state.json. */
   state(): ReturnType<typeof readState>;
@@ -640,6 +743,16 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   // gate, and expose already verified port ownership at enrollment time; the
   // discovery allow-list still guards the low-level st.proxy.create().
   const { primary: primaryBase, list: baseDomains } = resolveBaseDomains(dirs.configDir, opts);
+  // 内部可信客户端 token ring（不落盘、TTL、定期轮换 + overlap）。wire 到
+  // ProxyManager 作为 gateBackend 的内部旁路：带有效内部 token 的请求跳过
+  // basic/token/forward-auth 认证直接放行（覆盖所有 vhost）。嵌入方把当前
+  // token 通过 st.internalTokens.envForChild() 注入子进程，AI 的 curl 带上即放行。
+  const internalRing = new InternalTokenRing(opts.internalToken ?? {});
+  // 进程凭证探针：显式 verifyInternalProcess 优先；autoWireProcessProbe=true
+  // 时按平台自动接（Linux /proc 可靠、macOS lsof+ps 实验性、Windows 不支持）。
+  const verifyInternalProcess =
+    opts.verifyInternalProcess ??
+    (opts.autoWireProcessProbe ? createProcessProbe() : undefined);
   const proxy = new ProxyManager({
     suffixes: DEFAULT_SUFFIXES,
     baseDomain: primaryBase,
@@ -660,6 +773,8 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
     }),
     isPortAllowed: () => true,
     transformResponse: opts.transformResponse,
+    verifyInternalToken: (auth) => internalRing.verify(auth),
+    verifyInternalProcess,
     registerInternal: (role, p) => internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     log: () => {},
   });
@@ -669,10 +784,10 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
  *  (no entry-matching — the expose itself IS the binding). */
 async function registerExposeDdns(
   ddns: NonNullable<ExposeOptions["ddns"]>,
-  info: { kind: "portmap" | "tunnel"; externalIp?: string; externalPort?: number; url?: string },
-): Promise<{ name: string; actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> } | null> {
+  info: { kind: "portmap" | "tunnel" | "ipv6"; externalIp?: string; externalPort?: number; url?: string },
+): Promise<{ name: string; actions: Array<{ type: "A" | "AAAA" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> } | null> {
   const { readRegistryConfig, resolveEntry, urlHost } = await import("./ddns-registry.ts");
-  const { setBeacon, upsertRecord } = await import("ddns");
+  const { setBeacon, upsertRecord, resolvePublicIp } = await import("ddns");
   const cfg = readRegistryConfig(dirs.configDir);
   const entry: RegistrationEntry = {
     name: ddns.profile ?? ddns.providerProfile ?? "expose",
@@ -694,13 +809,14 @@ async function registerExposeDdns(
   if (!resolved) {
     return { name: "expose", actions: [{ type: "A", name: "?", value: "", ok: false, error: "unresolved ddns profile (check profile/providerProfile/zone)" }] };
   }
-  const actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> = [];
+  const actions: Array<{ type: "A" | "AAAA" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> = [];
   const provider = resolved.provider as never;
   const zone = resolved.zone;
   const base = resolved.record || `${entry.name}.${zone}`;
-  const doWrite = async (type: "A" | "CNAME" | "TXT", name: string, value: string) => {
+  const doWrite = async (type: "A" | "AAAA" | "CNAME" | "TXT", name: string, value: string) => {
     try {
-      if (type === "A") await upsertRecord(provider, zone, { type: "A", name, value });
+      // A / AAAA 是地址记录，走 upsert；CNAME/TXT 是 beacon。
+      if (type === "A" || type === "AAAA") await upsertRecord(provider, zone, { type, name, value });
       else await setBeacon({ provider, zone, name, type, value });
       actions.push({ type, name, value, ok: true });
     } catch (err) {
@@ -709,7 +825,18 @@ async function registerExposeDdns(
   };
   if (info.kind === "portmap" && info.externalIp) {
     if (ddns.ip) await doWrite("A", base, info.externalIp);
+    if (ddns.aaaa) {
+      const v6 = await resolvePublicIp(6);
+      if (v6) await doWrite("AAAA", base, v6);
+      else actions.push({ type: "AAAA", name: base, value: "", ok: false, error: "no IPv6 public address detected" });
+    }
     if (ddns.txt) await doWrite("TXT", resolved.txtName || base, `${info.externalIp}:${info.externalPort}`);
+  }
+  if (info.kind === "ipv6" && info.externalIp) {
+    // ipv6 直连：AAAA = 公网 v6 地址（直接可用，无需再探测）；TXT = [v6]:port。
+    // CNAME 不适用——CNAME 必须指向域名，不能指向 IP 字面量（无域名可指）。
+    if (ddns.aaaa) await doWrite("AAAA", base, info.externalIp);
+    if (ddns.txt) await doWrite("TXT", resolved.txtName || base, `[${info.externalIp}]:${info.externalPort}`);
   }
   if (info.kind === "tunnel" && info.url) {
     if (ddns.cname) await doWrite("CNAME", base, urlHost(info.url));
@@ -782,6 +909,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   baseUrl: r.baseUrl,
   domainUrl: r.domainUrl,
   portmap: r.portmap,
+  ipv6: r.ipv6,
   startedAt: Date.now(),
   });
   // DDNS dimension 2: registration bound to THIS expose — if the expose
@@ -789,14 +917,14 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
   // tunnel outcome to DNS records. Results are written back onto the
   // exposes record so the UI shows what this port registered.
   const ddnsOpt = o.ddns;
-  if (ddnsOpt && (r.mode === "portmap" || r.url)) {
+  if (ddnsOpt && (r.mode === "portmap" || r.mode === "ipv6" || r.url)) {
     void (async () => {
       try {
         const res = ddnsOpt.profile || ddnsOpt.providerProfile || ddnsOpt.provider
           ? await registerExposeDdns(ddnsOpt, {
-              kind: r.mode === "portmap" ? "portmap" : "tunnel",
-              externalIp: r.portmap?.externalIp,
-              externalPort: r.portmap?.externalPort,
+              kind: r.mode === "portmap" ? "portmap" : r.mode === "ipv6" ? "ipv6" : "tunnel",
+              externalIp: r.portmap?.externalIp ?? r.ipv6?.address,
+              externalPort: r.portmap?.externalPort ?? r.ipv6?.transportPort,
               url: r.url ?? undefined,
             })
           : null;
@@ -823,7 +951,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
 
   // Exposes made in this process lifecycle (port + tunnel type + auth
   // provider + url), for display. Not persisted across restarts.
-  const exposes = new Map<string, { port: number; mode?: string; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; portmap?: { backend: string; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number }; ddns?: { profile?: string; actions: Array<{ type: string; name: string; value: string; ok: boolean; error?: string }> }; startedAt?: number }>();
+  const exposes = new Map<string, { port: number; mode?: string; tunnelName?: string; tunnelType?: string; provider?: string; loginUrl?: string; protocol?: string; host?: string; site?: string; label?: string; localUrl?: string; baseUrl?: string; domainUrl?: string; portmap?: { backend: string; gateway: string; externalIp: string; externalPort: number; internalPort: number; leaseSeconds: number }; ipv6?: { address: string; transportPort: number; addresses: string[] }; ddns?: { profile?: string; actions: Array<{ type: string; name: string; value: string; ok: boolean; error?: string }> }; startedAt?: number }>();
 
   /** Unregister the gateway host an expose registered (so stopping one expose
    *  doesn't leave a stale nginx server block — localhost:PORT hosts would
@@ -869,6 +997,12 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           internalPort: mapping.internalPort,
         })),
       stop: (key: string) => stopPortmap(key),
+    },
+    ipv6: {
+      diagnose: () => ipv6Diagnose(),
+      detect: (prefer?: string) => detectPublicIpv6(prefer),
+      list: () => listIpv6Transports(),
+      stop: (key: string) => stopIpv6Transport(key),
     },
     tools: {
       ensure: (name: string) => {
@@ -1245,6 +1379,46 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
           for (const t of targets) await registry.tokenManager(t, site).revokeToken(id);
           return targets;
         },
+        server: {
+          start: async (o: { site?: string; port?: number; basePath?: string; policy?: "one_factor" | "two_factor" | "deny"; secretFile?: string; host?: string; trustProxy?: boolean } = {}) => {
+            const site = o.site ?? "default";
+            // 仅认证模式默认持久化会话密钥（systemd 重启不全体登出）——site 存储
+            // 目录下 session.secret（0600）。与 userManager 同一 siteOpts 存储。
+            const storageDir = site === "default"
+              ? join(dirs.cacheDir, "tmp", "portal")
+              : join(dirs.cacheDir, "tmp", "sites", site, "portal");
+            const secretFile = o.secretFile ?? join(storageDir, "session.secret");
+            const inst = registry.create(
+              "portal",
+              {
+                port: o.port,
+                basePath: o.basePath,
+                policy: o.policy,
+                secretFile,
+                host: o.host,
+                trustProxy: o.trustProxy,
+              } as never,
+              site,
+            ) as unknown as PortalAuthProviderLike;
+            if (inst.status().running) {
+              return { running: true, port: inst.port, basePath: inst.basePath, site };
+            }
+            // basePath 决策链与 expose 一致：显式 > site 配置 > provider 默认随机名
+            const sitesCfg: Record<string, { basePath?: string }> = readSites(dirs.configDir) as never;
+            const siteCfg = sitesCfg?.[site];
+            if (!inst.basePath) {
+              const bp = o.basePath ?? siteCfg?.basePath ?? inst.defaultBasePath?.() ?? "/portal";
+              await inst.setBasePath?.(bp);
+            }
+            await inst.prepare();
+            const st = await inst.start();
+            return { running: st.running, port: inst.port, basePath: inst.basePath, site };
+          },
+          stop: async (site = "default") => {
+            await registry.evict("portal", site);
+          },
+          status: (site = "default") => registry.siteStatus(site),
+        },
       };
     })(),
     /** Auth realms (sites) — independent provider instances + user dbs. */
@@ -1336,6 +1510,17 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
       };
       return selfApi;
     })(),
+    /** 内部可信客户端放行（不落盘内存轮换 token）。宿主把它注入子进程，
+     *  子进程请求带 `Authorization: Bearer $ST_INTERNAL_TOKEN` 即放行
+     *  （gateBackend 内部旁路，覆盖所有 vhost）。 */
+    internalTokens: {
+      currentToken: () => internalRing.currentToken(),
+      envForChild: () => internalRing.envForChild(),
+      verify: (authorization: string | undefined) => internalRing.verify(authorization),
+      rotate: () => internalRing.rotate(),
+      status: () => internalRing.status(),
+      stop: () => internalRing.stop(),
+    },
     /** Provider/tunnel parameter schemas — data-driven forms for clients
      *  (host renders inputs from these; no client changes per provider).
      *  lang: "zh" returns localized (Chinese) strings; default/en returns
@@ -1356,6 +1541,7 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
       try { await gateway.stop(); } catch {}
       try { await redis.stop(); } catch {}
       try { await proxy.stop(); } catch {}
+      try { internalRing.stop(); } catch {}
       // M0b-ssh: stop the in-process site ssh gateways so the listener closes
       for (const d of ssh.list()) {
         try { await ssh.stop(d.domain); } catch { /* best effort */ }
@@ -1402,6 +1588,17 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
 }
 
 /** Pre-assign a free local port. */
+/** 仅认证模式用的 portal 实例视图（auth.server 操作需要的成员）。 */
+interface PortalAuthProviderLike {
+  port: number;
+  basePath: string;
+  status(): { running: boolean; port?: number };
+  defaultBasePath?(): string;
+  setBasePath?(p: string): Promise<void> | void;
+  prepare(): Promise<{ running: boolean; port?: number }>;
+  start(): Promise<{ running: boolean; port?: number }>;
+}
+
 async function pickPort(): Promise<number> {
   const { createServer } = await import("net");
   return new Promise((resolve, reject) => {

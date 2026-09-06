@@ -53,6 +53,9 @@ export interface ProxyBinding {
   bypassPaths?: string[];
   /** 该 vhost 真实服务的 base path(默认继承 ProxyManagerOptions.serviceBasePath)。 */
   serviceBasePath?: string;
+  /** 本地 app 上游监听地址（覆盖 ProxyManagerOptions.targetHost；app 只绑
+   *  ::1 时传 ::1——转发映射的目标地址随之改变）。 */
+  targetHost?: string;
 }
 
 export interface ProxyManagerOptions {
@@ -84,12 +87,26 @@ export interface ProxyManagerOptions {
   allowIpDirect?: boolean;
   /** Allow-list source (discovery). Default: allow all (caller must gate). */
   isPortAllowed?: (port: number) => boolean;
+  /** 本地 app 上游监听地址（127.0.0.1 缺省；app 只绑 ::1 时传 ::1）。
+   *  per-binding 可覆盖（ProxyBinding.targetHost）。 */
+  targetHost?: string;
+  /** 内部可信客户端 token 旁路（见 ServiceHostResolveContext.verifyInternalToken）。
+   *  createServiceTunnels 自动 wire st.internal.verify；自建 manager 按需传入。 */
+  verifyInternalToken?: (authorization: string | undefined) => boolean;
+  /** 进程凭证旁路（Linux，预留；见 ServiceHostResolveContext.verifyInternalProcess）。 */
+  verifyInternalProcess?: (remoteAddress: string | undefined) => boolean;
   /** Auth provider registry (lazy provider starts). */
   registry?: AuthRegistry;
   /** Shared nginx gateway (basic backends); created lazily when omitted. */
   gateway?: GatewayController;
   /** Register the proxy transport port as a framework helper (discovery exclusion). */
   registerInternal?: (role: string, port: number) => void;
+  /** Unregister the internal role on stop() (avoid stale registry entries when
+   *  multiple ProxyManager instances share one InternalRegistry). */
+  unregisterInternal?: (role: string) => void;
+  /** 自定义 internal role（默认 "proxy"）。多 ProxyManager 实例共享同一
+   *  InternalRegistry 时必须用唯一 role，否则会互相覆盖同一 role 条目。 */
+  internalRole?: string;
   /** Registered site names (label → site). P1: live getter over sites.json. */
   getSites?: () => Record<string, unknown>;
   /** Persistence hook: called after every binding add/remove (state.json). */
@@ -303,11 +320,14 @@ export class ProxyManager {
       serviceBasePath: this.#opts.serviceBasePath,
       password: this.#opts.password,
       allowIpDirect: this.#opts.allowIpDirect,
+      targetHost: this.#opts.targetHost ?? "127.0.0.1",
       resolveIpDirectPort: (tp) => this.#resolveIpDirectPort(tp),
       resolveIpDirectVhost: (p) => this.#resolveIpDirectVhost(p),
       resolveIpDirectSite: (p, s, l, v) => this.#resolveIpDirectSite(p, s, l, v),
       transformResponse: this.#opts.transformResponse,
       isPortAllowed: this.#opts.isPortAllowed,
+      verifyInternalToken: this.#opts.verifyInternalToken,
+      verifyInternalProcess: this.#opts.verifyInternalProcess,
       resolveLabel: (label) => this.#resolveLabel(label),
       resolveSuffixSite: (suffix) => this.#resolveSuffixSite(suffix),
       resolveSite: (p, site, label, vhost) => this.#resolveSite(p, site, label, vhost),
@@ -320,7 +340,7 @@ export class ProxyManager {
     this.#server = server;
     const addr = server.address();
     this.#port = typeof addr === "object" && addr ? addr.port : listenPort;
-    this.#opts.registerInternal?.("proxy", this.#port);
+    this.#opts.registerInternal?.(this.#opts.internalRole ?? "proxy", this.#port);
     this.#opts.log?.(`proxy transport on 127.0.0.1:${this.#port}`);
     return this.#port;
   }
@@ -329,10 +349,15 @@ export class ProxyManager {
     if (!this.#server) return;
     const s = this.#server;
     this.#server = null;
+    const role = this.#opts.internalRole ?? "proxy";
+    const port = this.#port;
+    this.#port = 0;
     await new Promise<void>((resolve) => {
       s.closeAllConnections?.();
       s.close(() => resolve());
     });
+    // 关闭后注销 internal role（避免多 ProxyManager 实例同 role 覆盖残留）
+    this.#opts.unregisterInternal?.(role);
   }
 
   /**
@@ -351,6 +376,9 @@ export class ProxyManager {
       basePath: this.#opts.basePath ?? "",
       serviceBasePath: this.#opts.serviceBasePath,
       allowIpDirect: this.#opts.allowIpDirect,
+      targetHost: this.#opts.targetHost ?? "127.0.0.1",
+      verifyInternalToken: this.#opts.verifyInternalToken,
+      verifyInternalProcess: this.#opts.verifyInternalProcess,
       resolveIpDirectPort: (tp) => this.#resolveIpDirectPort(tp),
       resolveIpDirectVhost: (p) => this.#resolveIpDirectVhost(p),
       resolveIpDirectSite: (p, s, l, v) => this.#resolveIpDirectSite(p, s, l, v),
@@ -434,7 +462,7 @@ export class ProxyManager {
       // open vhost 也可以部署在前缀下(如 vite base=/dev/:公共 URL 带 deployBasePath,
       // 服务自身也 serve 在同一前缀),forward 映射剥前缀后要接回。
       const b = this.#bindings.get(`${port}:`);
-      return b ? { serviceBasePath: b.serviceBasePath } : null;
+      return b ? { serviceBasePath: b.serviceBasePath, targetHost: b.targetHost } : null;
     }
     const binding = label !== undefined
       ? this.#bindings.get(`${port}:${label}`)
@@ -445,7 +473,7 @@ export class ProxyManager {
     // serviceBasePath 必须保留:labeled vhost 是应用的完整入口(如 basePath
     // 应用部署在 /dev),pipe 映射剥 deploy 前缀后要接回服务自身路径,否则
     // 转发丢 /dev → Next 404 + 尾斜杠重定向死循环。
-    if (!binding.provider) return { serviceBasePath: binding.serviceBasePath };
+    if (!binding.provider) return { serviceBasePath: binding.serviceBasePath, targetHost: binding.targetHost };
     // registration is PER HOST: one binding serves both the default localhost
     // vhost and the base-domain vhost, and authelia cookie domains / nginx
     // server blocks are per host.
@@ -460,7 +488,7 @@ export class ProxyManager {
           await gw.registerHost(vhost, binding.port, { authMode: "basic", htpasswdFile: htpasswd, scheme: "http", site: binding.site });
           this.#registered.add(key);
         }
-        return { basicGatewayPort: gw.port, htpasswdFile: htpasswd, serviceBasePath: binding.serviceBasePath };
+        return { basicGatewayPort: gw.port, htpasswdFile: htpasswd, serviceBasePath: binding.serviceBasePath, targetHost: binding.targetHost };
       }
       // token：provider 自描述（nginx auth_request → Bearer 探针；决策 API
       // 进程内校验，见 proxy.ts gateBackend）
@@ -472,7 +500,7 @@ export class ProxyManager {
           await gw.registerHost(vhost, binding.port, { authMode: "token", authPort, scheme: "http", site: binding.site });
           this.#registered.add(key);
         }
-        return { tokenFile: tokensFile, serviceBasePath: binding.serviceBasePath };
+        return { tokenFile: tokensFile, serviceBasePath: binding.serviceBasePath, targetHost: binding.targetHost };
       }
       if (!this.#registered.has(key)) {
         await provider.registerHost(vhost, binding.policy);
@@ -493,7 +521,7 @@ export class ProxyManager {
         ...(o2Setup ? { setup: o2Setup } : {}),
         ...(binding.bypassPaths ? { bypassPaths: binding.bypassPaths } : {}),
       };
-      return { forwardAuth: fw, serviceBasePath: binding.serviceBasePath };
+      return { forwardAuth: fw, serviceBasePath: binding.serviceBasePath, targetHost: binding.targetHost };
     } catch (err) {
       log(`proxy: backend for ${vhost} failed: ${err instanceof Error ? err.message : String(err)}`);
       return null;

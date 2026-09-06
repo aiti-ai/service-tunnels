@@ -1,3 +1,139 @@
+## 0.3.73 (2026-09-01)
+
+- **feat(internal-access): 内部可信客户端放行——内存轮换 token + Linux 进程凭证旁路**
+  - **背景**：嵌入方（如 pi-work service-tunnels 扩展）接管登录、拦截所有请求后，AI 内部 curl/fetch 的请求也被认证阻断。新增两套旁路，覆盖所有 vhost（enrollment 仍生效——未 enroll 端口带 token 仍 403）：
+  - **想法① 内存轮换 token ring**（跨平台，主层）：新增 `src/internal-token.ts`——不落盘（纯内存，重启即失效）、TTL（默认 15min）、定期轮换 + 天然 overlap（老 token 在自身 TTL 内仍有效，rotate 时刻正在飞的请求不 401）、ring 仅留 hash（当前条目留原文供重复注入子进程，rotate 后清空）。`st.internalTokens` 暴露 `currentToken()`/`envForChild()`（返回 `ST_INTERNAL_TOKEN` + `ST_INTERNAL_TOKEN_EXPIRES` 环境变量片段，宿主 spawn 子进程时展开注入）/`verify()`/`rotate()`/`status()`/`stop()`；默认 wire 进 `ProxyManager.verifyInternalToken`。
+  - **想法② 进程凭证探针**（增强层，可降级）：新增 `src/internal-process-probe.ts`——`createProcessProbe()`（平台分发：Linux /proc 可靠、macOS lsof+ps 实验性、Windows 不支持恒 false）、`createLinuxProcessProbe()`/`createMacProcessProbe()`（平台专用）。复用 `marker.ts` 的 per-process marker + discovery 同款 `/proc` 反查，对回环请求（放宽至整个 `127.0.0.0/8` + `::1`）反查发起 pid 的 environ 是否带 marker → 命中放行（子进程无需带 token，覆盖 AI 自创建的任意深度孙进程）；带 TTL 缓存（默认 5s）+ pid 存活校验防 TIME_WAIT 误判；非平台 / 探测失败 → false（降级为纯 token）。**默认不 wire**：`ServiceTunnelsOptions.autoWireProcessProbe`（默认 false，便捷开关）或显式 `verifyInternalProcess: createProcessProbe()`。
+  - **接入点**：`ServiceHostResolveContext` 新增 `verifyInternalToken?` + `verifyInternalProcess?`；`resolveServiceHost` 开头算 `internalBypass`，命中即跳过 basic/token/forward-auth gate（但 enrollment + allow-list 不被旁路）。两字段均可选，缺省 = 零回归。
+  - 与落盘 `providers/token.ts` 区别：落盘 token 是长期机器凭证（CI/脚本，按 site 管理）；内存 ring 是进程级临时凭证（AI 子进程会话级，重启失效，泄露窗口 = TTL）。
+  - 测试：`test/internal-token.test.mjs`（ring 8 case）+ `test/proxy-internal-bypass.test.mjs`（旁路语义 8 case：enrollment/allowlist 不被旁路、tokenFile gate 被旁路、overlap）+ `test/internal-process-probe.test.mjs`（9 case：降级/非回环/无 marker/放宽回环段/平台分发 + Linux 真实回环 e2e：继承 marker env 的子进程命中、未继承不命中）。
+  - 文档：`docs/internal-token-design.md`（设计 + 技术评估 + API + 验收）+ `docs/internal-access-acquisition-design.md`（token 获取/变更通知草案，待确认）。
+  - 待确认：token 获取端点（Windows/不开探针场景，见 acquisition 设计草案）——未实现。
+
+## 0.3.72 (2026-09-01)
+
+- **feat(ipv6-direct): mode "ipv6"——公网 IPv6 直连暴露（免隧道、免路由器映射）**
+  - 新增 `src/ipv6.ts`：`classifyIpv6`（global/ula/link-local/loopback/
+    multicast/documentation 分类）、`listIpv6Addresses`/`globalIpv6Addresses`/
+    `detectPublicIpv6`（显式 > 枚举 > external 探测）/`ipv6Diagnose`，index 导出；
+  - `st expose <port> --mode ipv6 [--ipv6-address <addr>]`：每个 ipv6 暴露用
+    **独立 transport**（独立 ProxyManager，随机端口），`allowIpDirect` +
+    `ipDirectPort` 把 `http://[<v6>]:<port>` 直连映射到 app，认证照常（portal/
+    basic/authelia…），无任何隧道进程/账户；多个 ipv6 暴露与 portmap 互不冲突；
+  - 本机防火墙 IPv6 感知：iptables 后端对 v6 地址走 **ip6tables**（check/open/
+    remove 全路径），`detectFirewall` 探测 ip6tables；v4 路径零改动；
+  - `st ipv6 [diagnose|list|stop]` 诊断/管理；`st status` 与 `st ddns ip` 附带
+    IPv6 信息；
+  - DDNS 联动：expose `ddns.aaaa`/`ddns.txt` 写 AAAA + `[v6]:port` TXT（CNAME
+    不适用——无域名可指，文档说明）；`RegistrationEntry.kind`/CLI entry-add 支持
+    `ipv6` 类型；`--aaaa` CLI flag；
+  - daemon：expose RPC `ipv6` 参数校验、exposeRegistry 持久化 ipv6 详情、
+    expose.stop/stopAll 撤销独立 transport + 防火墙、重启按入口地址恢复；
+    ui-api expose-stop/stop-all 支持 `ipv6:` 条目；
+  - 文档：`docs/ipv6-direct.md`（用户指南）+ `docs/ipv6-direct-expose-design.md`；
+  - UI/CLI 支持补齐（0.3.72 复核）：
+    - CLI：`st ipv6 [diagnose|list|stop]`、`st expose --mode ipv6 [--ipv6-address]`、
+      `st status`/`st ddns ip` 附带 v6 信息、DDNS `--aaaa` + entry-add `kind ipv6`；
+    - UI：`/api/expose` 透传 `ipv6`；暴露表单模式下拉含 `portmap`/`ipv6`、
+      ipv6 地址输入框、`doExpose` 按模式收集；DDNS 条目 kind 含 `ipv6` + AAAA
+      勾选；expose 列表/详情/摘要 badge 经 `modeOf` 识别 ipv6（不再显示 `?`）；
+      `fmtAddr` 已对 IPv6 加方括号；i18n 中英键对齐；
+  - 测试：`test/ipv6.test.mjs`（classify/枚举/检测 + firewall ip6tables 选择 +
+    `::1` 回环端到端），全量 292 测试 0 失败。
+
+## 0.3.71 (2026-09-01)
+
+- **feat(ipv6): 全链路 IPv6 支持补齐（调研发现平整个隧道/代理/网关链路）**
+  - **新增 `src/net-utils.ts`**：共享 IPv6 助手（`isBareIpv6`/`isIpv6Host`/
+    `bracketHost`/`unbracketHost`/`hostnameOnly`/`parseHostPort`/`formatHostPort`/
+    `resolveTargetHost`），index 导出；所有 `host[:port]` 解析统一走它，不再
+    被 `split(":")` 拆坏 IPv6 字面量；
+  - **校验**：`validateHost` 接受裸/加括号/带 zone 的 IPv6 字面量（ssh/serveo
+    host），`validateServer` 接受裸 IPv6 server（frpc/bore）；安全约束（`-` 前缀
+    拒绝、控制字符拒绝）不变；
+  - **frpc/bore 修复**：`#writeFrpcIni` 之前用 `split(":")` 把
+    `[2001:db8::1]:7000` 拆出 `server_addr=[2001`/`server_port=db8`——现改用
+    `parseHostPort` 正确生成 `server_addr=2001:db8::1`；`local_ip` 也按
+    `targetHost` 走（app 只绑 `::1` 时指向 `::1`）；
+  - **ssh/serveo 隧道**：dest 与合成 URL 对 IPv6 主机加方括号
+    （`op@[2001:db8::1]`、`http://[2001:db8::1]:8080`）；`-R` 本地侧与
+    cloudflared `--url` 按 `targetHost` 拨号（app 只绑 `::1` 也可被隧道/代理/
+    nginx 网关到达）；
+  - **proxy 决策**：Host 头解析换 `hostnameOnly`（`[2001:db8::1]:8080` 不再
+    mangled）；`allowIpDirect` 支持 IPv6 字面量 Host（mode portmap 的 IPv6
+    外部入口可达）；`pipe`/forward/WS upgrade 决策携带 `host`，按 per-binding
+    `targetHost`（`::1`）拨号；
+  - **nginx 网关**：`GatewayHost.targetHost` → `proxy_pass http://[::1]:port`
+    （bypass 白名单 location 同步）；`#sanitizeHost` 端口剥离换 `hostnameOnly`；
+  - **`targetHost` 自动探测**：expose 未显式传 `targetHost` 时先探 `127.0.0.1`、
+    无则回退 `::1`（`resolveTargetHost`，5s 缓存）——**只绑 IPv6 回环的本地服务
+    首次开箱可暴露**，无需配置；`ExposeOptions.targetHost` 可显式覆盖；
+  - `detectProtocol`/`detectLocalScheme` 支持 `host` 参数（`"auto"` 双栈探测），
+    daemon `port.protocol` 与 expose 协议探测不再把 `::1` 服务误判为 tcp；
+  - **portal/authsetup**：`waitTcp`/`probePortal` 按 `#host`（`--listen ::1` 不再
+    卡死在就绪检查）；UI 远程访问（allowedHosts）优先绑双栈 `::`（IPv4-only 主机
+    回退 `0.0.0.0`），IPv6 客户端可达；
+  - **DDNS AAAA**：`RegistrationEntry.aaaa` / `entry.type="AAAA"` / expose
+    `ddns.aaaa` 写 AAAA 记录（`resolvePublicIp(6)`），A/AAAA 走 upsert、
+    CNAME/TXT 走 beacon（此前 AAAA 只会被 setBeacon 拒绝）；无公网 IPv6 时报
+    清晰错误而非静默；
+  - cloudflared 边缘兜底 `--edge-ip-version` 可经
+    `SERVICE_TUNNELS_CLOUDFLARED_EDGE_IPVERSION`（4/6/auto）配置；
+  - portmap（UPnP/NAT-PMP/PCP/ssh-router）为 IPv4-only 协议（注释文档化）：
+    IPv6 无 NAT 语义，global 地址可直接访问。
+  - 测试：新增 `test/net-utils.test.mjs` 全套件 + validation/proxy/tunnels/
+    ddns-registry/user-fab 的 IPv6 用例（frpc `[v6]:port` ini、ssh `[::1]` dest、
+    proxy IPv6 IP-direct、gateway `proxy_pass [::1]`、AAAA 注册）。
+
+## 0.3.70 (2026-09-01)
+
+- **sec(authonly): 暴力破解防护整改（实测 hydra 攻击后加固）**
+  - portal 登录校验改**恒时 scrypt**：用户不存在时也用同成本虚拟盐哈希比对
+    （DUMMY_SALT/DUMMY_HASH），消除“跳过哈希 → 响应时间差枚举用户名”的
+    侧信道（错误消息本就统一 `Invalid username or password.`）；
+  - portal 新增 `trustProxy`（仅认证模式默认开）：信任回环代理的
+    `X-Forwarded-For` 最后一个 IP（nginx 追加的真实客户端）→ per-IP 封禁
+    作用于真实攻击者，不再因外部 nginx 转发把所有请求都当成 127.0.0.1
+    （此前会：5 次错误即封掉 127.0.0.1 = 全站锁死 / 分布式攻击无法隔离）；
+  - 实测验证：直连模式 hydra 5 次 → 429 生效；authonly 经 nginx 转发 + 两个
+    真实 IP 各爆破 → brute.json 记录 203.0.113.50/51（非 127.0.0.1），
+    per-IP 封禁 + per-account 封禁（防单账号分布式攻击）+ IP 隔离（新 IP 爆破
+    不同用户不受连带）全部正确；时序差从“跳过 scrypt”降为噪声级；
+  - authsetup 新增生成 **fail2ban filter + jail**（`fail2ban-auth-<base>.conf` /
+    `fail2ban-jail-<base>.conf`）：读 nginx access.log 的 401/429 按真实 IP
+    封禁（5 次/10min → 封 1h），与 portal 自带封禁互补（nginx 层更早拦截）。
+    `fail2ban-regex` 实测：4 matched（401/429 全命中）/ 1 missed（200 成功跳过）。
+- **feat(authsetup): 产物补全**——systemd unit **默认生成**（不再需 --with-systemd）；
+  新增 Windows 服务安装/卸载脚本（`install-service-<base>.bat` 优先 nssm、回退
+  `sc.exe create` node 直跑 cli.js；`uninstall-service-<base>.bat`）。
+
+## 0.3.69 (2026-09-01)
+
+- **feat(auth-only): 仅认证模式（替换 nginx 里的 authelia）+ authsetup**——
+  外部系统 nginx 用 `auth_request` 接入 service-tunnels 认证（不建隧道网关、
+  不起管理界面，更安全）：
+  - `st authsetup`：一次性定 admin 端口 / auth 端口 / basePath（随机如
+    `/nhgf`）/ site 存储位置（随机如 `rfgu`），生成可执行脚本 + nginx 碎片：
+    - `~/.local/bin/auth-admin-<base>.sh/.bat` —— Web 管理界面（`st ui`，调
+      user/site）；
+    - `~/.local/bin/auth-server-<base>.sh/.bat` —— 仅认证服务（`sts authonly
+      start`，前台 = systemd Type=simple 直接 ExecStart）；
+    - `configDir/auth/nginx-auth-<base>.conf` —— nginx `auth_request` 接入
+      碎片（探针 internal location + 登录页直达 + 401→302 登录重定向）；
+    - `configDir/auth/auth-server-<base>.service` —— systemd unit（--with-systemd）；
+    - 脚本名带 basePath → 多配置天然隔离；CLI 调用优先 `sts`（bin 注册名），
+      未入 PATH 回退 `node <cli.js>`；
+  - `st authonly start|stop|status`：仅认证服务生命周期。start 前台常驻 +
+    写 pid 文件 + 信号清理 + guardian 收割 portal 子进程；status 跨进程用端口
+    探针判定（非本进程注册表）；
+  - 库 `st.auth.server.start/stop/status(site)`：启动独立 portal provider
+    （固定端口 + basePath + site 存储），**会话密钥默认持久化**（site 存储
+    session.secret，0600）→ systemd 重启不掉会话；
+  - 工作流：`authsetup` → `auth-admin` 调好用户/site → `auth-server` 生产运行
+    → 需调整再开 admin 停认证重调；用户库与管理界面天然共享（同 site 存储）；
+  - 测试：authonly.test.mjs（渲染/config 往返/多配置隔离 + auth.server
+    401→登录→cookie→200→stop 端到端 + 双 site 隔离）。
+
 ## 0.3.68 (2026-08-30)
 
 - **feat(ddns): DDNS 注册绑定到端口/tunnel（expose 级）**——`expose(port, {ddns})`

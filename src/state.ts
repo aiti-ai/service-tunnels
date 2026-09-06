@@ -72,6 +72,11 @@ export interface ExposeRuntimeState {
     method?: string;
     sshRouter?: { host: string; user?: string; port?: number; key?: string; preset: string; connectTimeout?: number };
   };
+  /** mode=ipv6 的直连详情（重启后 transport 端口会变，按地址重建）。 */
+  ipv6?: {
+    address: string;
+    addresses?: string[];
+  };
   startedAt: number;
 }
 

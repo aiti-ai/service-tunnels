@@ -5,6 +5,7 @@ import { join } from "path";
 import { roleEnv } from "./marker.ts";
 import { withSchemaI18nKeys } from "./i18n.ts";
 import { validateTunnelConfig } from "./validation.ts";
+import { bracketHost, formatHostPort, parseHostPort, unbracketHost } from "./net-utils.ts";
 import {
   customTunnelTemplates,
   customTunnelParamSchemas,
@@ -62,6 +63,10 @@ export function tunnelSupportsTcp(type: string): boolean {
  * SERVICE_TUNNELS_CLOUDFLARED_EDGE=1 (always pin) / =0 (never pin).
  * Node 24 dropped the sync dns resolvers, so this is async (2s cap so a
  * hanging resolver can't stall tunnel startup).
+ *
+ * `SERVICE_TUNNELS_CLOUDFLARED_EDGE_IPVERSION` overrides the pinned-edge IP
+ * family (default "4" for CN/dual-stack networks; "6" for IPv6-only hosts,
+ * "auto" to let cloudflared decide).
  */
 let cloudflaredEdgeCache: boolean | null = null;
 export async function cloudflaredNeedsEdge(): Promise<boolean> {
@@ -79,9 +84,11 @@ export async function cloudflaredNeedsEdge(): Promise<boolean> {
 
 /** `--edge` args for the cloudflared command when SRV discovery is broken. */
 export async function cloudflaredEdgeArgs(): Promise<string[]> {
-  return (await cloudflaredNeedsEdge())
-    ? ["--edge", "region1.v2.argotunnel.com:7844", "--edge-ip-version", "4"]
-    : [];
+  if (!(await cloudflaredNeedsEdge())) return [];
+  const v = (process.env.SERVICE_TUNNELS_CLOUDFLARED_EDGE_IPVERSION ?? "4").trim() || "4";
+  const args = ["--edge", "region1.v2.argotunnel.com:7844"];
+  if (v !== "auto") args.push("--edge-ip-version", v === "6" ? "6" : "4");
+  return args;
 }
 
 /** Reset the SRV probe cache (tests). */
@@ -118,6 +125,11 @@ export interface TunnelConfig {
   user?: string;
   /** SSH server port (`-p`, default 22 when unset → flag omitted). */
   port?: number;
+  /** Local host the tunnel process dials for the app port — 127.0.0.1 by
+   *  default; "::1" (or any reachable address) for apps bound to IPv6
+   *  loopback only. Frpc `local_ip`, cloudflared `--url` host, ssh `-R`
+   *  local side, and the synthesized ssh URL all honor this. */
+  targetHost?: string;
   /** Remote port forwarded on the SSH server (`-R <remotePort>:127.0.0.1:<target>`);
    *  ssh only — serveo always uses 80. Defaults to `target`.
    *  bore: requested public port (`-p`, default 0 = server-assigned). */
@@ -191,12 +203,12 @@ const OUTPUT_LIMIT = 8192;
  * URL domain cannot be predicted.
  */
 /** Probe a LOCAL port to decide http vs https (for ssh -R synth URLs). */
-async function detectLocalScheme(port: number, timeoutMs = 1500): Promise<"http" | "https"> {
+async function detectLocalScheme(port: number, host = "127.0.0.1", timeoutMs = 1500): Promise<"http" | "https"> {
   if (!port || port <= 0) return "http";
   const probe = (mod: "http" | "https") =>
     new Promise<boolean>((resolve) => {
       void import(mod).then(({ request }) => {
-        const req = request({ host: "127.0.0.1", port, path: "/", method: "GET", rejectUnauthorized: false, timeout: timeoutMs }, (r: { destroy(): void }) => {
+        const req = request({ host, port, path: "/", method: "GET", rejectUnauthorized: false, timeout: timeoutMs }, (r: { destroy(): void }) => {
           r.destroy();
           resolve(true);
         });
@@ -490,12 +502,15 @@ export class TunnelManager {
       const rp = cfg.remotePort ?? cfg.target;
       if (rp) {
         // scheme depends on the LOCAL target's protocol (ssh -R forwards the
-        // remote port to 127.0.0.1:<target>) — probe it, default http. TCP
+        // remote port to <targetHost>:<target>) — probe it, default http. TCP
         // forwards get a `tcp://` URL (raw transport, no scheme).
+        // cfg.host 可能是 IPv6 字面量（2001:db8::1）——URL 里必须加方括号。
+        const targetHost = cfg.targetHost ?? "127.0.0.1";
+        const remoteHost = cfg.host;
         const synthUrl = () =>
           cfg.protocol === "tcp"
-            ? Promise.resolve(`tcp://${cfg.host}:${rp}`)
-            : detectLocalScheme(cfg.target ?? 0).then((scheme) => `${scheme}://${cfg.host}:${rp}`);
+            ? Promise.resolve(`tcp://${formatHostPort(remoteHost, rp)}`)
+            : detectLocalScheme(cfg.target ?? 0, targetHost).then((scheme) => `${scheme}://${formatHostPort(remoteHost, rp)}`);
         // Window must exceed ssh's ConnectTimeout (10s): an unreachable host
         // keeps ssh alive for the connect attempt then exits. Only synthesize
         // the URL after ssh has survived that window (real forward established).
@@ -626,9 +641,13 @@ export class TunnelManager {
         // user/port/remotePort) configure it; remote forward defaults to the
         // local target port. (For the serveo.net hosted service use "serveo".)
         if (!cfg.host) throw new Error(`tunnel '${cfg.name}': type "ssh" requires host`);
-        const dest = cfg.user ? `${cfg.user}@${cfg.host}` : cfg.host;
+        // IPv6 字面量主机在 user@host 里必须带方括号（OpenSSH 语法）。
+        const dest = cfg.user ? `${cfg.user}@${bracketHost(cfg.host)}` : bracketHost(cfg.host);
         const remotePort = cfg.remotePort ?? target;
-        return sshSpec({ forward: `${remotePort}:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args });
+        // -R 的本地连接侧（host:hostport）也按 targetHost 走：app 只绑 ::1 时
+        // 必须把本地侧指到 [::1]，否则 ssh 连 127.0.0.1 拿不到。
+        const localTarget = formatHostPort(cfg.targetHost ?? "127.0.0.1", target);
+        return sshSpec({ forward: `${remotePort}:${localTarget}`, dest, port: cfg.port, extra: cfg.args });
       }
       case "serveo": {
         // The serveo.net hosted service: forward remote port 80 and serveo
@@ -639,12 +658,13 @@ export class TunnelManager {
         const host = cfg.host ?? "serveo.net";
         // serveo 匿名服务:ssh 默认用本机用户名(wind@serveo.net)会被拒——
         // serveo 官方接受固定用户名 "user"(任意值即可);显式配置 user 时优先
-        const dest = cfg.user ? `${cfg.user}@${host}` : `user@${host}`;
-        return sshSpec({ forward: `80:127.0.0.1:${target}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false, batch: false });
+        const dest = cfg.user ? `${cfg.user}@${bracketHost(host)}` : `user@${bracketHost(host)}`;
+        const localTarget = formatHostPort(cfg.targetHost ?? "127.0.0.1", target);
+        return sshSpec({ forward: `80:${localTarget}`, dest, port: cfg.port, extra: cfg.args, forwardOnly: false, batch: false });
       }
       case "cloudflared": {
         const bin = await tool("cloudflared");
-        const args = ["tunnel", "--url", `http://127.0.0.1:${target}`];
+        const args = ["tunnel", "--url", `http://${formatHostPort(cfg.targetHost ?? "127.0.0.1", target)}`];
         if (domain) args.push("--hostname", domain);
         // SRV edge discovery may be broken (CN/router DNS); pin the edge by
         // domain in that case so the tunnel still establishes.
@@ -713,20 +733,27 @@ export class TunnelManager {
   }
 
   async #writeFrpcIni(cfg: TunnelConfig, target: number, domain: string | undefined): Promise<string> {
-    const [host, port = "7000"] = (cfg.server ?? process.env.SERVICE_TUNNELS_FRPC_SERVER ?? "127.0.0.1:7000").split(":");
+    // frpc server 地址可能是 host[:port] 或 [ipv6][:port]——用 parseHostPort
+    // 拆（split(":") 会把 [2001:db8::1]:7000 拆坏）。local_ip 同理按
+    // targetHost 走（app 只绑 ::1 时指到 ::1）。
+    const { host: serverHost, port: serverPortRaw } = parseHostPort(
+      cfg.server ?? process.env.SERVICE_TUNNELS_FRPC_SERVER ?? "127.0.0.1:7000",
+    );
+    const port = serverPortRaw || "7000";
+    const localIp = unbracketHost(cfg.targetHost ?? "127.0.0.1");
     const token = cfg.token ?? process.env.SERVICE_TUNNELS_FRPC_TOKEN ?? "";
     const iniPath = join(this.#opts.cacheDir, "tmp", `frpc-${cfg.name}.ini`);
     mkdirSync(join(this.#opts.cacheDir, "tmp"), { recursive: true });
     const lines = [
       "[common]",
-      `server_addr = ${host}`,
+      `server_addr = ${serverHost}`,
       `server_port = ${port}`,
     ];
     if (token) lines.push(`token = ${token}`);
     if (cfg.protocol === "tcp") {
-      lines.push("", "[web]", "type = tcp", "local_ip = 127.0.0.1", `local_port = ${target}`, `remote_port = ${cfg.remotePort ?? target}`);
+      lines.push("", "[web]", "type = tcp", `local_ip = ${localIp}`, `local_port = ${target}`, `remote_port = ${cfg.remotePort ?? target}`);
     } else {
-      lines.push("", "[web]", "type = http", "local_ip = 127.0.0.1", `local_port = ${target}`);
+      lines.push("", "[web]", "type = http", `local_ip = ${localIp}`, `local_port = ${target}`);
       lines.push(`custom_domains = ${domain ?? "localhost"}`);
     }
     writeFileSync(iniPath, lines.join("\n") + "\n", "utf8");

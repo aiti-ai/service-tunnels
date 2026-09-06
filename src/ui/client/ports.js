@@ -19,7 +19,7 @@ function renderPorts(){
       const u=e.url||e.localUrl||e.baseUrl||e.domainUrl||'';
       return '<div class="row" style="padding:6px 0;cursor:default">'
         +'<span class="mono">127.0.0.1:'+e.port+'</span>'
-        +'<span class="badge">'+(e.name&&e.name.indexOf('proxy:')===0?'proxy':(e.tunnelType||'?'))+'</span>'
+        +'<span class="badge">'+esc(modeOf(e)||'?')+'</span>'
         +'<span class="badge">'+(e.protocol||'http')+'</span>'
         +(e.provider?'<span class="badge">auth: '+esc(e.provider)+'</span>':'<span class="badge authnone">⚠ none</span>')
         +'<span class="ok" style="font-size:10px">● running</span>'
@@ -70,7 +70,7 @@ function expandPort(s,exs,urls){
   // active exposes for this port
   if(exs.length){
     h+='<div class="section-label">'+esc(tr('ui.ports.thisPortExposes'))+'</div>';
-    h+=exs.map((e)=>'<div class="row" style="padding:5px 0;cursor:default"><span class="badge">'+(e.name.indexOf('proxy:')===0?'proxy':(e.tunnelType||'?'))+'</span>'
+    h+=exs.map((e)=>'<div class="row" style="padding:5px 0;cursor:default"><span class="badge">'+esc(modeOf(e)||'?')+'</span>'
       +(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':'<span class="badge authnone">⚠ none</span>')
       +'<span class="'+(e.running?'ok':'dim')+'" style="font-size:10px">'+(e.running?'● '+esc(tr('ui.tunnelRunning')):esc(tr('ui.tunnelStopped')))+'</span>'
       +'<div class="spacer"></div>'
@@ -98,8 +98,13 @@ function exposeForm(port){
   // 顺序: protocol(auto detect) → mode(tunnel) → tunnel(无默认) → auth(协议联动) → site → 2FA(two_factor)
   return '<div class="form-grid" style="margin-bottom:8px">'
     +fld('protocol','<div id="exp-protocol-wrap">'+sel('exp-protocol',[{value:'auto',label:tr('ui.ports.protoAuto')}].concat(['http','https','tcp'].map(ov)),protoDef)+'</div>')
-    +fld('mode',sel('exp-mode',['tunnel','proxy','both'].map(ov),'tunnel'))
+    +fld('mode',sel('exp-mode',['tunnel','proxy','both','portmap','ipv6'].map(ov),'tunnel'))
     +fld('tunnel',sel('exp-tunnel',tunnelTypes.slice().sort((a,b)=>(metas[b]&&metas[b].favorite?1:0)-(metas[a]&&metas[a].favorite?1:0)).map((t)=>({value:t,label:t+(metas[t]&&metas[t].favorite?' ★':'')}))))
+    +'<div id="exp-ipv6-wrap" style="display:none">'
+    +'<label>'+esc(tr('ui.ports.ipv6Address'))+' <span class="dim" style="font-weight:normal">('+esc(tr('ui.ports.ipv6Optional'))+')</span></label>'
+    +'<input id="exp-ipv6-address" placeholder="auto (first global v6)" style="width:100%">'
+    +'<div class="hint">'+esc(tr('ui.ports.ipv6Hint'))+'</div>'
+    +'</div>'
     +fld('auth',sel('exp-provider',providerOpts.map((p)=>({value:p,label:p==='none'?'none (no auth)':p})),authDef))
     +fld('site',sel('exp-site',siteOpts.map(ov),'default'))
     +fld('policy',sel('exp-policy',['one_factor','two_factor'].map(ov),'two_factor'))
@@ -159,7 +164,7 @@ window.showExposeDetail=async(name)=>{
     }
     const links=[e.url,e.localUrl,e.baseUrl,e.domainUrl,e.loginUrl].filter(Boolean);
     openModal('<h3>'+esc(e.name)+' · <span class="mono">127.0.0.1:'+e.port+'</span></h3>'
-      +kv('mode',e.mode||(e.name.indexOf('proxy:')===0?'proxy':''))
+      +kv('mode',modeOf(e)||'')
       +kv('provider',e.provider||'<span class="bad">⚠ none</span>')
       +kv('tunnel',e.tunnelType||'—')+kv('site',e.site||'default')+kv('protocol',e.protocol||'http')
       +kv('started',e.startedAt?new Date(e.startedAt).toLocaleString():'—')
@@ -179,7 +184,20 @@ window.showLogFile=async(path)=>{
   }catch(err){toast(String(err),true);}
 };
 let authManual=false; // 用户手动改过 auth → 协议联动不再覆盖
-function afterExposeFormMount(){refreshTunnelParams();renderAuthParams();syncProviderFields();detectPortProtocol(state._exposePort||0);loadPresets();}
+function afterExposeFormMount(){refreshTunnelParams();renderAuthParams();syncProviderFields();syncModeFields();detectPortProtocol(state._exposePort||0);loadPresets();
+  const modeSel=document.getElementById('exp-mode');if(modeSel)modeSel.onchange=syncModeFields;
+}
+// mode 联动: ipv6/portmap 不需要 tunnel 选择; ipv6 显示入口地址输入框
+function syncModeFields(){
+  const sel=document.getElementById('exp-mode');if(!sel)return;
+  const mode=sel.value;
+  const tunnelWrap=document.getElementById('exp-tunnel')&&document.getElementById('exp-tunnel').closest('div');
+  const ipv6Wrap=document.getElementById('exp-ipv6-wrap');
+  if(tunnelWrap)tunnelWrap.style.display=(mode==='tunnel'||mode==='both')?'':'none';
+  if(ipv6Wrap)ipv6Wrap.style.display=(mode==='ipv6')?'':'none';
+  // tunnel-param 区域: 非 tunnel/both 清空
+  if(mode!=='tunnel'&&mode!=='both'){const el=document.getElementById('exp-tunnel-params');if(el)el.innerHTML='';}
+}
 // provider=ssh: hide protocol (port-forward); auth change → render auth params group
 function syncProviderFields(){
   const sel=document.getElementById('exp-provider');if(!sel)return;
@@ -224,10 +242,11 @@ window.doExpose=async(port)=>{
   const ssh=provider==='ssh';
   const protocol=ssh?'tcp':document.getElementById('exp-protocol').value;
   const mode=document.getElementById('exp-mode').value;
-  const tunnel=document.getElementById('exp-tunnel').value;
-  // 必选校验（tunnel 无默认; mode 默认 tunnel; protocol 默认 auto → 不传由库 detect）
+  const needsTunnel=(mode==='tunnel'||mode==='both');
+  const tunnel=needsTunnel?document.getElementById('exp-tunnel').value:'';
+  // 必选校验: 仅 tunnel/both 需要 tunnel; protocol 默认 auto → 不传由库 detect
   const req=(v,n)=>{if(!v){toast(esc(n)+' '+tr('ui.ports.fieldRequired'),true);return false;}return true;};
-  if(!req(tunnel,'tunnel'))return;
+  if(needsTunnel&&!req(tunnel,'tunnel'))return;
   const body={
     port, mode,
     provider:provider==='none'||provider==='ssh'?undefined:provider,
@@ -236,15 +255,21 @@ window.doExpose=async(port)=>{
     // protocol 'auto' → 不传, 库 detectProtocol 自动判定
     ...(protocol&&protocol!=='auto'?{protocol}:{}),
     policy:document.getElementById('exp-policy').value||undefined,
-    tunnel,
   };
+  if(needsTunnel)body.tunnel=tunnel;
+  // ipv6 模式: 显式入口地址（可选, 缺省自动检测第一个 global v6）
+  if(mode==='ipv6'){
+    const addrEl=document.getElementById('exp-ipv6-address');
+    const addr=addrEl?addrEl.value.trim():'';
+    if(addr)body.ipv6={address:addr};
+  }
   if(ssh)body.provider='ssh';
-  if(protocol==='tcp'){const tcp=(st.tunnelTcpSupport||[]);if(tcp.length&&!tcp.includes(tunnel)){toast(tr('ui.ports.tcpNotSupport'),true);return;}}
+  if(needsTunnel&&protocol==='tcp'){const tcp=(st.tunnelTcpSupport||[]);if(tcp.length&&!tcp.includes(tunnel)){toast(tr('ui.ports.tcpNotSupport'),true);return;}}
   // tunnel / auth 参数分组
   const read=(root)=>{const o={};document.querySelectorAll(root+' [data-k]').forEach((el)=>{const v=el.value;if(v!=='')o[el.dataset.k]=el.type==='number'?Number(v):v;});return o;};
   // TODO-2: 选中 preset 时,表单留空的字段用已存值(敏感字段不回显,提交时合并明文)
   const mergePreset=async(kind,cur)=>{const n=kind==='tunnel'?state._tunnelPresetName:state._authPresetName;if(!n)return cur;const type=document.getElementById(kind==='tunnel'?'exp-tunnel':'exp-provider').value;try{const d=await api('/api/presets?kind='+kind+'&type='+encodeURIComponent(type)+'&name='+encodeURIComponent(n));if(d&&d.params){const out={...cur};for(const[k,v]of Object.entries(d.params)){if(!(k in out))out[k]=v;}return out;}}catch(e){}return cur;};
-  const tp=await mergePreset('tunnel',read('#exp-tunnel-params'));
+  const tp=needsTunnel?await mergePreset('tunnel',read('#exp-tunnel-params')):{};
   if(Object.keys(tp).length)body.tunnelParams=tp;
   const pp=await mergePreset('auth',read('#exp-auth-params'));
   if(Object.keys(pp).length)body.providerParams=pp;

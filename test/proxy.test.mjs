@@ -119,6 +119,57 @@ test("parseServiceHost matches <port>.<suffix> (open) and <port>-<label>.<suffix
   assert.equal(parseServiceHost(undefined, [".st.localhost"]), null);
 });
 
+test("parseServiceHost / proxyTarget / ip-direct: IPv6 literal Host headers", async () => {
+  const { parseServiceHost, proxyTarget, resolveServiceHost } = await loadProxy();
+  // IPv6 literal Host header is not a service vhost → null (never mangled into "[2001")
+  assert.equal(parseServiceHost("[2001:db8::1]:4180", [".st.localhost"]), null);
+  assert.equal(parseServiceHost("[::1]:4180", [".st.localhost"]), null);
+  // vhost parsing still works for normal domains (regression guard)
+  assert.deepEqual(parseServiceHost("5173.st.localhost", [".st.localhost"]), { port: 5173, suffix: "st.localhost", label: undefined });
+
+  // proxyTarget brackets the upstream IPv6 literal
+  assert.equal(proxyTarget(3000, "/x", "127.0.0.1"), "http://127.0.0.1:3000/x");
+  assert.equal(proxyTarget(3000, "/x", "::1"), "http://[::1]:3000/x");
+
+  // ip-direct over IPv6: Host "[2001:db8::1]:8080" resolves the open binding
+  const decision = await resolveServiceHost(
+    { host: "[2001:db8::1]:8080", url: "/app", method: "GET" },
+    {
+      suffixes: [".st.localhost"],
+      isAllowed: () => true,
+      allowIpDirect: true,
+      resolveIpDirectPort: (tp) => (tp === 8080 ? 3000 : null),
+      resolveSite: async (port, _site, _label) => (port === 3000 ? { targetHost: "::1" } : null),
+      basePath: "",
+      serviceBasePath: "",
+      resolveLabel: () => null,
+      resolveSuffixSite: () => null,
+    },
+  );
+  assert.equal(decision.kind, "pipe");
+  if (decision.kind === "pipe") {
+    assert.equal(decision.port, 3000);
+    assert.equal(decision.host, "::1", "pipe host follows per-binding targetHost");
+  }
+
+  // ip-direct over IPv4 still works (regression guard)
+  const d4 = await resolveServiceHost(
+    { host: "203.0.113.7:8080", url: "/app", method: "GET" },
+    {
+      suffixes: [".st.localhost"],
+      isAllowed: () => true,
+      allowIpDirect: true,
+      resolveIpDirectPort: (tp) => (tp === 8080 ? 3000 : null),
+      resolveSite: async (port) => (port === 3000 ? {} : null),
+      basePath: "",
+      serviceBasePath: "",
+      resolveLabel: () => null,
+      resolveSuffixSite: () => null,
+    },
+  );
+  assert.equal(d4.kind, "pipe");
+});
+
 test("transformResponse inject: 注入请求上游收 identity；回调抛异常降级不注入；非 HTML 透传", async () => {
   const { createProxyServer } = await loadProxy();
   const { InternalRegistry } = await loadDiscovery();

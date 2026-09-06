@@ -17,6 +17,14 @@ let pollTimer=null;
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function fmtAddr(a){return a.includes(':')?'['+a+']':a;}
+/** Expose 条目的显示模式：优先记录自带 mode；老记录按 name 前缀推断。 */
+function modeOf(e){
+  if(e&&e.mode)return e.mode;
+  if(!e||!e.name)return '';
+  if(e.name.indexOf('ipv6:')===0)return 'ipv6';
+  if(e.name.indexOf('proxy:')===0)return 'proxy';
+  return e.tunnelType||'';
+}
 function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
 function confirmDlg(title,body,confirmLabel,onOk){
   const root=document.getElementById('modalRoot');

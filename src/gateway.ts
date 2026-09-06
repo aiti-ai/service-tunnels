@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import { roleEnv } from "./marker.ts";
 import { validateSetupEntry } from "./auth-provider.ts";
+import { bracketHost, hostnameOnly, unbracketHost } from "./net-utils.ts";
 
 /**
  * nginx gateway — the local host that owns auth (design.md §5).
@@ -24,6 +25,9 @@ export interface GatewayHost {
   host: string;
   /** Local app port behind auth. */
   port: number;
+  /** Local app upstream address (127.0.0.1 default; "::1" for IPv6-loopback-
+   *  only apps). nginx `proxy_pass` dials this address. */
+  targetHost?: string;
   /** Backend port for forward-auth (authelia/oauth2-proxy). Per-host so one
    *  shared nginx can route different hosts to different providers. */
   authPort?: number;
@@ -123,23 +127,25 @@ export interface GatewayConfig {
 /** Probe a LOCAL app port to classify its protocol: "http", "https", or
  *  "tcp" (raw — accepts a TCP connection but isn't HTTP/TLS). Used to decide
  *  the forwarding mode (nginx gateway for http/https; direct raw tunnel for
- *  tcp). */
-export async function detectProtocol(port: number, timeoutMs = 1500): Promise<"http" | "https" | "tcp"> {
+ *  tcp). `host` defaults to 127.0.0.1; for an app bound only to ::1, pass
+ *  "::1" (or "auto" to probe both families). */
+export async function detectProtocol(port: number, timeoutMs = 1500, host = "127.0.0.1"): Promise<"http" | "https" | "tcp"> {
+  const hosts = host === "auto" ? ["127.0.0.1", "::1"] : [host];
   // Raw net/tls probes (no http agent → no keep-alive socket lingering).
   // Every socket is explicitly destroyed so the event loop drains.
-  const probeTcp = () =>
+  const probeTcp = (h: string) =>
     new Promise<boolean>((resolve) => {
       void import("net").then(({ connect }) => {
-        const s = connect(port, "127.0.0.1");
+        const s = connect(port, h);
         s.once("connect", () => { s.destroy(); resolve(true); });
         s.once("error", () => { s.destroy(); resolve(false); });
         s.setTimeout(timeoutMs, () => { s.destroy(); resolve(false); });
       });
     });
-  const probeHttp = () =>
+  const probeHttp = (h: string) =>
     new Promise<boolean>((resolve) => {
       void import("net").then(({ connect }) => {
-        const s = connect(port, "127.0.0.1");
+        const s = connect(port, h);
         let got = false;
         s.once("connect", () => {
           s.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
@@ -149,18 +155,22 @@ export async function detectProtocol(port: number, timeoutMs = 1500): Promise<"h
         s.setTimeout(timeoutMs, () => { s.destroy(); resolve(got); });
       });
     });
-  const probeHttps = () =>
+  const probeHttps = (h: string) =>
     new Promise<boolean>((resolve) => {
       void import("tls").then(({ connect }) => {
-        const s = connect({ host: "127.0.0.1", port, rejectUnauthorized: false });
+        const s = connect({ host: h, port, rejectUnauthorized: false });
         s.once("secureConnect", () => { s.destroy(); resolve(true); });
         s.once("error", () => { s.destroy(); resolve(false); });
         s.setTimeout(timeoutMs, () => { s.destroy(); resolve(false); });
       });
     });
-  if (await probeHttp()) return "http";
-  if (await probeHttps()) return "https";
-  if (await probeTcp()) return "tcp";
+  for (const h of hosts) {
+    if (await probeHttp(h)) return "http";
+    if (await probeHttps(h)) return "https";
+  }
+  for (const h of hosts) {
+    if (await probeTcp(h)) return "tcp";
+  }
   return "tcp";
 }
 
@@ -458,10 +468,12 @@ export function generateHostNginx(
   // 认证放行白名单：不带 auth_request 的 location，直接转发应用（前缀匹配，
   // nginx 最长前缀优先 → 覆盖 location / 的 auth_request）。同样带注入（
   // 白名单路径的 HTML 页面也是直接请求的页面）。
+  // app 上游地址按 targetHost 走（app 只绑 ::1 时 proxy_pass 指到 [::1]）。
+  const appUpstream = `${h.scheme === "https" ? "https" : "http"}://${bracketHost(h.targetHost ?? "127.0.0.1")}:${h.port}`;
   const bypassBlock = (h.bypassPaths ?? [])
     .map((p) => {
       return `    location ${p} {
-      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};
+      proxy_pass ${appUpstream};
       proxy_set_header Host $host;
       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
       proxy_set_header X-Forwarded-Proto $scheme;
@@ -483,7 +495,7 @@ ${injectLoc}    }
 
 ${injectServer}${whoServer}${bypassBlock}${authzBlock}${portalBlock}${setupBlock}${authFailBlock}    location / {
 ${authLine}
-${injectLoc}      proxy_pass ${h.scheme === "https" ? `https://127.0.0.1:${h.port}` : `http://127.0.0.1:${h.port}`};${h.scheme === "https" ? `
+${injectLoc}      proxy_pass ${appUpstream};${h.scheme === "https" ? `
       proxy_ssl_verify off;
       proxy_ssl_server_name off;` : ""}
       proxy_set_header Host $host;
@@ -816,8 +828,10 @@ export class GatewayController {
     if (typeof host !== "string" || host.length === 0 || host.length > 253) {
       throw new Error(`invalid host: ${JSON.stringify(host)}`);
     }
-    // strip :port (bore-style URLs synthesize host:port)
-    const hostname = host.includes(":") ? host.slice(0, host.indexOf(":")) : host;
+    // strip :port (bore-style URLs synthesize host:port); hostnameOnly also
+    // handles [ipv6]:port without mangling it (then rejected by the DNS
+    // regex below — server_name is domain-only by design).
+    const hostname = hostnameOnly(host);
     // bare DNS label: letters/digits/dots/hyphens only, no leading/trailing
     // dot or hyphen, no other punctuation (;{}'"\\/ whitespace all rejected)
     if (!/^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(hostname) || hostname.includes("..")) {
@@ -830,7 +844,7 @@ export class GatewayController {
   async registerHost(
     host: string,
     port: number,
-    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string; inject?: string | GatewayInject; loginInfoButton?: boolean },
+    auth?: { authPort?: number; basePath?: string; authMode?: GatewayAuthMode; htpasswdFile?: string; loginRedirect?: string; scheme?: "http" | "https"; setup?: GatewayHost["setup"]; bypassPaths?: string[]; site?: string; inject?: string | GatewayInject; loginInfoButton?: boolean; targetHost?: string },
   ): Promise<void> {
     const safe = this.#sanitizeHost(host);
     const inject = normalizeInject(auth?.inject);
@@ -853,6 +867,7 @@ export class GatewayController {
     this.#hosts.set(safe, {
       host: safe,
       port,
+      targetHost: auth?.targetHost,
       authPort: auth?.authPort,
       basePath: auth?.basePath,
       authMode: auth?.authMode ?? this.#authMode,

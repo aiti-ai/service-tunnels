@@ -188,7 +188,10 @@ async function main(): Promise<void> {
 
   // parent gone — kill everything we recorded (by pid; valid even after
   // reparenting), then marker-scoped stragglers (detached tunnels).
+  let reaping = false;
   const reapAndExit = async (): Promise<never> => {
+    if (reaping) return new Promise<never>(() => {}); // single-flight; exit follows
+    reaping = true;
     const marker = process.env.SERVICE_TUNNELS_MARKER ?? "";
     const targets = new Set([...descendants, ...registered]);
     const killSig = (sig: NodeJS.Signals) => {
@@ -229,11 +232,14 @@ async function main(): Promise<void> {
     }
   };
 
-  // ── Mode 1: IPC channel (preferred) ──────────────────────────────
-  // The channel IS the liveness link: the parent holds the far end, so its
-  // death closes the pipe and fires 'disconnect' — no polling, no spawns of
-  // any kind. The IPC handle itself keeps this process' loop alive; the
-  // maintenance timer is unref'd so it never does.
+  // ── Mode 1: IPC channel (preferred fast path) + parent liveness poll ──
+  // The channel tells us when OUR spawner died. But spawnGuardian may be
+  // invoked by a DIFFERENT process than the one it watches (e.g. tests, a
+  // supervisor acting on behalf of a service) — the IPC channel then never
+  // closes even after the watched parentPid exits. So we ALSO poll
+  // parentAlive(parentPid) as the authoritative liveness check; the
+  // disconnect handler is just a fast trigger. The IPC handle keeps this
+  // process' loop alive; both timers are unref'd so they never pin it.
   if (process.connected) {
     refresh();
     const maint = setInterval(refresh, scanIntervalMs);
@@ -241,6 +247,12 @@ async function main(): Promise<void> {
     process.on("disconnect", () => {
       void reapAndExit();
     });
+    // Authoritative liveness poll — reaps when the WATCHED parent dies, even
+    // if our spawner is a different process (IPC channel still open).
+    const livenessPoll = setInterval(() => {
+      if (!parentAlive(parentPid, parentStarttime)) void reapAndExit();
+    }, Math.max(intervalMs, 100));
+    livenessPoll.unref?.();
     return;
   }
 

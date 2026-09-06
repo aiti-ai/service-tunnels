@@ -174,3 +174,23 @@ test("login-fab e2e: portal 注入 → who JSON → logout 清会话（真实 ng
   const after = await httpReq({ host: "127.0.0.1", port: gatewayPort, path: "/", headers: { ...H, cookie: cookie + "x", connection: "close" } });
   assert.notEqual(after.status, 200, "旧 cookie 已无效（篡改后拒绝）");
 });
+
+test("gateway: IPv6 app upstream → nginx proxy_pass brackets targetHost", async () => {
+  const { generateHostNginx } = await import("../src/gateway.ts");
+  const conf = generateHostNginx(
+    { host: "demo.trycloudflare.com", port: 5199, targetHost: "::1", authMode: "none" },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.match(conf, /proxy_pass http:\/\/\[::1\]:5199/, "location / proxy_pass brackets IPv6 upstream");
+  const withBypass = generateHostNginx(
+    { host: "demo.trycloudflare.com", port: 5199, targetHost: "::1", authMode: "none", bypassPaths: ["/health"] },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.match(withBypass, /proxy_pass http:\/\/\[::1\]:5199/, "bypass location also brackets IPv6 upstream");
+  // default stays IPv4 loopback (no regression)
+  const v4 = generateHostNginx(
+    { host: "demo.trycloudflare.com", port: 5199, authMode: "none" },
+    { nginxPort: 4180, nginxRoot: "/tmp/x/nginx" },
+  );
+  assert.match(v4, /proxy_pass http:\/\/127\.0\.0\.1:5199/, "default targetHost stays 127.0.0.1");
+});

@@ -6,7 +6,7 @@ function renderExposes(){
   if(!exs.length){h+='<div class="empty">'+esc(tr('ui.ports.none'))+'</div>';}
   else{
     h+='<table><thead><tr><th>port</th><th>name</th><th>mode</th><th>provider</th><th>protocol</th><th>site</th><th>ddns</th><th>status</th><th></th></tr></thead><tbody>';
-    h+=exs.map((e)=>'<tr><td class="mono">'+e.port+'</td><td class="mono">'+esc(e.name)+'</td><td>'+esc(e.mode||(e.name.indexOf('proxy:')===0?'proxy':''))+'</td>'
+    h+=exs.map((e)=>'<tr><td class="mono">'+e.port+'</td><td class="mono">'+esc(e.name)+'</td><td>'+esc(modeOf(e)||'')+'</td>'
       +'<td>'+(e.provider?esc(e.provider):'<span class="badge authnone">⚠ none</span>')+'</td><td>'+esc(e.protocol||'http')+'</td><td>'+esc(e.site||'default')+'</td>'
       // DDNS 注册状态列：profile + 每条记录（ok/失败）
       +'<td>'+(e.ddns&&e.ddns.actions&&e.ddns.actions.length

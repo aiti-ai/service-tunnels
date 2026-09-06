@@ -68,6 +68,16 @@ export interface PortalAuthProviderOptions {
   policy?: AuthPolicy["policy"];
   /** 会话 TTL（天，缺省 7）。 */
   sessionTtlDays?: number;
+  /** 会话 HMAC 密钥持久化文件（可选，仅认证模式用）：加载或生成写入该文件，
+   *  systemd 重启后会话不失效（默认 per-instance 随机——restart 全体登出）。
+   *  0600。 */
+  secretFile?: string;
+  /** 监听地址（缺省 127.0.0.1）。仅认证模式跨机接入时显式传。 */
+  host?: string;
+  /** 信任回环代理的 X-Forwarded-For（缺省 false）。仅认证模式经外部 nginx
+   *  转发时开——per-IP 封禁取 nginx 追加的真实客户端 IP（只信回环连接，
+   *  防止伪造）。 */
+  trustProxy?: boolean;
   /** 勾选“记住我”后的会话 TTL（天，缺省 365）——仅延长完整认证
    *  （twoFactor 完成）后的会话；1FA 会话不延长。 */
   rememberMeTtlDays?: number;
@@ -274,6 +284,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
   #policyFile = "";
   #basePath = ""; // 内置默认交给 defaultBasePath();非空会让 expose.ts hasPath 恒真,deployBasePath 合并失效
   #deployBasePath = "";
+  #host = "127.0.0.1";
   #secret = "";
   #proc: ReturnType<typeof spawn> | null = null;
   /** 初始（break-glass）用户凭据（仅站点 0 真实用户时有效，不入库）。 */
@@ -329,10 +340,31 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
     const tv = opts.biometricThresholds?.voice;
     this.#voiceThreshold = typeof tv === "number" && Number.isFinite(tv) && tv > 0 && tv <= 1 ? tv : 0.9;
     this.#templatesFile = join(this.#dir, "templates.json");
-    // per-instance random secret — NOT persisted: exposes are lifecycle-only,
-    // so a restart kills the tunnels and the public hosts change. A persisted
-    // cookie secret would keep sessions valid only for the OLD (dead) hosts.
-    this.#secret = randomBytes(32).toString("hex");
+    // 默认 per-instance random secret — NOT persisted: exposes are
+    // lifecycle-only, so a restart kills the tunnels and the public hosts
+    // change. A persisted cookie secret would keep sessions valid only for
+    // the OLD (dead) hosts.仅认证模式传 secretFile → 密钥落盘（0600），
+    // systemd 重启会话保持。
+    if (opts.secretFile) {
+      let s = "";
+      try {
+        s = readFileSync(opts.secretFile, "utf8").trim();
+      } catch {
+        s = "";
+      }
+      if (!s) {
+        s = randomBytes(32).toString("hex");
+        try {
+          mkdirSync(dirname(opts.secretFile), { recursive: true });
+          writeFileSync(opts.secretFile, s + "\n", "utf8");
+          try { execFileSync("chmod", ["600", opts.secretFile], { stdio: "ignore" }); } catch { /* best-effort */ }
+        } catch { /* best-effort */ }
+      }
+      this.#secret = s;
+    } else {
+      this.#secret = randomBytes(32).toString("hex");
+    }
+    this.#host = opts.host ?? "127.0.0.1";
   }
 
   get port(): number {
@@ -507,6 +539,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
         env: {
           ...process.env,
           PORT: String(this.#port),
+          HOST: this.#host,
           SECRET: this.#secret,
           USERS_FILE: this.#usersFile,
           BASE_PATH: this.#basePath,
@@ -524,6 +557,7 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
           ASSETS_DIR: faceAssetsDir(this.#ctx.cacheDir),
           STATIC_DIR: this.#dir,
           SECURE: process.env.PORTAL_SECURE === "1" ? "1" : "",
+          TRUST_PROXY: this.#opts.trustProxy ? "1" : "",
           INITIAL_USER: this.#initialUser?.name ?? "",
           INITIAL_PASSWORD: this.#initialUser?.password ?? "",
         },
@@ -543,10 +577,10 @@ export class PortalAuthProvider implements AuthProvider, UserManager, BiometricM
         this.#ctx.log(`portal: exited (code=${code ?? "null"} signal=${signal ?? "null"})`);
       });
       try {
-        await waitTcp(this.#port, 10_000);
+        await waitTcp(this.#port, 10_000, this.#host);
         // confirm it is OUR portal (401 on the auth probe) — a squatter on
         // the port (e.g. nginx that raced us) would answer differently
-        await probePortal(this.#port, this.#basePath);
+        await probePortal(this.#port, this.#basePath, this.#host);
         this.#ctx.log(`portal: listening on 127.0.0.1:${this.#port}`);
         return this.status();
       } catch (err) {
@@ -943,11 +977,11 @@ export function base32Encode(buf: Buffer): string {
   return out;
 }
 
-async function probePortal(port: number, basePath: string): Promise<void> {
+async function probePortal(port: number, basePath: string, host = "127.0.0.1"): Promise<void> {
   const { request } = await import("http");
   await new Promise<void>((resolve, reject) => {
     const req = request(
-      { host: "127.0.0.1", port, path: `${basePath}/api/authz/auth-request`, method: "GET" },
+      { host, port, path: `${basePath}/api/authz/auth-request`, method: "GET" },
       (res) => {
         res.resume();
         if (res.statusCode === 401) resolve();
@@ -970,11 +1004,11 @@ async function killQuiet(p: ReturnType<typeof spawn>): Promise<void> {
   if (p.exitCode === null) p.kill("SIGKILL");
 }
 
-function waitTcp(port: number, timeoutMs: number): Promise<void> {
+function waitTcp(port: number, timeoutMs: number, host = "127.0.0.1"): Promise<void> {
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const attempt = () => {
-      const sock = connect(port, "127.0.0.1");
+      const sock = connect(port, host);
       sock.once("connect", () => {
         sock.destroy();
         resolve();
@@ -1160,6 +1194,17 @@ const DEPLOY = process.env.DEPLOY_BASE_PATH || "";
 const POLICY_FILE = process.env.POLICY_FILE || "";
 const POLICY_DEFAULT = process.env.POLICY_DEFAULT || "one_factor";
 const SECURE = process.env.SECURE === "1";
+// 信任上游代理转发（authonly 经外部 nginx 转发时开）：仅当连接来自回环
+// （本机 nginx）才采信 X-Forwarded-For 的最后一个 IP（nginx 追加的真实
+// 客户端地址；客户端伪造的前缀项被越过），使 per-IP 封禁作用于真实来源。
+// 缺省关闭：直连模式（无代理头）用 socket 地址，行为不变。
+const TRUST_PROXY = process.env.TRUST_PROXY === "1";
+// 恒时登录校验（防用户名/密码枚举的响应时间侧信道）：无论目标用户是否存在，
+// 都执行一次成本相同的 scrypt。虚拟用户盐 + 哈希同为 64 字节派生，仅作比对
+// 垫片永不匹配。scrypt 成本参数由 hashPassword 侧固定（N=16384,r=8,p=1，
+// 64 字节输出）——这里用同一参数派生，成本一致。
+const DUMMY_SALT = "st-dummy-salt-0000000000000000";
+const DUMMY_HASH = scryptSync("st-dummy-password", DUMMY_SALT, 64).toString("hex");
 // break-glass 初始用户（仅站点 0 个真实用户时可登录；不验证 2FA；站点一旦出现
 // 任意用户即失效——登录拒绝 + 已签发初始会话一并作废）。密码以 scrypt 哈希比对，
 // salt 每次进程启动随机（同一密码跨重启不可重放）。
@@ -1507,6 +1552,16 @@ function clearFailures(account, ip) {
   if (b.accounts[account]) b.accounts[account].fails = [];
   if (b.ips[ip]) b.ips[ip].fails = [];
   saveBrute(b);
+}
+
+// 真实客户端 IP（封禁用）：socket 回环 + TRUST_PROXY → 取 X-Forwarded-For
+// 最后一项（nginx $proxy_add_x_forwarded_for 追加的真实远端）；否则 socket 地址。
+function clientIp(req) {
+  const sock = String(req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  if (!TRUST_PROXY || (sock !== "127.0.0.1" && sock !== "::1")) return sock;
+  const xff = String(req.headers["x-forwarded-for"] || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const last = xff[xff.length - 1];
+  return last || sock;
 }
 
 // —— login password transport: RSA-OAEP front-end encryption ————————
@@ -1964,7 +2019,7 @@ function setSession(res, name, next, cookieName = COOKIE, ttl = TTL_MS, twoFacto
 
 createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
-  const ip = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+  const ip = clientIp(req);
 
   if (url.pathname === BASE + "/api/authz/auth-request" && req.method === "GET") {
     const cookie = (req.headers.cookie || "").split(";").map((c) => c.trim())
@@ -2100,9 +2155,12 @@ createServer((req, res) => {
       }
       const users = loadUsers();
       const rec = users[name];
-      const expect = rec ? Buffer.from(rec.hash, "hex") : null;
-      const got = expect ? scryptSync(password, rec.salt, expect.length) : null;
-      const bad = !expect || expect.length !== got.length || !timingSafeEqual(expect, got);
+      // 恒时比对：用户不存在时也执行一次 scrypt（DUMMY_SALT/HASH 同为 64 字节
+      // scrypt 派生，成本一致）——neither 报错路径可被时间差区分用户是否存在。
+      const salt = rec ? rec.salt : DUMMY_SALT;
+      const expect = Buffer.from(rec ? rec.hash : DUMMY_HASH, "hex");
+      const got = scryptSync(password, salt, 64);
+      const bad = expect.length !== got.length || !timingSafeEqual(expect, got);
       // break-glass 初始用户：仅当站点 0 个真实用户 + 用户名/密码匹配才放行
       // （不入库、不验证 2FA）。站点一旦出现任意真实用户即无效。
       if (bad && INITIAL_USER && name === INITIAL_USER && !siteHasUsers()) {
@@ -2610,7 +2668,7 @@ createServer((req, res) => {
 
   res.writeHead(404, { "Content-Type": "text/plain" });
   res.end("not found");
-}).listen(PORT, "127.0.0.1");
+}).listen(PORT, process.env.HOST || "127.0.0.1");
 `;
   mkdirSync(file.includes("/") ? file.slice(0, file.lastIndexOf("/")) : ".", { recursive: true });
   writeFileSync(file, script, "utf8");

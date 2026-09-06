@@ -257,11 +257,28 @@ export async function startUi(st: ServiceTunnels, opts: UiServerOptions = {}): P
   const allowedHosts = (opts.allowedHosts ?? []).map((h) => h.replace(/:\d+$/, "").toLowerCase()).filter(Boolean);
   const server = createServer();
   const actualPort = await new Promise<number>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, allowedHosts.length ? "0.0.0.0" : "127.0.0.1", () => {
+    // 无白名单时只绑 IPv4 loopback（安全默认）；有白名单（远程访问）时优先绑
+    // 双栈 "::" 让 IPv6 客户端也能访问——IPv4-only 主机上回退 0.0.0.0。
+    const bindHost = allowedHosts.length ? "::" : "127.0.0.1";
+    const onError = (err: Error) => {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (bindHost === "::" && (code === "EADDRNOTAVAIL" || code === "EAFNOSUPPORT")) {
+        server.once("listening", () => {
+          const addr = server.address();
+          resolve(typeof addr === "object" && addr ? addr.port : port);
+        });
+        server.once("error", reject);
+        server.listen(port, "0.0.0.0");
+        return;
+      }
+      reject(err);
+    };
+    server.once("error", onError);
+    server.once("listening", () => {
       const addr = server.address();
       resolve(typeof addr === "object" && addr ? addr.port : port);
     });
+    server.listen(port, bindHost);
   });
   server.on("request", createHandler({ st, port: actualPort, csrfToken, allowedHosts }));
   console.log(`UI server listening on http://127.0.0.1:${actualPort}`);

@@ -226,6 +226,64 @@ service-tunnels ui [--port 4181] [--no-browser]    # 零依赖网页管理（nod
   配置查看；快速暴露表单（端口 + auth auto/none/provider + 隧道类型）
 - 只监听 127.0.0.1，无外部依赖，适合本机管理
 
+## authonly / authsetup — 仅认证模式（替换 nginx 里的 authelia）
+
+**仅认证模式**：在外部系统 nginx 里用 `auth_request` 接入 service-tunnels 认证
+（不建隧道网关、不起管理界面，更安全）。管理界面是独立前台进程，用完即关。
+
+```bash
+# 一次性设置：定 admin 端口 / auth 端口 / basePath / site（存储位置）
+service-tunnels authsetup \
+  [--admin-port <p>] [--auth-port <p>] [--base-path <p>] [--site <s>] \
+  [--listen <ip>] [--policy one_factor|two_factor|deny] \
+  [--bin-dir <dir>] [--out <dir>] [--with-systemd] [--force]
+
+# 生成的可执行脚本（bin 目录，缺省 ~/.local/bin；多配置按 basePath 隔离）
+auth-admin-<base>.sh      # Web 管理界面（sts ui）——调 user/site
+auth-server-<base>.sh     # 仅认证服务（sts authonly start）——前台 = systemd ExecStart
+install-service-<base>.bat   # Windows 服务安装（管理员运行；优先 nssm，回退 sc.exe）
+uninstall-service-<base>.bat # Windows 服务卸载
+# 产物（out 目录，缺省 configDir/auth）：
+nginx-auth-<base>.conf     # nginx auth_request 接入碎片（端口/basePath 已填好）
+auth-server-<base>.service # systemd unit（默认生成）
+fail2ban-auth-<base>.conf  # fail2ban filter（nginx access.log 401/429）
+fail2ban-jail-<base>.conf  # fail2ban jail（5 次/10min → 封 1h）
+```
+
+```bash
+# 仅认证服务生命周期
+service-tunnels authonly start  [--port <p>] [--base-path <p>] [--site <s>] [--listen <ip>] [--policy <p>]
+service-tunnels authonly stop   [--site <s>]
+service-tunnels authonly status [--site <s>]
+```
+
+- **工作流**：`authsetup` → 跑 `auth-admin-<base>` 调好用户/site → 跑
+  `auth-server-<base>` 生产运行 → 要调整就停认证、开 admin 调完再启。
+- 用户库与管理界面**天然共享**（同 site 存储：`cacheDir/tmp/sites/<site>/portal`）
+  ——admin 建的用户认证服务直接用。
+- 会话密钥默认持久化（site 存储 `session.secret`，0600）→ systemd 重启不掉会话。
+- 认证服务只暴露 forward-auth 端点 + 登录页，无任何管理入口；默认绑 127.0.0.1。
+
+### 暴力破解防护（portal 自身 + fail2ban）
+
+- **portal 自身（已内建，无需配置）**：
+  - per-account + per-IP 滑动窗口封禁（5 次失败/5 分钟 → 15 分钟封禁，重复
+    打击指数升级 2x/4x/8x/16x，状态持久化 brute.json 重启不丢）；
+  - 登录失败统一返回 `401 Invalid username or password.`（不泄露用户存在与否）
+    + **恒时 scrypt 校验**（用户不存在也执行同成本哈希，消除时序侧信道）；
+  - 密码经 RSA-OAEP 一次性公钥加密（隧道边缘看不到明文）；TOTP/人脸/语音
+    2FA；生物识别比密码更严（3 次封禁）。
+- **authonly 模式的真实客户端 IP**：认证服务默认信任回环代理的
+  `X-Forwarded-For`（`trustProxy` 默认开，仅当连接来自本机 nginx 才采信、取
+  nginx 追加的最后一个 IP）→ per-IP 封禁作用于真实攻击者，不会因转发把
+  所有人当成 127.0.0.1。
+- **fail2ban（可选，nginx 层更早拦截）**：authsetup 生成的
+  `fail2ban-auth-<base>.conf`（filter，匹配 access.log 401/429）+
+  `fail2ban-jail-<base>.conf`（5 次/10min → 封 1h）安装到
+  `/etc/fail2ban/filter.d/` 与 `/etc/fail2ban/jail.d/`（改 logpath 为你的
+  access_log）后 `systemctl restart fail2ban`。与 portal 自带封禁互补——
+  在 nginx 层直接 drop 攻击 IP，请求不落地认证服务。
+
 ## status / 配置
 
 ```bash

@@ -77,6 +77,40 @@ test("resolveEntry: providerProfile + inline zone/record (no profile)", () => {
   assert.equal(r.txtName, "t2-txt.example.com");
 });
 
+test("registerPortmap: aaaa entry registers AAAA from injected IPv6 resolver", async () => {
+  const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
+  try {
+    const cfg = makeCfg(mock);
+    cfg.entries[0].aaaa = true;
+    const results = await registerPortmap(cfg, { externalIp: "203.0.113.7", externalPort: 49152 }, { resolveIp6: async () => "2001:db8::7" });
+    assert.equal(results.length, 1);
+    const aaaa = results[0].actions.find((a) => a.type === "AAAA");
+    assert.ok(aaaa, "AAAA action present");
+    assert.equal(aaaa.name, "discover.example.com");
+    assert.equal(aaaa.value, "2001:db8::7");
+    assert.equal(aaaa.ok, true);
+    const records = mock.state.zones.get("example.com").records;
+    assert.ok(records.some((r) => r.type === "AAAA" && r.content === "2001:db8::7"));
+  } finally {
+    await mock.stop();
+  }
+});
+
+test("registerPortmap: aaaa with no public IPv6 reports a clean error", async () => {
+  const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
+  try {
+    const cfg = makeCfg(mock);
+    cfg.entries[0].aaaa = true;
+    const results = await registerPortmap(cfg, { externalIp: "203.0.113.7", externalPort: 49152 }, { resolveIp6: async () => null });
+    const aaaa = results[0].actions.find((a) => a.type === "AAAA");
+    assert.ok(aaaa, "AAAA action present (failed)");
+    assert.equal(aaaa.ok, false);
+    assert.match(aaaa.error ?? "", /no IPv6/);
+  } finally {
+    await mock.stop();
+  }
+});
+
 test("registerPortmap: A = externalIp under record, TXT = ip:port under txtName", async () => {
   const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
   try {

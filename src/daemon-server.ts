@@ -30,7 +30,7 @@ import { ensureTool, TOOLS } from "./tools.ts";
 import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 import { spawnGuardian } from "./guardian-spawn.ts";
 import { ensureMarker } from "./marker.ts";
-import { expose as exposeFlow } from "./expose.ts";
+import { expose as exposeFlow, listIpv6Transports, stopIpv6Transport } from "./expose.ts";
 import type { ExposeOptions } from "./expose.ts";
 import { AuthRegistry, authProviderSchemas, authProviderMetas, AUTH_SCHEMAS_VERSION } from "./auth-registry.ts";
 import { localizeSchemas, resolveLang } from "./i18n.ts";
@@ -233,6 +233,15 @@ const methods = new Map<string, Handler>([
           // best effort — lease self-expires
         }
       }
+      // ipv6-mode：独立 transport + 防火墙规则由 stopIpv6Transport 一并撤销。
+      if (rec.mode === "ipv6") {
+        const key = `${configDir}:ipv6:${rec.port}:${rec.label ?? ""}`;
+        try {
+          await stopIpv6Transport(key);
+        } catch {
+          // best effort
+        }
+      }
     }
     exposeRegistry.delete(name);
     persistExposeRegistry();
@@ -261,6 +270,14 @@ const methods = new Map<string, Handler>([
     for (const h of listPortmaps()) {
       try {
         await stopPortmap(h.key);
+      } catch {
+        // best effort
+      }
+    }
+    // ipv6-mode：停所有独立 transport（关 transport + 撤防火墙）
+    for (const h of listIpv6Transports()) {
+      try {
+        await stopIpv6Transport(h.key);
       } catch {
         // best effort
       }
@@ -562,6 +579,12 @@ const methods = new Map<string, Handler>([
           }
         }
       }
+      // ipv6: mode=ipv6 的参数对象——仅 address（可选，显式入口地址）。
+      if (o?.ipv6 !== undefined && o?.ipv6 !== null) {
+        const v6 = o.ipv6 as Record<string, unknown>;
+        if (typeof v6 !== "object" || Array.isArray(v6)) throw new Error("expose: ipv6 must be an object");
+        if (v6.address !== undefined && typeof v6.address !== "string") throw new Error("expose: ipv6.address must be a string");
+      }
       // inject 进 nginx 配置（sub_filter 替换串 / add_before_body 文件）——
       // 形状与大小做边界校验（内容本身经 nginxQuote 转义/落盘，不会注入配置；
       // 上限防超长字符串撑爆配置与内存）。
@@ -661,10 +684,12 @@ const methods = new Map<string, Handler>([
             tunnelName: r.tunnel,
             host: r.url ? new URL(r.url).host : undefined,
             portmap: r.portmap,
+            ipv6: r.ipv6 ? { address: r.ipv6.address, addresses: r.ipv6.addresses } : undefined,
             startedAt: Date.now(),
           });
         } else if (r && (r.localUrl || r.mode)) {
-          const key = `proxy:${o.port}:${r.label ?? ""}`;
+          // ipv6 模式用独立 key 前缀（与 proxy 记录区分，stop 时按 mode 处理）。
+          const key = r.mode === "ipv6" ? `ipv6:${o.port}:${r.label ?? ""}` : `proxy:${o.port}:${r.label ?? ""}`;
           exposeRegistry.set(key, {
             name: key,
             port: o.port,
@@ -680,6 +705,7 @@ const methods = new Map<string, Handler>([
             loginUrl: r.loginUrl,
             tunnelType: o.tunnelType,
             portmap: r.portmap,
+            ipv6: r.ipv6 ? { address: r.ipv6.address, addresses: r.ipv6.addresses } : undefined,
             startedAt: Date.now(),
           });
         }
@@ -698,7 +724,7 @@ const methods = new Map<string, Handler>([
       const { tunnelSupportsTcp } = await import("./tunnels.ts");
       let protocol: "http" | "https" | "tcp" = "tcp";
       try {
-        protocol = await detectProtocol(port, 1200);
+        protocol = await detectProtocol(port, 1200, "auto");
       } catch {
         protocol = "tcp";
       }
@@ -1048,6 +1074,56 @@ for (const rec of exposeRegistry.values()) {
       // 诊断可观测：写 state 同目录（daemon 后台 stderr 丢弃，恢复失败必须能查到）
       try {
         writeFileSync(`${stateFile}.portmap-restore.log`, `${new Date().toISOString()} ${key}: ${msg}\n`, { flag: "a" });
+      } catch { /* best effort */ }
+    }
+  })();
+}
+// F-ipv6: restore mode="ipv6" exposes after a daemon restart. 独立 transport 是
+// 进程内的（不在 proxy.restore 的绑定里），重启后 transport 端口会变——按持久化的
+// 入口地址重跑 ipv6 暴露（同地址、同 site/label/provider），重建绑定+防火墙。
+for (const rec of exposeRegistry.values()) {
+  if (rec.mode !== "ipv6" || !rec.ipv6?.address) continue;
+  const addr = rec.ipv6.address;
+  void (async () => {
+    try {
+      const r = await exposeFlow(rec.port, {
+        port: rec.port,
+        mode: "ipv6",
+        ipv6: { address: addr },
+        site: rec.site,
+        label: rec.label,
+        // 无 provider = 原暴露为 open（auth none）；有 provider 则按其重建认证
+        auth: rec.provider ? rec.provider : false,
+        force: true, // 重启恢复跳过端口归属重新校验（原 expose 已校验过）
+      }, {
+        configDir,
+        cacheDir,
+        resolveTool: async (name: string) => {
+          const def = TOOLS[name];
+          if (!def) throw new Error(`unknown tool: ${name}`);
+          return ensureTool(def, { cacheDir, toolPaths: undefined, allowToolDownload: toolAllowDownload });
+        },
+        internal,
+        tunnels,
+        auth: authRegistry,
+        proxy,
+        gateway,
+        redis,
+        log: (line) => console.error(`[service-tunnels] ${line}`),
+        sshGatewayPort: (domain: string) => ssh.get(domain)?.port,
+      });
+      if (r?.ipv6) {
+        exposeRegistry.set(`ipv6:${rec.port}:${r.label ?? ""}`, { ...rec, name: `ipv6:${rec.port}:${r.label ?? ""}`, ipv6: { address: r.ipv6.address, addresses: r.ipv6.addresses }, url: r.url, localUrl: r.localUrl, baseUrl: r.baseUrl, domainUrl: r.domainUrl, label: r.label, site: r.site });
+        writeState(stateFile, { ...readState(stateFile), exposes: [...exposeRegistry.values()] });
+        console.error(`[service-tunnels] ipv6 expose restored: ${r.url}`);
+      } else {
+        console.error(`[service-tunnels] ipv6 restore FAILED for ${addr}: ${r?.error ?? "no ipv6 result"}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[service-tunnels] ipv6 restore FAILED for ${addr}: ${msg}`);
+      try {
+        writeFileSync(`${stateFile}.ipv6-restore.log`, `${new Date().toISOString()} ${addr}: ${msg}\n`, { flag: "a" });
       } catch { /* best effort */ }
     }
   })();

@@ -11,6 +11,7 @@
  * 违背零依赖约定）。自实现（~150 行）符合项目约定。
  */
 import { execFile, spawn } from "node:child_process";
+import { isIpv6Host } from "../net-utils.ts";
 
 export type FirewallBackend = "ufw" | "firewalld" | "iptables" | "pfctl" | "windows" | "none" | "unsupported";
 
@@ -49,6 +50,7 @@ const SYS_BINS = new Map([
   ["ufw", ["/usr/sbin/ufw", "/sbin/ufw"]],
   ["firewall-cmd", ["/usr/sbin/firewall-cmd", "/bin/firewall-cmd"]],
   ["iptables", ["/usr/sbin/iptables", "/sbin/iptables"]],
+  ["ip6tables", ["/usr/sbin/ip6tables", "/sbin/ip6tables"]],
   ["pfctl", ["/sbin/pfctl"]],
 ]);
 
@@ -88,7 +90,9 @@ export async function detectFirewall(): Promise<FirewallBackend> {
   };
   if (await found(["ufw"])) return "ufw";
   if (await found(["firewall-cmd"])) return "firewalld";
-  if (await found(["iptables"])) return "iptables";
+  // 族无关的后端（ufw/firewalld 同时管理 v4+v6）；裸 iptables 需按地址族选
+  // iptables（v4）/ ip6tables（v6）——v4 优先，v6 主机才可能只有 ip6tables。
+  if (await found(["iptables"]) || await found(["ip6tables"])) return "iptables";
   if (await found(["pfctl"])) return "pfctl";
   // Windows: netsh advfirewall（F13——无 ufw/iptables/pfctl 时必须有 Windows 后端，
   // 否则 portmap expose 在 Windows 上全部失败）
@@ -144,6 +148,18 @@ function fireAsync(cmd: string, args: string[], sudo = false): void {
   } catch { /* best effort — checkFirewall 兜底 */ }
 }
 
+/** 选择 iptables/ip6tables 二进制：v6 地址 → ip6tables（IPv6 规则在独立的
+ *  ip6tables 表），否则 iptables。仅裸 iptables 后端需要族分支（ufw/
+ *  firewalld 同时管理两族）。 */
+async function resolveIpTablesBin(ip: string): Promise<string | null> {
+  const v6 = isIpv6Host(ip);
+  const p = await resolveCmd(v6 ? "ip6tables" : "iptables");
+  if (p) return p;
+  // v6 但本机只有 iptables？规则会写进 v4 表对 v6 无效——明确失败而非静默。
+  if (v6) return null;
+  return p;
+}
+
 /** 检查 `ip:port`（入站，任意源）是否已被本机防火墙放行。 */
 export async function checkFirewall(ip: string, port: number, backend?: FirewallBackend): Promise<FirewallCheck> {
   const b = backend ?? (await detectFirewall());
@@ -173,10 +189,11 @@ export async function checkFirewall(ip: string, port: number, backend?: Firewall
   if (b === "iptables") {
     // iptables -C 检查 INPUT 是否有 ACCEPT dport=port（任意源）。策略 DROP 时
     // 还需规则在 ufw 链里；这里以"存在 ACCEPT 目标端口的规则"为准。
-    const cmd = await resolveCmd("iptables");
-    if (!cmd) return { backend: "iptables", allowed: false, detail: "iptables detected but not executable" };
+    // v6 地址 → ip6tables（v4 表规则对 v6 流量无效）。
+    const cmd = await resolveIpTablesBin(ip);
+    if (!cmd) return { backend: "iptables", allowed: false, detail: "iptables/ip6tables detected but not executable for this address family" };
     const r = await run(cmd, ["-C", "INPUT", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT"]);
-    if (r.ok) return { backend: "iptables", allowed: true, detail: "iptables ACCEPT rule exists" };
+    if (r.ok) return { backend: "iptables", allowed: true, detail: `${cmd} ACCEPT rule exists` };
     // 也查 ufw 管理的链（ufw 在时 iptables 规则藏在 ufw-user-input 等链）
     const ufwChain = await run(cmd, ["-C", "ufw-user-input", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT"]);
     return { backend: "iptables", allowed: ufwChain.ok, detail: ufwChain.ok ? "ufw-user-input allows" : "no ACCEPT rule" };
@@ -253,9 +270,17 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
     return { backend: "firewalld", ensured: true, detail: `firewall-cmd --permanent --add-port=${port}/tcp + reload dispatched async (${desktopNote})` };
   }
   if (b === "iptables") {
+    const ipt = await resolveIpTablesBin(ip);
+    if (!ipt) {
+      return {
+        backend: "iptables",
+        ensured: false,
+        detail: `no ${isIpv6Host(ip) ? "ip6tables" : "iptables"} binary for this address family — manual: sudo ${isIpv6Host(ip) ? "ip6tables" : "iptables"} -I INPUT 1 -p tcp --dport ${port} -j ACCEPT`,
+      };
+    }
     const args = ["-I", "INPUT", "1", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT", "-m", "comment", "--comment", `service-tunnels:${port}`];
-    fireAsync(bin ?? "iptables", args, needSudo);
-    return { backend: "iptables", ensured: true, detail: `iptables ACCEPT ${port} dispatched async (${desktopNote}); manual: sudo iptables -I INPUT 1 -p tcp --dport ${port} -j ACCEPT` };
+    fireAsync(ipt, args, needSudo);
+    return { backend: "iptables", ensured: true, detail: `${ipt} ACCEPT ${port} dispatched async (${desktopNote}); manual: sudo ${ipt} -I INPUT 1 -p tcp --dport ${port} -j ACCEPT` };
   }
   if (b === "pfctl") {
     // pf Disabled（macOS 默认）→ 无拦截，无需放行。Enabled → 需手动 anchor 规则
@@ -276,11 +301,19 @@ export async function openFirewall(ip: string, port: number, backend?: FirewallB
 /** 删除放行规则（stop 映射时清理本次添加的规则；只删不报错——best effort）。 */
 export async function removeFirewall(ip: string, port: number, backend?: FirewallBackend): Promise<void> {
   const b = backend ?? (await detectFirewall());
-  const bin = await resolveCmd(b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? "iptables" : b === "windows" ? "netsh" : "pfctl");
+  const bin =
+    b === "ufw" ? await resolveCmd("ufw")
+    : b === "firewalld" ? await resolveCmd("firewall-cmd")
+    : b === "iptables" ? await resolveIpTablesBin(ip)
+    : b === "windows" ? await resolveCmd("netsh")
+    : await resolveCmd("pfctl");
   if (!bin) return;
   // 注意：sudo 重置 PATH（secure_path）——sudo 分支必须用命令名而非解析出的
   // 绝对路径，否则测试的 PATH 注入 fake 无效、真机上也找不到非标准路径。
-  const name = b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : "iptables";
+  // iptables 后端按地址族选命令名（v6 → ip6tables）。
+  const iptName = b === "iptables" ? await resolveIpTablesBin(ip) : null;
+  // sudo 分支必须用裸命令名（sudo 重置 PATH）；v6 → ip6tables，v4 → iptables。
+  const name = b === "ufw" ? "ufw" : b === "firewalld" ? "firewall-cmd" : b === "iptables" ? (isIpv6Host(ip) ? "ip6tables" : "iptables") : iptName ?? "iptables";
   const sudoOk = (await sudoRun(["true"])).ok;
   const tryRun = async (args: string[], sudo = false): Promise<void> => {
     try {
@@ -298,6 +331,8 @@ export async function removeFirewall(ip: string, port: number, backend?: Firewal
       await tryRun(["--reload"], true);
     }
   } else if (b === "iptables") {
+    const ipt = await resolveIpTablesBin(ip);
+    if (!ipt) return;
     const args = ["-D", "INPUT", "-p", "tcp", "--dport", String(port), "-j", "ACCEPT", "-m", "comment", "--comment", `service-tunnels:${port}`];
     if (sudoOk) await tryRun(args, true);
     else await tryRun(args);

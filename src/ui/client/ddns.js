@@ -49,18 +49,19 @@ async function renderDdns(){
         +'<td class="mono">'+esc(e.record||'-')+'</td>'
         +'<td class="mono">txt: '+esc(e.txtName||'-')+'</td>'
         +'<td>follow: '+esc(e.followTunnel||'-')+'</td>'
-        +'<td>'+(e.ip?'A ':'')+(e.txt?'TXT(ip:port) ':'')+(e.cname?'CNAME ':'')+(e.txtUrl?'TXT(url) ':'')+'</td>'
+        +'<td>'+(e.ip?'A ':'')+(e.aaaa?'AAAA ':'')+(e.txt?'TXT(ip:port) ':'')+(e.cname?'CNAME ':'')+(e.txtUrl?'TXT(url) ':'')+'</td>'
         +'<td><button data-del-entry="'+i+'">删除</button></td></tr>').join('')
       +'</tbody></table>'
       // 添加表单：profile 引用（快捷）
       +'<div class="section-label" style="margin-top:10px">添加（profile 引用）</div>'
       +'<div style="margin-top:4px"><input id="ddns-e-name" placeholder="条目名" style="width:90px"> '
       +'<input id="ddns-e-profile" placeholder="profile" style="width:100px"> '
-      +'<select id="ddns-e-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option></select> '
+      +'<select id="ddns-e-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option><option value="ipv6">ipv6</option></select> '
       +'<input id="ddns-e-follow" placeholder="followTunnel" style="width:110px"> '
       +'<label><input type="checkbox" id="ddns-e-cname"> CNAME</label> '
       +'<label><input type="checkbox" id="ddns-e-txturl"> TXT(url)</label> '
       +'<label><input type="checkbox" id="ddns-e-ip"> A</label> '
+      +'<label><input type="checkbox" id="ddns-e-aaaa"> AAAA</label> '
       +'<label><input type="checkbox" id="ddns-e-txt"> TXT(ip:port)</label> '
       +'<button id="ddns-e-add">+ 添加</button></div>'
       // 添加表单：完整信息直填（不依赖 profile）
@@ -71,11 +72,12 @@ async function renderDdns(){
       +'<input id="ddns-e2-zone" placeholder="zone" style="width:130px"> '
       +'<input id="ddns-e2-record" placeholder="record" style="width:140px"> '
       +'<input id="ddns-e2-txtname" placeholder="txtName" style="width:130px"> '
-      +'<select id="ddns-e2-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option></select> '
+      +'<select id="ddns-e2-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option><option value="ipv6">ipv6</option></select> '
       +'<input id="ddns-e2-follow" placeholder="followTunnel" style="width:110px"> '
       +'<label><input type="checkbox" id="ddns-e2-cname"> CNAME</label> '
       +'<label><input type="checkbox" id="ddns-e2-txturl"> TXT(url)</label> '
       +'<label><input type="checkbox" id="ddns-e2-ip"> A</label> '
+      +'<label><input type="checkbox" id="ddns-e2-aaaa"> AAAA</label> '
       +'<label><input type="checkbox" id="ddns-e2-txt"> TXT(ip:port)</label> '
       +'<button id="ddns-e2-add">+ 添加</button></div></div>';
     c.innerHTML=h;
@@ -114,6 +116,7 @@ async function renderDdns(){
         cname:document.getElementById('ddns-e-cname').checked,
         txtUrl:document.getElementById('ddns-e-txturl').checked,
         ip:document.getElementById('ddns-e-ip').checked,
+        aaaa:document.getElementById('ddns-e-aaaa').checked,
         txt:document.getElementById('ddns-e-txt').checked,
       });
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
@@ -131,6 +134,7 @@ async function renderDdns(){
         cname:document.getElementById('ddns-e2-cname').checked,
         txtUrl:document.getElementById('ddns-e2-txturl').checked,
         ip:document.getElementById('ddns-e2-ip').checked,
+        aaaa:document.getElementById('ddns-e2-aaaa').checked,
         txt:document.getElementById('ddns-e2-txt').checked,
       });
       await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();

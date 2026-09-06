@@ -31,7 +31,13 @@ export interface PortmapProbe {
   recommended?: "upnp" | "pcp" | null;
 }
 
-/** Default IPv4 gateway from the routing table (linux /proc + macOS route). */
+/** Default IPv4 gateway from the routing table (linux /proc + macOS route).
+ *
+ *  IPv4-only by design: UPnP IGD (SSDP multicast 239.255.255.250) and
+ *  NAT-PMP/PCP-over-udp4 are IPv4 protocols — port mapping has no IPv6
+ *  equivalent (IPv6 has no NAT; hosts get routable addresses directly).
+ *  On IPv6-only hosts this returns null, which surfaces as "no gateway"
+ *  from pickBackend(). */
 export function defaultGateway(): string | null {
   try {
     const lines = readFileSync("/proc/net/route", "utf8").trim().split("\n");
@@ -53,7 +59,8 @@ export function defaultGateway(): string | null {
   }
 }
 
-/** The source address this host would use to reach `gateway` (UDP connect trick). */
+/** The source address this host would use to reach `gateway` (UDP connect
+ *  trick). IPv4 only — the portmap control protocols are IPv4. */
 export function localIpFor(gateway: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const sock = createSocket("udp4");

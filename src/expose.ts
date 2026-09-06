@@ -9,6 +9,8 @@ import { AuthRegistry } from "./auth-registry.ts";
 import { tunnelSupportsTcp } from "./tunnels.ts";
 import type { TunnelManager } from "./tunnels.ts";
 import { InternalRegistry } from "./internal.ts";
+import { resolveTargetHost } from "./net-utils.ts";
+import { detectPublicIpv6, ipv6Diagnose } from "./ipv6.ts";
 /** Default auth provider. Portal is Node-based (no external binaries) and
  *  feature-complete (2FA incl. biometrics) — default on every platform.
  *  Authelia remains available via explicit `--auth auto`/`--provider`. */
@@ -73,14 +75,34 @@ export function unflattenParams(params: Record<string, unknown>): Record<string,
 import { ensurePortmap, PortmapUnavailableError, type MapHandle } from "./portmap/index.ts";
 import { openFirewall, removeFirewall } from "./portmap/firewall.ts";
 
+/** Registry of live mode-"ipv6" transports (one dedicated ProxyManager per
+ *  expose — independent transport port, no ipDirectPort collision with
+ *  portmap or other ipv6 exposes). Managed like portmap's `active` map:
+ *  stop() closes the transport + removes the firewall rule. */
+const activeIpv6 = new Map<string, { proxy: ProxyManager; transportPort: number; address: string; fwCleanup?: () => Promise<void> }>();
+
+export function listIpv6Transports(): Array<{ key: string; address: string; transportPort: number }> {
+  return [...activeIpv6].map(([key, h]) => ({ key, address: h.address, transportPort: h.transportPort }));
+}
+
+export async function stopIpv6Transport(key: string): Promise<boolean> {
+  const h = activeIpv6.get(key);
+  if (!h) return false;
+  activeIpv6.delete(key);
+  await h.proxy.stop().catch(() => {});
+  await h.fwCleanup?.().catch(() => {});
+  return true;
+}
+
 export interface ExposeOptions {
   port: number;
   /** Exposure mode (sites-design.md §4): "tunnel" (default, existing),
    *  "proxy" (local virtual host only, NO tunnel process), "both" (local
    *  vhost + public tunnel sharing one site), "portmap" (router port mapping:
    *  external IP:port → the local proxy transport; auth still applies —
-   *  docs/portmap-analysis.md). */
-  mode?: "tunnel" | "proxy" | "both" | "portmap";
+   *  docs/portmap-analysis.md), "ipv6" (direct public-IPv6 exposure, no
+   *  tunnel / no router mapping — docs/ipv6-direct-expose-design.md). */
+  mode?: "tunnel" | "proxy" | "both" | "portmap" | "ipv6";
   /** @internal set by the dispatcher: whether the caller explicitly passed
    *  --site (distinguishes `--site default` from no --site — the former keeps
    *  the reserved "auth" label, the latter carries the provider name). */
@@ -136,6 +158,10 @@ export interface ExposeOptions {
   /** Forwarding protocol: "http"/"https" via the nginx gateway (auth/logs);
    *  "tcp" raw direct tunnel (no gateway). Default: auto-detect the app port. */
   protocol?: "http" | "https" | "tcp";
+  /** 本地 app 上游监听地址（127.0.0.1 缺省；app 只绑 ::1 时传 "::1"）。
+   *  未传时按端口探测（127.0.0.1 优先，无则 ::1）。作用到 proxy/nginx/隧道
+   *  三处的本地侧拨号。 */
+  targetHost?: string;
   policy?: "one_factor" | "two_factor" | "deny";
   nginxPort?: number;
   autheliaPort?: number;
@@ -192,6 +218,8 @@ export interface ExposeOptions {
     txtName?: string;
     /** portmap: register external IP as A record. */
     ip?: boolean;
+    /** portmap: register the public IPv6 (resolvePublicIp(6)) as AAAA. */
+    aaaa?: boolean;
     /** portmap: register "ip:port" as TXT. */
     txt?: boolean;
     /** tunnel: register URL host as CNAME. */
@@ -220,6 +248,13 @@ export interface ExposeOptions {
       connectTimeout?: number;
     };
   };
+  /** mode "ipv6" options (docs/ipv6-direct-expose-design.md) — direct public
+   *  IPv6 exposure without a tunnel. */
+  ipv6?: {
+    /** 显式指定入口 IPv6 地址（缺省自动检测 global 地址；可传 `::1` 做本机
+     *  回环测试）。 */
+    address?: string;
+  };
 }
 
 export interface ExposeResult {
@@ -234,8 +269,17 @@ export interface ExposeResult {
   /** Failure reason when `url` is null (e.g. ngrok "not authenticated").
    *  Surfaced so callers/UI aren't left with a silent null URL. */
   error?: string;
-  /** Mode used ("tunnel" | "proxy" | "both" | "portmap"). */
-  mode?: "tunnel" | "proxy" | "both" | "portmap";
+  /** Mode used ("tunnel" | "proxy" | "both" | "portmap" | "ipv6"). */
+  mode?: "tunnel" | "proxy" | "both" | "portmap" | "ipv6";
+  /** mode "ipv6" 详情：实际入口地址 + transport 端口 + 全部候选地址。 */
+  ipv6?: {
+    /** 实际入口地址（public reachable，裸字面量不带括号）。 */
+    address: string;
+    /** 独立 transport 监听端口（本机防火墙放行、公网访问入口）。 */
+    transportPort: number;
+    /** 检测到的全部候选地址（供用户挑选/二次确认）。 */
+    addresses: string[];
+  };
   /** DDNS registration result for this expose (dimension 2): what was
    *  registered after the port/tunnel came up. */
   ddns?: {
@@ -371,9 +415,12 @@ export async function expose(port: number, opts: ExposeOptions, ctx: ExposeConte
   const sites = readSites(ctx.configDir);
   const site = opts.site ?? "default";
   const siteCfg = sites[site];
-  const opts2 = { ...opts, site, siteExplicit: opts.site !== undefined };
+  // 解析 app 上游监听地址（一次，供 proxy/nginx/隧道三处共享）：显式 > 探测。
+  const targetHost = opts.targetHost ?? (await resolveTargetHost(port));
+  const opts2 = { ...opts, site, siteExplicit: opts.site !== undefined, targetHost };
   if (mode === "proxy") return await proxyExpose(port, opts2, ctx, siteCfg);
   if (mode === "portmap") return await portmapExpose(port, opts2, ctx, siteCfg);
+  if (mode === "ipv6") return await ipv6Expose(port, opts2, ctx, siteCfg);
   const proxyResult = mode === "both" ? await proxyExpose(port, opts2, ctx, siteCfg) : null;
   const result = await exposeTunnel(port, opts2, ctx, siteCfg);
   return proxyResult
@@ -509,6 +556,130 @@ async function portmapExpose(
 }
 
 /**
+ * ipv6 mode — direct public-IPv6 exposure, NO tunnel (docs/ipv6-direct-expose-design.md).
+ *
+ * IPv6 has no NAT: a global unicast address on this host IS the public entry.
+ * The proxy transport listens on `::` (dual-stack) and `allowIpDirect` maps
+ * `http://[<v6>]:<transportPort>` to the enrolled app port, so no router
+ * port-mapping and no tunnel process are needed — auth still applies through
+ * the site provider (same enrollment as proxy mode).
+ *
+ * Each ipv6 expose gets its OWN dedicated transport (independent ProxyManager,
+ * random high port) so multiple ipv6 exposes coexist and never collide on
+ * `ipDirectPort` with portmap or each other. Lifecycle is tracked in the
+ * module-level `activeIpv6` registry (listIpv6Transports/stopIpv6Transport).
+ *
+ *   --mode ipv6 --auth auto            → http://[<global-v6>]:<transportPort>
+ *   --mode ipv6 --auth basic --ipv6-address 2001:db8:1::2   # explicit entry
+ */
+async function ipv6Expose(
+  port: number,
+  opts: ExposeOptions,
+  ctx: ExposeContext,
+  siteCfg: SiteConfig | undefined,
+): Promise<ExposeResult> {
+  const log = ctx.log ?? (() => {});
+  // 端口归属校验（与 proxy/portmap 一致——多用户安全，防任意端口暴露）。
+  if (!opts.force) {
+    const { verifyPortOwner } = await import("./discovery.ts");
+    const check = verifyPortOwner(port, ctx.internal);
+    if (!check.allowed) {
+      return { url: null, tunnel: "", mode: "ipv6", error: check.reason ?? "Port ownership verification failed" };
+    }
+  }
+
+  // ── 1) 解析入口 IPv6 地址：显式 > 自动检测（global 单播候选）──
+  const detectExternal = async () => {
+    try {
+      const { resolvePublicIp } = await import("ddns");
+      return await resolvePublicIp(6);
+    } catch {
+      return null; // 无 egress 探测也不挡 auto 枚举路径
+    }
+  };
+  const addresses = await detectPublicIpv6(opts.ipv6?.address, { resolveExternal: detectExternal });
+  if (!addresses.length) {
+    const diag = ipv6Diagnose();
+    const detail = diag.hasIpv6Stack
+      ? `this host has IPv6 but no global unicast address (found: ${diag.addresses.map((a) => `${a.address}[${a.scope}]`).join(", ") || "none"}) — ISP 未提供原生 v6？可用 HE 隧道/VPS；或先显式 --ipv6-address`
+      : "this host has no IPv6 stack enabled — enable IPv6 on the OS/router first";
+    return { url: null, tunnel: "", mode: "ipv6", error: `no public IPv6 address for direct exposure. ${detail}` };
+  }
+  const address = addresses[0]!;
+  log(`expose ${port} (ipv6): entry ${address} (candidates: ${addresses.join(", ")})`);
+
+  // ── 2) 独立 transport（方案②：每暴露一个 ProxyManager，随机高位端口）──
+  // 关键：使用唯一 internalRole（默认会与共享 proxy 撞 role，internal 记录被覆盖，
+  // discovery 会把共享 proxy 端口当用户服务，且 stop 后 residual）。同时传
+  // unregisterInternal，让 stop() 主动注销这个独立 role。
+  const ipv6Proxy = new ProxyManager({
+    registerInternal: (role, p) =>
+      ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: [address] }),
+    unregisterInternal: (role) => ctx.internal.unregister(role),
+    log,
+    internalRole: `ipv6:${port}`, // 与共享 proxy 隔离
+    allowIpDirect: true, // IP 直连：Host 为 IPv6 字面量（[v6]:port）时按端口映射
+  });
+
+  // ── 3) enrollment + provider（复用 proxyExpose 全流程；mode 传 "ipv6"）──
+  const proxyResult = await proxyExpose(port, { ...opts, mode: "ipv6", proxyPort: 0 }, { ...ctx, proxy: ipv6Proxy }, siteCfg);
+  const transportPort = Number(/:\d+$/.exec(proxyResult.localUrl ?? "")?.[0]?.slice(1) ?? 0);
+  if (!transportPort) {
+    // startTransport:false 等：无 transport 可映射——回滚 binding，不留孤儿。
+    try {
+      if (proxyResult.label !== undefined) ipv6Proxy.removeBinding(port, proxyResult.label ?? "");
+    } catch { /* best effort */ }
+    await ipv6Proxy.stop().catch(() => {});
+    return { ...proxyResult, mode: "ipv6", error: "ipv6 mode requires a started proxy transport (startTransport cannot be false)" };
+  }
+
+  // ── 4) 本机防火墙放行 [v6]:transportPort（fail-closed：失败回滚+手动命令）──
+  let fwCleanup: (() => Promise<void>) | undefined;
+  try {
+    const fw = await openFirewall(address, transportPort);
+    if (!fw.ensured) {
+      ipv6Proxy.removeBinding(port, proxyResult.label ?? "");
+      await ipv6Proxy.stop().catch(() => {});
+      return {
+        url: null,
+        tunnel: "",
+        mode: "ipv6",
+        error: `host firewall blocks IPv6 inbound on ${address}:${transportPort} (${fw.detail}). Open it first, e.g. sudo ufw allow in to ${address} port ${transportPort} proto tcp / sudo ip6tables -I INPUT 1 -p tcp --dport ${transportPort} -j ACCEPT`,
+      };
+    }
+    if (fw.detail && !fw.detail.startsWith("already")) {
+      log(`expose ${port} (ipv6): firewall opened — ${fw.detail}`);
+      fwCleanup = () => removeFirewall(address, transportPort);
+    }
+  } catch (e) {
+    ipv6Proxy.removeBinding(port, proxyResult.label ?? "");
+    await ipv6Proxy.stop().catch(() => {});
+    return { url: null, tunnel: "", mode: "ipv6", error: `firewall check failed: ${(e as Error).message}` };
+  }
+
+  // ── 5) registry 托管 stop ──
+  const key = `${ctx.configDir}:ipv6:${port}:${proxyResult.label ?? ""}`;
+  activeIpv6.set(key, { proxy: ipv6Proxy, transportPort, address, fwCleanup });
+
+  // ── 6) URL + 结果 ──
+  const url = `http://[${address}]:${transportPort}`;
+  log(`expose ${port} (ipv6): ${url}${proxyResult.provider ? ` (auth via ${proxyResult.provider}, site ${proxyResult.site ?? "default"})` : " (open)"}`);
+  return {
+    url,
+    tunnel: "",
+    provider: proxyResult.provider,
+    mode: "ipv6",
+    site: proxyResult.site,
+    label: proxyResult.label,
+    localUrl: proxyResult.localUrl,
+    baseUrl: proxyResult.baseUrl,
+    domainUrl: proxyResult.domainUrl,
+    protocol: "http",
+    ipv6: { address, transportPort, addresses },
+  };
+}
+
+/**
  * proxy mode — local virtual host, NO tunnel (sites-design.md §5.4).
  *
  * Enrollment is the ONLY way to expose a port through the wildcard proxy
@@ -540,8 +711,8 @@ async function proxyExpose(
   const proxy = ctx.proxy ?? new ProxyManager({
     registerInternal: (role, p) => ctx.internal.register(role, { port: p, pid: 0, process: role, cmdline: role, addresses: ["127.0.0.1"] }),
     log,
-    // portmap 模式的外部入口是 IP:port（无 vhost 域名），需要 IP 直连。
-    allowIpDirect: opts.mode === "portmap",
+    // portmap/ipv6 模式的外部入口是 IP:port（无 vhost 域名），需要 IP 直连。
+    allowIpDirect: opts.mode === "portmap" || opts.mode === "ipv6",
   });
   // Base domain (portless public URL). The proxy already carries the
   // constructor-resolved domains (createServiceTunnels opts / env
@@ -655,8 +826,11 @@ async function proxyExpose(
     providerParams: { ...(siteCfg?.providerParams ?? {}), ...(opts.providerParams ?? {}) },
     ...(opts.bypassPaths ? { bypassPaths: validateBypassPaths(opts.bypassPaths) } : {}),
     ...(opts.serviceBasePath ? { serviceBasePath: opts.serviceBasePath } : {}),
-    // portmap 模式：IP:transportPort 直连映射到本 binding（router DNAT 后的入口）。
-    ...(opts.mode === "portmap" && transportPort ? { ipDirectPort: transportPort } : {}),
+    // app 上游监听地址（IPv6-loopback-only app → ::1）
+    ...(opts.targetHost ? { targetHost: opts.targetHost } : {}),
+    // portmap/ipv6 模式：IP:transportPort 直连映射到本 binding（portmap 是
+    // router DNAT 后的入口；ipv6 是公网 [v6]:port 直连入口）。
+    ...((opts.mode === "portmap" || opts.mode === "ipv6") && transportPort ? { ipDirectPort: transportPort } : {}),
   });
   // proxy 模式同样注册 host 策略(与 tunnel 模式一致):auth-request 按 host
   // 查 policy,否则策略文件为空 → 默认 one_factor,deny/two_factor 不生效。
@@ -719,7 +893,8 @@ async function exposeTunnel(
   const useAuth = (opts.auth === true || opts.auth === "auto") && providerType !== "none";
   // Forwarding protocol: explicit opts win; else detect the app port
   // (http/https/tcp). tcp → direct raw tunnel; http/https → nginx gateway.
-  const protocol = opts.protocol ?? (await detectProtocol(port));
+  // 探测按 targetHost 走（app 只绑 ::1 时探 ::1，否则误判为 tcp）。
+  const protocol = opts.protocol ?? (await detectProtocol(port, 1500, opts.targetHost ?? "auto"));
   // ngrok authtoken → NGROK_AUTHTOKEN env on the tunnel process (so ngrok
   // authenticates instead of exiting ERR_NGROK_4018). Harmless for other types.
   const tunnelEnv = opts.ngrokAuthtoken ? { NGROK_AUTHTOKEN: opts.ngrokAuthtoken } : undefined;
@@ -773,6 +948,9 @@ async function exposeTunnel(
       target,
       protocol: "tcp",
       env: tunnelEnv,
+      // 直连 app 端口（非 sshGateway）时按探测到的上游地址拨；sshGateway 重定向
+      // 后目标是 ssh 网关监听端口（缺省 127.0.0.1）。
+      ...(opts.sshGateway ? {} : opts.targetHost ? { targetHost: opts.targetHost } : {}),
       sshGateway: opts.sshGateway,
     });
     await ctx.tunnels.start(name);
@@ -818,7 +996,7 @@ async function exposeTunnel(
       const host = new URL(url).host;
       const scheme = protocol === "https" ? "https" : "http";
       try {
-        await gateway.registerHost(host, port, { authMode: "none", scheme, ...(opts.inject ? { inject: opts.inject } : {}) });
+        await gateway.registerHost(host, port, { authMode: "none", scheme, ...(opts.targetHost ? { targetHost: opts.targetHost } : {}), ...(opts.inject ? { inject: opts.inject } : {}) });
       } catch (err) {
         // unsafe host (injection attempt / non-domain) — roll the tunnel back
         await ctx.tunnels.stop(name).catch(() => {});
@@ -894,6 +1072,7 @@ async function exposeTunnel(
       target: port,
       args: (tunnelAuth.args as string[]) ?? [],
       env: tunnelEnv,
+      ...(opts.targetHost ? { targetHost: opts.targetHost } : {}),
     });
     await ctx.tunnels.start(name);
     const url = await waitForUrl(ctx.tunnels, name, 30_000);
@@ -988,6 +1167,8 @@ async function exposeTunnel(
         loginRedirect,
         scheme,
         site: site,
+        // app 上游监听地址（IPv6-loopback-only app → ::1）
+        ...(opts.targetHost ? { targetHost: opts.targetHost } : {}),
         // oauth2-proxy 联动：nginx 直接渲染域名验证文件 + 设置页（模板含 $host）
         ...(o2Setup
           ? { setup: { verification: o2Setup.verification, infoPath: o2Setup.infoPath, infoHtmlTemplate: o2Setup.infoHtmlTemplate } }

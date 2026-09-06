@@ -2,6 +2,7 @@ import { createServer, request as httpRequest, type Server, type IncomingMessage
 import type { Socket } from "net";
 import type { Duplex } from "stream";
 import { stripBasePath } from "./discovery.ts";
+import { bracketHost, hostnameOnly, isIpv4Host, isIpv6Host, parseHostPort, unbracketHost } from "./net-utils.ts";
 
 /**
  * Default virtual-host suffixes: `.st.localhost` (primary) plus the
@@ -73,7 +74,8 @@ export function serviceHostRegex(suffixes: string[]): RegExp {
  */
 export function parseServiceHost(host: string | undefined, suffixes: string[]): ServiceHostMatch | null {
   if (!host) return null;
-  const hostname = host.split(":")[0]!.toLowerCase();
+  // hostnameOnly 处理 [ipv6]:port 与裸 host[:port]，不会被 split(":") 拆坏
+  const hostname = hostnameOnly(host);
   const re = serviceHostRegex(suffixes);
   const m = re.exec(hostname);
   if (!m) return null;
@@ -89,12 +91,15 @@ export function parseServiceHost(host: string | undefined, suffixes: string[]): 
  * `new URL(path, base)` parses `path` as base-relative — a leading `//` or
  * backslash path segment overrides the authority (`//evil.com`, `//127.0.0.1:9999`)
  * turning the proxy into an open SSRF. Appending the path AFTER an explicit
- * `http://127.0.0.1:<port>` authority keeps it opaque: the host/port can never
+ * `http://<host>:<port>` authority keeps it opaque: the host/port can never
  * change, whatever the path contains.
+ *
+ * `host` is the LOCAL upstream the app listens on (127.0.0.1 by default;
+ * `::1` for IPv6-loopback-only apps — bracketed in the URL automatically).
  */
-export function proxyTarget(port: number, path: string): string {
+export function proxyTarget(port: number, path: string, host = "127.0.0.1"): string {
   const p = path.startsWith("/") ? path : `/${path}`;
-  return `http://127.0.0.1:${port}${p}`;
+  return `http://${bracketHost(host)}:${port}${p}`;
 }
 
 export interface ProxySetup {
@@ -155,6 +160,9 @@ export interface ProxySiteBackend {
   tokenFile?: string;
   /** 该 vhost 真实服务的 base path(per-binding 覆盖全局 serviceBasePath)。 */
   serviceBasePath?: string;
+  /** 本地 app 上游监听地址(per-binding 覆盖全局 targetHost;app 只绑 ::1 时
+   *  指向 ::1)。决策 pipe/forward 用它选择上游地址。 */
+  targetHost?: string;
 }
 
 /**
@@ -176,6 +184,9 @@ export type SiteResolver = (
 export interface ProxyOptions {
   /** Listen port (default 4180; 0 = random). */
   port?: number;
+  /** Local app upstream address (127.0.0.1 default; "::1" for IPv6-loopback-
+   *  only apps). Forwarded into every pipe/forward decision. */
+  targetHost?: string;
   /** Accepted virtual-host suffixes (default DEFAULT_SUFFIXES). */
   suffixes?: string[];
   /** Extra full hostnames accepted as suffixes (deployment hostnames). */
@@ -243,6 +254,11 @@ export interface ProxyOptions {
   rootPid?: number;
   /** Force a fresh discovery scan per allow-list check (bypass TTL). */
   refresh?: boolean;
+  /** 内部可信客户端 token 旁路（见 ServiceHostResolveContext.verifyInternalToken）。
+   *  createServiceTunnels 自动 wire st.internal.verify；自建 transport 按需传入。 */
+  verifyInternalToken?: (authorization: string | undefined) => boolean;
+  /** 进程凭证旁路（Linux，预留；见 ServiceHostResolveContext.verifyInternalProcess）。 */
+  verifyInternalProcess?: (remoteAddress: string | undefined) => boolean;
   /** Log lines (default: no logging). */
   log?: (line: string) => void;
 }
@@ -286,7 +302,7 @@ function isBasePathPath(pathname: string, basePath: string): boolean {
 export type ServiceHostDecision =
   | { kind: "deny"; status: 403; body: string }
   | { kind: "deny-auth"; status: 401; wwwAuthenticate: string }
-  | { kind: "pipe"; port: number; url: string; vhost?: string }
+  | { kind: "pipe"; port: number; host?: string; url: string; vhost?: string }
   | { kind: "redirect"; location: string }
   | { kind: "forward"; target: string }
   | { kind: "static"; status: 200; contentType: string; body: string };
@@ -332,6 +348,28 @@ export interface ServiceHostResolveContext {
   /** IP 直连专用的 site 解析：与 resolveSite 相同语义，但允许命中 labeled
    *  binding（IP 无 label 语义；open 形式的 vhost 请求仍必须严格 open）。 */
   resolveIpDirectSite?: SiteResolver;
+  /** 本地 app 上游监听地址（127.0.0.1 缺省；app 只绑 ::1 时传 ::1）。
+   *  provider/gateway 上游仍是 127.0.0.1（它们绑定于此），不受影响。 */
+  targetHost?: string;
+  /** 内部可信客户端 token 旁路：校验 `Authorization: Bearer <token>` 是否
+   *  命中 service-tunnels 实例的内存轮换 token ring（不落盘、TTL、定期
+   *  轮换）。命中 → 跳过 basic/token/forward-auth 认证，直接放行，覆盖
+   *  所有 vhost（不论 site/provider）。
+   *  用途：嵌入方（如 pi-work service-tunnels 扩展）接管登录、拦截所有
+   *  请求后，AI 内部 curl/fetch 的请求也会被阻断；宿主把当前内部 token
+   *  通过环境变量注入子进程（st.internal.envForChild()），子进程请求带上
+   *  `Authorization: Bearer $ST_INTERNAL_TOKEN` 即放行。
+   *  库内由 createServiceTunnels 自动 wire（st.internal.verify）；嵌入方
+   *  自建 ProxyManager 时按需传入。 */
+  verifyInternalToken?: (authorization: string | undefined) => boolean;
+  /** 进程凭证旁路（Linux 优先，预留接口）：给定请求的 remoteAddress，反查
+   *  发起 pid 的 environ 是否带 SERVICE_TUNNELS_MARKER（= 库 spawn 的子进程）
+   *  → 命中即放行，子进程无需带 token。
+   *  复用 marker.ts + discovery.ts 的 /proc/net/tcp → pid + /proc/<pid>/environ
+   *  反查；调用方应带短 TTL 缓存避免每请求扫 /proc。非 Linux / 探测失败
+   *  返回 false（降级为纯 token 校验）。库核心默认不 wire（避免核心路径
+   *  引入 /proc 依赖）；createLinuxProcessProbe 提供独立实现供嵌入方接入。 */
+  verifyInternalProcess?: (remoteAddress: string | undefined) => boolean;
 }
 
 /**
@@ -362,11 +400,23 @@ export async function resolveServiceHost(
   input: ServiceHostResolveInput,
   ctx: ServiceHostResolveContext,
 ): Promise<ServiceHostDecision> {
-  const hostname = (input.host ?? "").split(":")[0]!.toLowerCase();
-  // IP:port 直连（mode portmap 的外部入口）：Host 为纯 IPv4 → 按端口查 open
-  // binding。与 open vhost 同路径（enrollment + auth 照常），只差 Host 解析。
-  if (ctx.allowIpDirect && /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
-    const hostPort = Number((input.host ?? "").split(":")[1] ?? "");
+  const hostname = hostnameOnly(input.host);
+  const targetHost = ctx.targetHost ?? "127.0.0.1";
+  // 内部可信客户端旁路（token 优先 + 进程凭证兜底）：命中即跳过所有认证
+  // backend（basic/token/forward-auth），直接走转发。覆盖所有 vhost，不论
+  // site/provider。token 由 st.internal（内存轮换 ring）校验，宿主把它通过
+  // 环境变量注入子进程；进程凭证旁路复用 marker + /proc 反查（Linux，预留）。
+  const internalBypass =
+    (ctx.verifyInternalToken?.(input.authorization) ?? false) ||
+    (ctx.verifyInternalProcess?.(input.remoteAddress) ?? false);
+  /** bypass 时跳过认证 backend，直接放行。 */
+  const gate: (b: ProxySiteBackend, i: ServiceHostResolveInput) => Promise<ServiceHostDecision | null> =
+    internalBypass ? async () => null : (b, i) => gateBackend(b, i);
+  // IP:port 直连（mode portmap 的外部入口）：Host 为 IPv4 或 IPv6 字面量 →
+  // 按端口查 open binding。与 open vhost 同路径（enrollment + auth 照常），
+  // 只差 Host 解析。Host 头对 IPv6 必须带方括号（[2001:db8::1]:8080）。
+  if (ctx.allowIpDirect && (isIpv4Host(hostname) || isIpv6Host(hostname))) {
+    const hostPort = Number(parseHostPort(input.host ?? "").port || 0);
     if (!Number.isFinite(hostPort) || hostPort < 1 || hostPort > 65535)
       return { kind: "deny", status: 403, body: "invalid port on ip-direct host" };
     // DNAT 只改包的目标地址/端口，HTTP Host 头仍是原始外部端口。真实到达端口是
@@ -382,21 +432,22 @@ export async function resolveServiceHost(
     if (siteResolver) {
       openBackend = await siteResolver(port, undefined, undefined, hostname);
       if (!openBackend) return { kind: "deny", status: 403, body: `port ${port} not enrolled` };
-      const via = await gateBackend(openBackend, input);
+      const via = await gate(openBackend, input);
       if (via) return via;
     }
-    if (ctx.auth) {
+    if (!internalBypass && ctx.auth) {
       const via = await gateForwardAuthDecision(ctx.auth, input);
       if (via) return via;
-    } else if (ctx.password) {
+    } else if (!internalBypass && ctx.password) {
       if (!validBasicAuth(input.authorization, ctx.password)) {
         return { kind: "deny-auth", status: 401, wwwAuthenticate: 'Basic realm="service-tunnels"' };
       }
     }
     const sb = openBackend?.serviceBasePath ?? ctx.serviceBasePath ?? "";
+    const openHost = openBackend?.targetHost ?? targetHost;
     // 解析结果关联 vhost：调用方（日志/嵌入方）能看到这个 IP:port 对应哪个 vhost。
     const vhost = ctx.resolveIpDirectVhost?.(port) ?? undefined;
-    return { kind: "pipe", port, url: mapServicePath(input.url ?? "/", ctx.basePath, sb), ...(vhost ? { vhost } : {}) };
+    return { kind: "pipe", port, host: openHost, url: mapServicePath(input.url ?? "/", ctx.basePath, sb), ...(vhost ? { vhost } : {}) };
   }
 
   const match = parseServiceHost(input.host, ctx.suffixes);
@@ -418,26 +469,26 @@ export async function resolveServiceHost(
     }
     const backend = ctx.resolveSite ? await ctx.resolveSite(match.port, site, match.label, hostname) : null;
     if (!backend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled for site "${site}"` };
-    const via = await gateBackend(backend, input);
+    const via = await gate(backend, input);
     if (via) return via;
     // labeled / site-domain vhost 是应用的完整入口(如嵌入方应用部署在 /dev):即使
     // open(无 auth)也原样转发,不 strip basePath——strip 仅用于裸 <port>.<suffix>
     // open vhost(部署前缀下的无 label 服务)
     // 转发到真实服务:剥 deployBasePath、接服务自身 base path(per-binding 优先)
     const sb = backend.serviceBasePath ?? ctx.serviceBasePath ?? "";
-    return { kind: "pipe", port: match.port, url: mapServicePath(input.url ?? "/", ctx.basePath, sb) };
+    return { kind: "pipe", port: match.port, host: backend.targetHost ?? targetHost, url: mapServicePath(input.url ?? "/", ctx.basePath, sb) };
   } else {
     // open vhost → enrollment + optional global gates
     if (ctx.resolveSite) {
       openBackend = await ctx.resolveSite(match.port, undefined, undefined, hostname);
       if (!openBackend) return { kind: "deny", status: 403, body: `port ${match.port} not enrolled` };
-      const via = await gateBackend(openBackend, input);
+      const via = await gate(openBackend, input);
       if (via) return via;
     }
-    if (ctx.auth) {
+    if (!internalBypass && ctx.auth) {
       const via = await gateForwardAuthDecision(ctx.auth, input);
       if (via) return via;
-    } else if (ctx.password) {
+    } else if (!internalBypass && ctx.password) {
       if (!validBasicAuth(input.authorization, ctx.password)) {
         return {
           kind: "deny-auth",
@@ -450,7 +501,7 @@ export async function resolveServiceHost(
 
   // open vhost 的 per-binding serviceBasePath(如 vite base=/dev/)优先于全局。
   const path = mapServicePath(input.url ?? "/", ctx.basePath, openBackend?.serviceBasePath ?? ctx.serviceBasePath ?? "");
-  return { kind: "forward", target: proxyTarget(match.port, path) };
+  return { kind: "forward", target: proxyTarget(match.port, path, openBackend?.targetHost ?? targetHost) };
 }
 
 async function gateBackend(
@@ -596,13 +647,17 @@ function resolveInject(r: string | { html: string; position?: "head" | "prepend"
   return { html: r.html, position: r.position === "prepend" ? "prepend" : "head" };
 }
 
-/** Pipe an HTTP request to 127.0.0.1:port (provider portal or nginx gateway).
- *  Used for `{basePath}/*` → provider and basic → gateway forwarding. */
+/** Pipe an HTTP request to <host>:port (provider portal / nginx gateway /
+ *  app upstream). `host` defaults to 127.0.0.1; IPv6-loopback-only apps pass
+ *  "::1" (bare — the http module resolves it correctly; brackets are only
+ *  for URLs). Used for `{basePath}/*` → provider, basic → gateway, and
+ *  app → service forwarding. */
 function pipeTo(
   port: number,
   req: IncomingMessage,
   res: ServerResponse,
   transformResponse: ProxyOptions["transformResponse"] | undefined,
+  host = "127.0.0.1",
 ): void {
   // resolve inject BEFORE sending the upstream request: when injecting we
   // must strip accept-encoding (or the upstream returns a gzip stream and the
@@ -617,7 +672,7 @@ function pipeTo(
     }
   }
   const proxyReq = httpRequest({
-    host: "127.0.0.1",
+    host: unbracketHost(host),
     port,
     method: req.method,
     path: req.url ?? "/",
@@ -670,16 +725,17 @@ function pipeTo(
 }
 
 /** Forward a validated WebSocket upgrade to the service. */
-/** Raw upgrade pipe to 127.0.0.1:port (app, provider portal, or nginx gateway). */
+/** Raw upgrade pipe to <host>:port (app, provider portal, or nginx gateway). */
 function pipeUpgrade(
   port: number,
   path: string,
   req: IncomingMessage,
   socket: Duplex,
   head: Buffer,
+  host = "127.0.0.1",
 ): void {
   const proxyReq = httpRequest({
-    host: "127.0.0.1",
+    host: unbracketHost(host),
     port,
     method: "GET",
     path,
@@ -712,6 +768,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
     auth,
     log = () => {},
     transformResponse,
+    targetHost = "127.0.0.1",
   } = opts;
   const suffixes = [...(opts.suffixes ?? DEFAULT_SUFFIXES)];
   for (const h of opts.allowedHosts ?? []) {
@@ -762,6 +819,9 @@ export function createProxyServer(opts: ProxyOptions): Server {
         resolveIpDirectPort: opts.resolveIpDirectPort,
         resolveIpDirectVhost: opts.resolveIpDirectVhost,
         resolveIpDirectSite: opts.resolveIpDirectSite,
+        targetHost,
+        verifyInternalToken: opts.verifyInternalToken,
+        verifyInternalProcess: opts.verifyInternalProcess,
       },
     );
 
@@ -779,8 +839,8 @@ export function createProxyServer(opts: ProxyOptions): Server {
         res.end("Authentication required");
         return;
       case "pipe":
-        log(`pipe ${req.headers.host}${req.url ?? ""} → :${decision.port}${decision.vhost ? ` (vhost ${decision.vhost})` : ""}`);
-        pipeTo(decision.port, req, res, transformResponse);
+        log(`pipe ${req.headers.host}${req.url ?? ""} → ${decision.host ?? "127.0.0.1"}:${decision.port}${decision.vhost ? ` (vhost ${decision.vhost})` : ""}`);
+        pipeTo(decision.port, req, res, transformResponse, decision.host ?? targetHost);
         return;
       case "redirect":
         log(`auth 302 ${req.headers.host} → ${decision.location}`);
@@ -794,7 +854,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
         return;
       case "forward": {
         const t = new URL(decision.target);
-        log(`proxy ${req.headers.host} → 127.0.0.1:${t.port} ${req.method} ${t.pathname + t.search}`);
+        log(`proxy ${req.headers.host} → ${t.hostname}:${t.port} ${req.method} ${t.pathname + t.search}`);
         const path = t.pathname + t.search;
     // same as pipeTo: strip accept-encoding when injecting, BEFORE the request
     let inject: { html: string; position: "head" | "prepend" } | null = null;
@@ -807,7 +867,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
     }
 
     const proxyReq = httpRequest({
-      host: t.hostname,
+      host: unbracketHost(t.hostname),
       port: Number(t.port) || 80,
       method: req.method,
       path,
@@ -890,6 +950,9 @@ export function createProxyServer(opts: ProxyOptions): Server {
           resolveIpDirectPort: opts.resolveIpDirectPort,
           resolveIpDirectVhost: opts.resolveIpDirectVhost,
           resolveIpDirectSite: opts.resolveIpDirectSite,
+          targetHost,
+          verifyInternalToken: opts.verifyInternalToken,
+          verifyInternalProcess: opts.verifyInternalProcess,
         },
       );
       switch (decision.kind) {
@@ -902,7 +965,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
           socket.destroy();
           return;
         case "pipe":
-          pipeUpgrade(decision.port, decision.url, req, socket, head);
+          pipeUpgrade(decision.port, decision.url, req, socket, head, decision.host ?? targetHost);
           return;
         case "redirect":
           socket.write("HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n\r\n");
@@ -910,7 +973,7 @@ export function createProxyServer(opts: ProxyOptions): Server {
           return;
         case "forward": {
           const t = new URL(decision.target);
-          pipeUpgrade(Number(t.port) || 80, t.pathname + t.search, req, socket, head);
+          pipeUpgrade(Number(t.port) || 80, t.pathname + t.search, req, socket, head, unbracketHost(t.hostname));
           return;
         }
       }

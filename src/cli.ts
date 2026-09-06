@@ -37,11 +37,17 @@ function usage(lang: Lang = "en"): void {
   schemas [--type <tunnel-type|auth>]   ${translate(lang, "cli.schemasHint")}
   site list | show <name> | add <name> [--provider <p>] [--auth true|false] [--base-path <p>]
        [--policy <p>] [--domain <d>] [--suffix <s>] [--provider-set k=v ...] | remove <name>
-  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--portmap-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both|portmap] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
+  expose <port> [--tunnel <t>] [--tunnel-set k=v ...] [--auth [auto|none|<provider>]] [--provider-set k=v ...] [--portmap-set k=v ...] [--name <n>] [--nginx-port <p>] [--mode tunnel|proxy|both|portmap|ipv6] [--ipv6-address <addr>] [--site <s>] [--proxy-port <p>] [--base-domain <d>] [--bypass-path <path> ...] [--inject-html <fragment>] [--inject-position head|prepend] [--allow-tool-download <true|false>] [--allow-auth-none <true|false>] [--force]
   portmap probe [--gateway <ip>] | list | stop <key>   # router UPnP/NAT-PMP mapping (mode portmap)
+  ipv6 diagnose | list | stop <key>                    # public IPv6 diagnosis + direct-expose transports (mode ipv6, no tunnel)
   ssh domain list | create <name> --forward-port <p> [--ssh-port <p>] [--reverse-port <p>] [--host <h>] |
                remove <name> | key list|add|generate|remove | host fingerprints [--domain <d>] [--public-key <k>] [--fingerprint <fp>] [--type ed25519|rsa|ecdsa] [--bits <n>] [--count <n>] [--comment <c>]
   auth providers list | auth user list|add|set-password|remove [--site <s>] | auth token list|create|revoke [--site <s>] [--description <d>] [--expires <ISO|+2h|never>] | auth totp enroll|disable|status <user> [--site <s>] [--provider ...] | auth biometric status|disable|enroll-url <user> [--site <s>] [--method face|voice] [--provider portal]
+  authsetup [--admin-port <p>] [--auth-port <p>] [--base-path <p>] [--site <s>]
+            [--listen <ip>] [--policy <p>] [--out <dir>] [--bin-dir <dir>]
+            [--with-systemd] [--force]
+  authonly start [--port <p>] [--base-path <p>] [--site <s>] [--listen <ip>] [--policy <p>]
+           | stop | status [--site <s>]
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
@@ -92,6 +98,8 @@ interface CliArgs {
   txt?: boolean;
   cname?: boolean;
   txtUrl?: boolean;
+  /** ddns entry-add / expose ddns: register public IPv6 as AAAA. */
+  aaaa?: boolean;
   ddnsProfile?: string;
   cmd?: string;
   /** --set key=value (tunnel params, validated against the type schema). */
@@ -102,6 +110,8 @@ interface CliArgs {
   providerSets?: Record<string, string>;
   /** --portmap-set key=value (expose mode=portmap params). */
   portmapSets?: Record<string, string>;
+  /** expose --ipv6-address <addr>: mode ipv6 的显式入口地址。 */
+  ipv6Address?: string;
   /** -i / --interactive: prompt each schema param (readline). */
   interactive?: boolean;
   tunnelArgs?: string[];
@@ -162,6 +172,18 @@ interface CliArgs {
    *  (false = this expose must use an auth provider; an operator ban via
    *  env/config can't be re-enabled here). */
   allowAuthNone?: boolean;
+  /** authsetup: Web 管理界面端口（`st ui`）。 */
+  adminPort?: number;
+  /** authsetup: 仅认证服务端口。 */
+  authPort?: number;
+  /** authsetup/authonly: 认证服务监听地址（缺省 127.0.0.1）。 */
+  listen?: string;
+  /** authsetup: 非可执行产物目录（nginx/systemd；缺省 configDir/auth）。 */
+  out?: string;
+  /** authsetup: 可执行脚本目录（缺省 ~/.local/bin）。 */
+  binDir?: string;
+  /** authsetup: 同时生成 systemd unit。 */
+  withSystemd?: boolean;
   [k: string]: unknown;
 }
 
@@ -285,6 +307,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--txt-url":
         args.txtUrl = true;
         break;
+      case "--aaaa":
+        args.aaaa = true;
+        break;
       case "--ddns-profile":
         args.ddnsProfile = argv[++i];
         break;
@@ -299,6 +324,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--portmap-set":
         addSet(args, "portmapSets", argv[++i]);
+        break;
+      case "--ipv6-address":
+        args.ipv6Address = argv[++i];
         break;
       case "-i":
       case "--interactive":
@@ -357,6 +385,24 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
         break;
       case "--inject-position":
         args.injectPosition = argv[++i]!;
+        break;
+      case "--admin-port":
+        args.adminPort = Number(argv[++i]!);
+        break;
+      case "--auth-port":
+        args.authPort = Number(argv[++i]!);
+        break;
+      case "--listen":
+        args.listen = argv[++i]!;
+        break;
+      case "--out":
+        args.out = argv[++i]!;
+        break;
+      case "--bin-dir":
+        args.binDir = argv[++i]!;
+        break;
+      case "--with-systemd":
+        args.withSystemd = true;
         break;
       case "--allow-tool-download": {
         const raw = (argv[++i] ?? "true").toLowerCase();
@@ -885,7 +931,7 @@ async function main(): Promise<void> {
     }
 
     case "portmap": {
-      // st portmap probe [--gateway <ip>]  |  st portmap list  |  st portmap stop <key>
+      // st portmap probe [--gateway <ip>] | list | stop <key>
       const op = cmd[1] ?? "probe";
       if (op === "probe") {
         try {
@@ -904,6 +950,26 @@ async function main(): Promise<void> {
           process.exit(2);
         }
         jsonOut({ stopped: await st.portmap.stop(key) });
+      } else {
+        usage(lang);
+        process.exit(2);
+      }
+      break;
+    }
+    case "ipv6": {
+      // st ipv6 [diagnose] | list | stop <key>
+      const op = cmd[1] ?? "diagnose";
+      if (op === "diagnose" || op === "status" || op === "") {
+        jsonOut(st.ipv6.diagnose());
+      } else if (op === "list") {
+        jsonOut(st.ipv6.list());
+      } else if (op === "stop") {
+        const key = cmd[2];
+        if (!key) {
+          console.error("ipv6 stop <key>");
+          process.exit(2);
+        }
+        jsonOut({ stopped: await st.ipv6.stop(key) });
       } else {
         usage(lang);
         process.exit(2);
@@ -965,11 +1031,12 @@ async function main(): Promise<void> {
           ? "auto"
           : args.auth === "none" ? false : Boolean(args.auth),
         provider: typeof args.auth === "string" && args.auth !== "auto" ? args.auth : undefined,
-        mode: args.mode as "tunnel" | "proxy" | "both" | "portmap" | undefined,
+        mode: args.mode as "tunnel" | "proxy" | "both" | "portmap" | "ipv6" | undefined,
         site: args.site,
         proxyPort: args.proxyPort != null ? Number(args.proxyPort) : undefined,
         baseDomain: args.baseDomain,
         bypassPaths: args.bypassPaths,
+        ...(args.ipv6Address ? { ipv6: { address: args.ipv6Address } } : {}),
         ...(args.injectHtml
           ? { inject: { html: args.injectHtml, position: args.injectPosition === "prepend" ? "prepend" as const : "head" as const } }
           : {}),
@@ -984,8 +1051,8 @@ async function main(): Promise<void> {
         tunnelParams,
         providerParams,
         ...(portmapParams ? { portmap: portmapParams } : {}),
-        ...(args.ddnsProfile || args.ip || args.txt || args.cname || args.txtUrl
-          ? { ddns: { profile: args.ddnsProfile, ip: args.ip, txt: args.txt, cname: args.cname, txtUrl: args.txtUrl } }
+        ...(args.ddnsProfile || args.ip || args.txt || args.cname || args.txtUrl || args.aaaa
+          ? { ddns: { profile: args.ddnsProfile, ip: args.ip, txt: args.txt, cname: args.cname, txtUrl: args.txtUrl, aaaa: args.aaaa } }
           : {}),
         sshGateway: args.sshGateway,
         force: args.force,
@@ -1198,6 +1265,245 @@ async function main(): Promise<void> {
       break;
     }
 
+    case "authsetup": {
+      // 仅认证模式：一次性设置 admin 端口 / auth 端口 / basePath / site（存储），
+      // 生成管理脚本（~/.local/bin/auth-admin-<base>.*）+ 认证服务脚本
+      // （~/.local/bin/auth-server-<base>.*）+ nginx 接入碎片 +（可选）systemd unit。
+      const {
+        randomBasePath, randomSite, pickFreePort, readAuthConfig, writeAuthConfig,
+        defaultBinDir, defaultOutDir, resolveCliInvocation,
+        renderAdminBash, renderServerBash, renderAdminBat, renderServerBat,
+        renderNginxFragment, renderSystemdUnit, renderWindowsServiceInstall,
+        renderWindowsServiceUninstall, renderFail2banFilter, renderFail2banJail,
+      } = await import("./auth-setup.ts");
+      const { validateSiteName } = await import("./sites.ts");
+      // basePath：显式 > 随机（/xxx 小写字母）
+      let basePath = (args.basePath ?? "").trim();
+      if (basePath && !/^\/[a-z0-9][a-z0-9-]*$/.test(basePath)) {
+        console.error(`authsetup: invalid --base-path "${basePath}" (expected /[a-z0-9-]+)`);
+        process.exit(2);
+      }
+      basePath = basePath || randomBasePath();
+      const base = basePath.replace(/^\//, "").toLowerCase();
+      // site（存储位置）：显式 > 随机；default 保留（默认站点存储，与现有
+      // 隧道/暴露共享用户库）
+      const site = (args.site ?? "").trim() || randomSite();
+      if (site !== "default") {
+        try {
+          validateSiteName(site);
+        } catch (err) {
+          console.error(`authsetup: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(2);
+        }
+      }
+      // 端口：显式 > 空闲探测
+      const tcpFree = async (p: number): Promise<boolean> => {
+        const { createServer } = await import("net");
+        return new Promise((resolve) => {
+          const s = createServer();
+          s.once("error", () => resolve(false));
+          s.listen(p, "127.0.0.1", () => s.close(() => resolve(true)));
+        });
+      };
+      let adminPort = args.adminPort ? Number(args.adminPort) : 4181;
+      if (!args.adminPort && !(await tcpFree(adminPort))) adminPort = await pickFreePort();
+      if (args.adminPort && !(await tcpFree(adminPort))) {
+        console.error(`authsetup: admin port ${adminPort} is in use`);
+        process.exit(2);
+      }
+      const authPort = args.authPort ? Number(args.authPort) : await pickFreePort();
+      if (args.authPort && !(await tcpFree(authPort))) {
+        console.error(`authsetup: auth port ${authPort} is in use`);
+        process.exit(2);
+      }
+      const listen = (args.listen ?? "127.0.0.1").trim() || "127.0.0.1";
+      const policy = (args.policy as "one_factor" | "two_factor" | "deny") ?? "one_factor";
+      // 已存在同 base 配置：--force 才覆盖
+      const existing = readAuthConfig(st.dirs.configDir, base);
+      if (existing && !args.force) {
+        console.error(`authsetup: base "${base}" already configured (${existing.basePath}, site ${existing.site}, auth :${existing.authPort}). Pass --force to regenerate.`);
+        process.exit(2);
+      }
+      const cfg = {
+        base, basePath, site, adminPort, authPort, listen, policy,
+        configDir: st.dirs.configDir, cacheDir: st.dirs.cacheDir,
+      };
+      writeAuthConfig(st.dirs.configDir, cfg);
+      // 注册 site（管理界面列出该 realm）；default 跳过（隐式站点）
+      if (site !== "default") {
+        try {
+          st.sites.add(site, { provider: "portal", basePath, policy });
+        } catch (err) {
+          console.error(`authsetup: site register warning: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      // 生成脚本 / 产物
+      const { mkdirSync, writeFileSync, chmodSync } = await import("fs");
+      const cli = resolveCliInvocation();
+      const binDir = (args.binDir ?? "").trim() || defaultBinDir();
+      const outDir = (args.out ?? "").trim() || defaultOutDir(st.dirs.configDir);
+      mkdirSync(binDir, { recursive: true });
+      mkdirSync(outDir, { recursive: true });
+      const files: string[] = [];
+      const write = (path: string, content: string, mode?: number) => {
+        writeFileSync(path, content, "utf8");
+        if (mode) {
+          try {
+            chmodSync(path, mode);
+          } catch { /* best-effort */ }
+        }
+        files.push(path);
+      };
+      write(join(binDir, `auth-admin-${base}.sh`), renderAdminBash(cfg, cli), 0o755);
+      write(join(binDir, `auth-server-${base}.sh`), renderServerBash(cfg, cli), 0o755);
+      write(join(binDir, `auth-admin-${base}.bat`), renderAdminBat(cfg, cli));
+      write(join(binDir, `auth-server-${base}.bat`), renderServerBat(cfg, cli));
+      write(join(outDir, `nginx-auth-${base}.conf`), renderNginxFragment(cfg));
+      // systemd unit（默认生成；linux 上即可用）
+      {
+        const scriptPath = join(binDir, `auth-server-${base}.sh`);
+        write(join(outDir, `auth-server-${base}.service`), renderSystemdUnit(cfg, scriptPath));
+      }
+      // Windows 服务安装/卸载脚本（默认生成；win 上管理员运行）
+      {
+        const cliJs = process.argv[1] ?? "";
+        write(join(binDir, `install-service-${base}.bat`), renderWindowsServiceInstall(cfg, cliJs));
+        write(join(binDir, `uninstall-service-${base}.bat`), renderWindowsServiceUninstall(cfg));
+      }
+      // fail2ban filter + jail（默认生成；linux + system nginx 场景，真实 IP 在
+      // nginx 层可见——与 portal 自带 per-IP 封禁互补，更早拦截）
+      write(join(outDir, `fail2ban-auth-${base}.conf`), renderFail2banFilter(cfg));
+      write(join(outDir, `fail2ban-jail-${base}.conf`), renderFail2banJail(cfg));
+      jsonOut({
+        base, basePath, site, adminPort, authPort, listen, policy,
+        configFile: join(defaultOutDir(st.dirs.configDir), `${base}.json`),
+        adminScript: join(binDir, `auth-admin-${base}.sh`),
+        serverScript: join(binDir, `auth-server-${base}.sh`),
+        nginxFragment: join(outDir, `nginx-auth-${base}.conf`),
+        generated: files,
+        // 工作流提示
+        next: [
+          `启动管理界面调整用户: ${join(binDir, `auth-admin-${base}.sh`)}`,
+          `启动仅认证服务: ${join(binDir, `auth-server-${base}.sh`)}`,
+          `nginx 接入: 把 ${join(outDir, `nginx-auth-${base}.conf`)} 的 location 放入受保护应用 server{}`,
+        ],
+      });
+      break;
+    }
+
+    case "authonly": {
+      // 仅认证服务（生产进程）：外部系统 nginx auth_request 接入。
+      // start = 前台常驻（systemd Type=simple 直接 ExecStart）；无管理界面。
+      const op = cmd[1] ?? "start";
+      const site = (args.site ?? "").trim() || "default";
+      const { readAuthConfig, listAuthConfigs, authDir } = await import("./auth-setup.ts");
+      if (op === "start") {
+        // 解析 basePath：显式 > 该 site 已有配置 > 报错
+        let basePath = (args.basePath ?? "").trim();
+        if (!basePath) {
+          const cfg = listAuthConfigs(st.dirs.configDir).find((c) => c.site === site);
+          basePath = cfg?.basePath ?? "";
+        }
+        if (!basePath) {
+          console.error(`authonly start: need --base-path (or run authsetup first)`);
+          process.exit(2);
+        }
+        const port = args.port ? Number(args.port) : 0;
+        const listen = (args.listen ?? "").trim() || "127.0.0.1";
+        const policy = (args.policy as "one_factor" | "two_factor" | "deny") ?? undefined;
+        const res = await st.auth.server.start({ site, port, basePath, policy, host: listen, trustProxy: true });
+        // pid 文件（stop/status 用；避免与管理界面/隧道共享存储冲突）
+        const pidFile = join(st.dirs.cacheDir, "tmp", `authonly-${site}.pid`);
+        try {
+          const { mkdirSync, writeFileSync } = await import("fs");
+          mkdirSync(join(st.dirs.cacheDir, "tmp"), { recursive: true });
+          writeFileSync(pidFile, `${process.pid}\n`, "utf8");
+        } catch { /* best-effort */ }
+        // 信号清理：SIGTERM（systemd stop）/ SIGINT → 停 provider + 删 pid
+        const shutdown = async () => {
+          try { await st.auth.server.stop(site); } catch { /* best-effort */ }
+          try { const { rmSync } = await import("fs"); rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
+          process.exit(0);
+        };
+        process.on("SIGTERM", shutdown);
+        process.on("SIGINT", shutdown);
+        // 注册 guardian：父进程崩溃/被 SIGKILL 时收割 portal 子进程
+        const { spawnGuardian } = await import("./guardian-spawn.ts");
+        const { registrationFilePath } = await import("./pid-registry.ts");
+        spawnGuardian(process.pid, {
+          registrationFile: registrationFilePath(st.dirs.cacheDir, process.pid),
+          cacheDir: st.dirs.cacheDir,
+          nodePath: undefined,
+        });
+        jsonOut({ ...res, pid: process.pid, pidFile });
+        console.error(`[authonly] auth 服务已启动: basePath=${res.basePath} port=${res.port} site=${site}（nginx auth_request 接入见 authsetup 生成的 nginx-auth-${res.basePath.replace(/^\//, "")}.conf）`);
+        await new Promise(() => {}); // 前台常驻
+        break;
+      }
+      const pidFile = join(st.dirs.cacheDir, "tmp", `authonly-${site}.pid`);
+      const { readFileSync, existsSync, rmSync } = await import("fs");
+      const alive = (pid: number): boolean => {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      if (op === "stop") {
+        let pid: number | null = null;
+        if (existsSync(pidFile)) {
+          try { pid = Number((readFileSync(pidFile, "utf8").trim() || "0")); } catch { pid = null; }
+        }
+        if (!pid || !alive(pid)) {
+          rmSync(pidFile, { force: true });
+          jsonOut({ stopped: false, reason: "not running" });
+          break;
+        }
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch { /* already gone */ }
+        // 等待进程退出（信号处理器会清 provider + pid）
+        const dl = Date.now() + 5_000;
+        while (Date.now() < dl && alive(pid)) await new Promise((r) => setTimeout(r, 100));
+        rmSync(pidFile, { force: true });
+        jsonOut({ stopped: true, pid });
+        break;
+      }
+      if (op === "status") {
+        let pid: number | null = null;
+        if (existsSync(pidFile)) {
+          try { pid = Number((readFileSync(pidFile, "utf8").trim() || "0")); } catch { pid = null; }
+        }
+        // 跨进程：注册表在本进程内是空的，实际运行态只能靠端口探针判定。
+        // 未认证探针返回 401 = 服务在跑（若绑定错误/进程死则连接失败）。
+        const cfg = listAuthConfigs(st.dirs.configDir).find((c) => c.site === site) ?? null;
+        const port = cfg?.authPort ?? null;
+        let running = !!pid && alive(pid);
+        if (running && port) {
+          try {
+            const { get } = await import("http");
+            const probeOk = await new Promise<boolean>((resolve) => {
+              const req = get({ host: "127.0.0.1", port, path: `${cfg?.basePath ?? "/"}/api/authz/auth-request`, method: "GET", timeout: 1500 }, (res) => {
+                res.resume();
+                resolve(res.statusCode !== undefined);
+              });
+              req.on("error", () => resolve(false));
+              req.on("timeout", () => { req.destroy(); resolve(false); });
+            });
+            running = probeOk;
+          } catch {
+            running = false;
+          }
+        }
+        jsonOut({ running, pid: running ? pid : null, port: running ? port : null, site });
+        break;
+      }
+      console.error("authonly start | stop | status [--site <s>] [--port <p>] [--base-path <p>]");
+      process.exit(2);
+      break;
+    }
+
     case "ddns": {
       const { readDdnsConfigs, writeDdnsConfigs, runDdnsOnce, resolvePublicIp, startDdnsLoop, DDNS_PROVIDERS } = await import("./ddns.ts");
       const op = cmd[1] ?? "list";
@@ -1251,7 +1557,12 @@ async function main(): Promise<void> {
         writeDdnsConfigs(st.dirs.configDir, cfgs.filter((c) => c.name !== name));
         jsonOut({ removed: name });
       } else if (op === "ip") {
-        jsonOut({ ipv4: await resolvePublicIp(4), ipv6: await resolvePublicIp(6) });
+        // 除外部探测（resolvePublicIp 4/6）外，附加本机 global IPv6 诊断（直连暴露可用）。
+        jsonOut({
+          ipv4: await resolvePublicIp(4),
+          ipv6: await resolvePublicIp(6),
+          localIpv6: st.ipv6.diagnose().global,
+        });
       } else if (op === "update") {
         let cfgs = readDdnsConfigs(st.dirs.configDir).filter((c) => c.enabled !== false);
         if (name) cfgs = cfgs.filter((c) => c.name === name);
@@ -1311,7 +1622,7 @@ async function main(): Promise<void> {
         // st ddns entry-add <name> --profile <p> --kind portmap|tunnel [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url] [--record <r>] [--txt-name <tn>] [--zone <z>]
         const { readRegistryConfig, writeRegistryConfig } = await import("./ddns-registry.ts");
         if (!name || !args.kind || (!args.profile && !args.zone)) {
-          console.error("ddns entry-add <name> --profile <p>|(--provider-profile <pp> --zone <z>) --kind portmap|tunnel [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url]");
+          console.error("ddns entry-add <name> --profile <p>|(--provider-profile <pp> --zone <z>) --kind portmap|tunnel [--follow-tunnel <t>] [--ip] [--txt] [--cname] [--txt-url] [--aaaa]");
           process.exit(2);
         }
         const cfg = readRegistryConfig(st.dirs.configDir);
@@ -1326,12 +1637,13 @@ async function main(): Promise<void> {
           zone: args.zone,
           record: args.record,
           txtName: args.txtName,
-          kind: args.kind as "portmap" | "tunnel",
+          kind: args.kind as "portmap" | "tunnel" | "ipv6",
           followTunnel: args.followTunnel,
           ip: args.ip === true,
           txt: args.txt === true,
           cname: args.cname === true,
           txtUrl: args.txtUrl === true,
+          aaaa: args.aaaa === true,
         });
         writeRegistryConfig(st.dirs.configDir, cfg);
         jsonOut({ added: name, kind: args.kind, profile: args.profile ?? null });
@@ -1437,7 +1749,12 @@ async function main(): Promise<void> {
 
     case "status": {
       const d = st.daemon.status();
-      jsonOut({ daemon: d, internal: st.state().internal, tunnels: st.state().tunnels });
+      jsonOut({
+        daemon: d,
+        internal: st.state().internal,
+        tunnels: st.state().tunnels,
+        ipv6: st.ipv6.diagnose(),
+      });
       break;
     }
 

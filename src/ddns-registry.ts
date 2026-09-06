@@ -24,7 +24,7 @@
  *  carry provider/zone/record inline (no profiles) for ad-hoc use.
  */
 
-import { setBeacon, upsertRecord } from "ddns";
+import { setBeacon, upsertRecord, resolvePublicIp } from "ddns";
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DdnsEntry } from "./ddns.ts";
@@ -80,14 +80,18 @@ export interface RegistrationEntry {
   record?: string;
   /** TXT 记录名（独立于 CNAME 记录名）；缺省回退到 record。 */
   txtName?: string;
-  /** What triggers this entry: "portmap" or "tunnel". */
-  kind: "portmap" | "tunnel";
+  /** What triggers this entry: "portmap", "ipv6", or "tunnel". */
+  kind: "portmap" | "ipv6" | "tunnel";
   /** Name of the tunnel to follow (kind: tunnel). */
   followTunnel?: string;
   /** Kind: portmap — register the external IP as an A record. */
   ip?: boolean;
+  /** Kind: portmap — register public IPv6 as an AAAA record. */
+  aaaa?: boolean;
   /** Kind: portmap — register "ip:port" as a TXT record. */
   txt?: boolean;
+  /** Kind: portmap — explicit address record type (default A). */
+  type?: "A" | "AAAA";
   /** Kind: tunnel — register the URL host as a CNAME. */
   cname?: boolean;
   /** Kind: tunnel — register the full URL as a TXT (txtUrl preferred;
@@ -104,7 +108,7 @@ export interface DdnsRegistryConfig {
 export interface RegistrationResult {
   name: string;
   kind: "portmap" | "tunnel";
-  actions: Array<{ type: "A" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }>;
+  actions: Array<{ type: "A" | "AAAA" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }>;
 }
 
 /** Read the registry config (accepts plain DdnsEntry[] too). */
@@ -174,8 +178,10 @@ export function resolveEntry(
 export async function registerPortmap(
   cfg: DdnsRegistryConfig,
   info: { externalIp: string; externalPort: number; label?: string },
+  opts?: { resolveIp6?: () => Promise<string | null> },
 ): Promise<RegistrationResult[]> {
   const results: RegistrationResult[] = [];
+  const ip6 = opts?.resolveIp6 ?? (() => resolvePublicIp(6));
   for (const entry of cfg.entries ?? []) {
     if (entry.kind !== "portmap") continue;
     const resolved = resolveEntry(cfg, entry);
@@ -186,8 +192,26 @@ export async function registerPortmap(
     const actions: RegistrationResult["actions"] = [];
     if (entry.ip) {
       const name = resolved.record || `${entry.name}.${resolved.zone}`;
-      const r = await setBeaconSafe(resolved, { name, type: "A", value: info.externalIp });
-      actions.push({ type: "A", name, value: info.externalIp, ok: r.ok, error: r.error });
+      // entry.type 可显式选 AAAA：portmap 只能拿到 IPv4 外部 IP（UPnP/NAT-PMP
+      // 是 IPv4 协议），IPv6 用公网探测（resolvePublicIp(6)），失败则报错。
+      const recordType = entry.type === "AAAA" ? "AAAA" : "A";
+      const value = recordType === "AAAA" ? (await ip6()) ?? "" : info.externalIp;
+      if (!value) {
+        actions.push({ type: recordType, name, value: "", ok: false, error: "no IPv6 public address detected" });
+      } else {
+        const r = await setBeaconSafe(resolved, { name, type: recordType, value });
+        actions.push({ type: recordType, name, value, ok: r.ok, error: r.error });
+      }
+    }
+    if (entry.aaaa) {
+      const name = resolved.record || `${entry.name}.${resolved.zone}`;
+      const value = (await ip6()) ?? "";
+      if (!value) {
+        actions.push({ type: "AAAA", name, value: "", ok: false, error: "no IPv6 public address detected" });
+      } else {
+        const r = await setBeaconSafe(resolved, { name, type: "AAAA", value });
+        actions.push({ type: "AAAA", name, value, ok: r.ok, error: r.error });
+      }
     }
     if (entry.txt) {
       const name = resolved.txtName || resolved.record || `${entry.name}.${resolved.zone}`;
@@ -245,13 +269,13 @@ export function urlHost(url: string): string {
 
 async function setBeaconSafe(
   resolved: { provider: ProviderProfile; zone: string },
-  target: { name: string; type: "A" | "CNAME" | "TXT"; value: string },
+  target: { name: string; type: "A" | "AAAA" | "CNAME" | "TXT"; value: string },
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    if (target.type === "A") {
-      // portmap IP registration — A records go through the generic upsert
+    // A / AAAA 是地址记录，走通用 upsert（beacon 的 setBeacon 只支持 CNAME/TXT）
+    if (target.type === "A" || target.type === "AAAA") {
       await upsertRecord(resolved.provider as never, resolved.zone, {
-        type: "A",
+        type: target.type,
         name: target.name,
         value: target.value,
       });

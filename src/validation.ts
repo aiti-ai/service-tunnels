@@ -1,5 +1,6 @@
 import type { TunnelConfig, TunnelType } from "./tunnels.ts";
 import { isCustomTunnelType } from "./tunnels-custom.ts";
+import { isBareIpv6 } from "./net-utils.ts";
 
 /**
  * Tunnel config input validation — the single choke point for every user-
@@ -39,7 +40,8 @@ const NULL_RE = /\x00/;
  *  separators → safe to interpolate into filenames and IPC paths. */
 export const TUNNEL_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 /** Hostname / IPv4 literal. Rejects "-" prefix (ssh option injection) and
- *  any path/whitespace/control characters. */
+ *  any path/whitespace/control characters. IPv6 literals are NOT matched
+ *  here — validateHost() delegates them to isBareIpv6()/isIpv6Host(). */
 export const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$/;
 /** SSH username: no "-" prefix (would become an ssh option), no "@" (would
  *  corrupt user@host), no path chars. */
@@ -70,7 +72,11 @@ export function validateTunnelName(name: unknown): string {
 }
 
 /** Validate an ssh host / server host. The "-" prefix check is the hard
- *  security boundary: OpenSSH parses ANY "-"-prefixed argv as an option. */
+ *  security boundary: OpenSSH parses ANY "-"-prefixed argv as an option.
+ *  Accepts hostnames, IPv4 literals, and IPv6 literals (bare `2001:db8::1`
+ *  or bracketed `[2001:db8::1]`; link-local `fe80::1%eth0` kept verbatim).
+ *  Brackets are preserved as given — callers that need a canonical form
+ *  use bracketHost()/unbracketHost() from net-utils. */
 export function validateHost(host: unknown, label = "host"): string {
   if (typeof host !== "string" || host.length === 0 || host.length > 253) {
     throw new TunnelConfigError(`invalid ${label}: ${JSON.stringify(host)}`);
@@ -83,7 +89,10 @@ export function validateHost(host: unknown, label = "host"): string {
   if (CONTROL_RE.test(host)) {
     throw new TunnelConfigError(`invalid ${label}: control characters are not allowed`);
   }
-  if (!HOSTNAME_RE.test(host)) {
+  const trimmed = host.trim();
+  const bare = trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
+  const isIpv6 = isBareIpv6(trimmed) || isBareIpv6(bare);
+  if (!isIpv6 && !HOSTNAME_RE.test(host)) {
     throw new TunnelConfigError(`invalid ${label}: ${JSON.stringify(host)} (expected hostname or IP)`);
   }
   return host;
@@ -142,7 +151,7 @@ export function validatePort(n: unknown, label = "port"): number {
   return v;
 }
 
-/** Validate `host[:port]` / `[ipv6][:port]` server addresses. */
+/** Validate `host[:port]` / `[ipv6][:port]` / bare `ipv6` server addresses. */
 export function validateServer(server: unknown): string {
   if (typeof server !== "string" || server.length === 0 || server.length > 253) {
     throw new TunnelConfigError(`invalid server: ${JSON.stringify(server)}`);
@@ -157,6 +166,8 @@ export function validateServer(server: unknown): string {
     if (m[2]) validatePort(Number(m[2]), "server port");
     return server;
   }
+  // bare IPv6 without brackets: `2001:db8::1` (no port possible)
+  if (isBareIpv6(server)) return server;
   const parts = server.split(":");
   if (parts.length > 2 || parts.some((p) => p.length === 0)) {
     throw new TunnelConfigError(`invalid server: ${JSON.stringify(server)} (expected host[:port])`);
