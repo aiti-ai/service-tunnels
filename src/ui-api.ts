@@ -130,6 +130,7 @@ if (path === "/api/expose" && req.method === "POST") {
     providerParams?: Record<string, unknown>; user?: { name: string; password: string };
     ngrokAuthtoken?: string; allowAuthNone?: boolean; allowToolDownload?: boolean;
     ipv6?: { address?: string };
+    portmap?: Record<string, unknown>;
   }>(req);
   const port = Number(body.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -151,6 +152,7 @@ if (path === "/api/expose" && req.method === "POST") {
     protocol: body.protocol,
     tunnelParams: body.tunnelParams,
     providerParams: body.providerParams,
+    portmap: body.portmap,
     user: body.user,
     ngrokAuthtoken: body.ngrokAuthtoken,
     allowAuthNone: body.allowAuthNone,
@@ -166,6 +168,7 @@ if (path === "/api/expose" && req.method === "POST") {
     protocol: body.protocol as never,
     tunnelParams: body.tunnelParams,
     providerParams: body.providerParams,
+    portmap: body.portmap as never,
     user: body.user,
     ngrokAuthtoken: body.ngrokAuthtoken,
     allowAuthNone: body.allowAuthNone,

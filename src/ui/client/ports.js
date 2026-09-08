@@ -116,13 +116,27 @@ function exposeForm(port){
     +fld('tunnel',sel('exp-tunnel',tunnelTypes.slice().sort((a,b)=>(metas[b]&&metas[b].favorite?1:0)-(metas[a]&&metas[a].favorite?1:0)).map((t)=>({value:t,label:t+(metas[t]&&metas[t].favorite?' ★':'')}))))
     +'<div id="exp-ipv6-wrap" style="display:none">'
     +'<label>'+esc(tr('ui.ports.ipv6Address'))+' <span class="dim" style="font-weight:normal">('+esc(tr('ui.ports.ipv6Optional'))+')</span></label>'
-    +'<input id="exp-ipv6-address" placeholder="auto (first global v6)" style="width:100%">'
-    +'<div class="hint">'+esc(tr('ui.ports.ipv6Hint'))+'</div>'
+    +'<select id="exp-ipv6-address" onchange="syncIpv6Manual()"><option value="auto">'+esc(tr('ui.ipv6.auto'))+'</option><option value="__manual">'+esc(tr('ui.ipv6.manual'))+'</option></select>'
+    +'<input id="exp-ipv6-manual" placeholder="2001:db8::1" style="display:none;margin-top:4px">'
+    +'<div class="hint" id="exp-ipv6-hint">'+esc(tr('ui.ports.ipv6Hint'))+'</div>'
     +'</div>'
     +fld('auth',sel('exp-provider',providerOpts.map((p)=>({value:p,label:p==='none'?'none (no auth)':p})),authDef))
     +fld('site',sel('exp-site',siteOpts.map(ov),'default'))
     +fld('policy',sel('exp-policy',['one_factor','two_factor'].map(ov),'two_factor'))
     +'</div>'
+    +'<div id="exp-portmap-wrap" style="display:none;margin-top:8px">'
+    +'<div class="section-label">'+esc(tr('ui.portmap.title'))+'</div>'
+    +'<div class="hint" style="margin-bottom:6px">'+esc(tr('ui.portmap.hint'))+'</div>'
+    +'<div class="form-grid">'
+    +fld(tr('ui.portmap.method'),sel('exp-pm-method',[{value:'auto',label:'auto'},{value:'upnp',label:'UPnP'},{value:'pcp',label:'NAT-PMP/PCP'},{value:'ssh-router',label:'ssh-router'}],'auto'))
+    +fld(tr('ui.portmap.gateway'),'<input id="exp-pm-gateway" placeholder="192.168.1.1">')
+    +fld(tr('ui.portmap.externalPort'),'<input id="exp-pm-externalPort" type="number" min="1" max="65535" placeholder="'+esc(tr('ui.portmap.autoAssign'))+'">')
+    +fld(tr('ui.portmap.leaseSeconds'),'<input id="exp-pm-leaseSeconds" type="number" min="0" placeholder="1800">')
+    +'</div>'
+    +'<div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">'
+    +'<button class="btn btn-sm" id="exp-pm-probe" onclick="probeRouter()">'+esc(tr('ui.portmap.probe'))+'</button>'
+    +'<span class="hint" id="exp-pm-hint" style="margin:0"></span>'
+    +'</div></div>'
     +'<div id="exp-tunnel-params"></div>'
     +'<div id="exp-auth-params"></div>'
     +'<div style="display:flex;gap:8px;align-items:center;margin-top:8px">'
@@ -184,11 +198,19 @@ window.showExposeDetail=async(name)=>{
       }catch(err){/* logs-list best-effort */}
     }
     const links=[e.url,e.localUrl,e.baseUrl,e.domainUrl,e.loginUrl].filter(Boolean);
+    // L-c: portmap / ipv6 详情（记录自带数据，纯展示）
+    const pm=e.portmap&&modeOf(e)==='portmap'?e.portmap:null;
+    const ip6=e.ipv6&&modeOf(e)==='ipv6'?e.ipv6:null;
     openModal('<h3>'+esc(e.name)+' · <span class="mono">127.0.0.1:'+e.port+'</span></h3>'
       +kv('mode',modeOf(e)||'')
       +kv('provider',e.provider||'<span class="bad">⚠ none</span>')
       +kv('tunnel',e.tunnelType||'—')+kv('site',e.site||'default')+kv('protocol',e.protocol||'http')
       +kv('started',e.startedAt?new Date(e.startedAt).toLocaleString():'—')
+      +(pm?kv(tr('ui.detail.portmap'),'<span class="mono">'+esc(fmtAddr(pm.externalIp)+':'+pm.externalPort)+'</span> <span class="badge">'+esc(pm.backend)+'</span>')
+        +kv(tr('ui.detail.leaseLeft'),leaseLeft(e))
+        +kv('gateway',esc(pm.gateway||'—')):'')
+      +(ip6?kv(tr('ui.detail.ipv6Entry'),'<span class="mono">['+esc(ip6.address)+']:'+ip6.transportPort+'</span>')
+        +kv(tr('ui.detail.ipv6Candidates'),esc((ip6.addresses||[]).map(fmtAddr).join(', ')||'—')):'')
       +(e.params&&Object.keys(e.params).length?kv('params','<div class="mono">'+Object.entries(e.params).map(([k,v])=>esc(k)+': '+esc(v)).join('<br>')+'</div>'):'')
       +(links.length?kv('urls',links.map((u)=>'<div class="url-row"><a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('')):'')
       +logs
@@ -196,6 +218,14 @@ window.showExposeDetail=async(name)=>{
       +'<button class="btn btn-danger" onclick="closeModal();stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button>'
       +'<button class="btn" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');
   }catch(err){toast(String(err),true);}
+}
+// portmap 租约剩余（leaseSeconds - 已运行时长；无 startedAt 显示全额）
+function leaseLeft(e){
+  const total=e.portmap&&e.portmap.leaseSeconds;
+  if(!total)return '—';
+  const left=e.startedAt?Math.max(0,total-Math.floor((Date.now()-e.startedAt)/1000)):total;
+  const h=Math.floor(left/3600),m=Math.floor((left%3600)/60);
+  return h>0?(h+'h '+m+'m'):(m>0?(m+'m'):(left+'s'));
 };
 function kv(k,v){return '<div class="kv"><span class="k">'+esc(k)+'</span><span class="v">'+v+'</span></div>';}
 window.showLogFile=async(path)=>{
@@ -208,17 +238,73 @@ let authManual=false; // 用户手动改过 auth → 协议联动不再覆盖
 function afterExposeFormMount(){refreshTunnelParams();renderAuthParams();syncProviderFields();syncModeFields();detectPortProtocol(state._exposePort||0);loadPresets();
   const modeSel=document.getElementById('exp-mode');if(modeSel)modeSel.onchange=syncModeFields;
 }
-// mode 联动: ipv6/portmap 不需要 tunnel 选择; ipv6 显示入口地址输入框
+// mode 联动: tunnel/both 显示隧道选择; ipv6 显示候选下拉（懒加载）; portmap 显示路由器映射参数区
 function syncModeFields(){
   const sel=document.getElementById('exp-mode');if(!sel)return;
   const mode=sel.value;
   const tunnelWrap=document.getElementById('exp-tunnel')&&document.getElementById('exp-tunnel').closest('div');
   const ipv6Wrap=document.getElementById('exp-ipv6-wrap');
+  const pmWrap=document.getElementById('exp-portmap-wrap');
   if(tunnelWrap)tunnelWrap.style.display=(mode==='tunnel'||mode==='both')?'':'none';
-  if(ipv6Wrap)ipv6Wrap.style.display=(mode==='ipv6')?'':'none';
+  if(ipv6Wrap){ipv6Wrap.style.display=(mode==='ipv6')?'':'none';if(mode==='ipv6')loadIpv6Candidates();}
+  if(pmWrap)pmWrap.style.display=(mode==='portmap')?'':'none';
   // tunnel-param 区域: 非 tunnel/both 清空
   if(mode!=='tunnel'&&mode!=='both'){const el=document.getElementById('exp-tunnel-params');if(el)el.innerHTML='';}
 }
+// ── portmap 路由器探测（L-a）：结果 toast + 表单 hint（CGNAT→建议 tunnel/ipv6）──
+window.probeRouter=async()=>{
+  const btn=document.getElementById('exp-pm-probe');const hint=document.getElementById('exp-pm-hint');
+  if(btn){btn.disabled=true;btn.textContent='…';}
+  if(hint){hint.textContent=tr('ui.portmap.probing');hint.style.color='';}
+  const gwEl=document.getElementById('exp-pm-gateway');
+  try{
+    const q=gwEl&&gwEl.value.trim()?('?gateway='+encodeURIComponent(gwEl.value.trim())):'';
+    const r=await api('/api/portmap-probe'+q);
+    let msg;let bad=false;
+    if(r.ipClass==='cgnat'){msg=tr('ui.portmap.probeCgnat');bad=true;}
+    else if(r.ipClass==='public'){msg=tr('ui.portmap.probePublic');}
+    else if(r.upnp&&r.upnp.ok){msg=tr('ui.portmap.probeOkUpnp');}
+    else if(r.pcp&&r.pcp.ok){msg=tr('ui.portmap.probeOkPcp');}
+    else{msg=tr('ui.portmap.probeNone');bad=true;}
+    if(hint){hint.textContent=msg;hint.style.color=bad?'var(--danger)':'';}
+    toast(msg);
+  }catch(e){
+    const m=tr('ui.portmap.probeFail',{error:String(e.message||e)});
+    if(hint){hint.textContent=m;hint.style.color='var(--danger)';}
+    toast(m,true);
+  }finally{if(btn){btn.disabled=false;btn.textContent=tr('ui.portmap.probe');}}
+};
+// ── ipv6 候选地址（L-b）：/api/ipv6-addresses 懒加载 → select（auto 首项 + 候选 + 手输）──
+window.loadIpv6Candidates=async(force)=>{
+  if(state.ipv6Cands&&!force)return;
+  try{state.ipv6Cands=await api('/api/ipv6-addresses');}
+  catch(e){state.ipv6Cands={addresses:[],public:[],error:String(e.message||e)};}
+  fillIpv6Select();
+};
+function fillIpv6Select(){
+  const sel=document.getElementById('exp-ipv6-address');if(!sel)return;
+  const d=state.ipv6Cands||{addresses:[],public:[]};
+  const cur=sel.value;
+  const row=(a)=>{
+    const isPublic=(d.public||[]).indexOf(a.address)>=0;
+    return '<option value="'+esc(a.address)+'">'+esc(fmtAddr(a.address)+' ('+a.iface+(a.scope==='global'?'':', '+a.scope)+(isPublic?', '+tr('ui.ipv6.public'):'')+')')+'</option>';
+  };
+  const globals=(d.addresses||[]).filter((a)=>a.scope==='global');
+  const others=(d.addresses||[]).filter((a)=>a.scope!=='global');
+  sel.innerHTML='<option value="auto">'+esc(tr('ui.ipv6.auto'))+'</option>'
+    +globals.map(row).join('')+others.map(row).join('')
+    +'<option value="__manual">'+esc(tr('ui.ipv6.manual'))+'</option>';
+  if(cur)sel.value=cur;
+  const hint=document.getElementById('exp-ipv6-hint');
+  if(hint)hint.textContent=d.error?tr('ui.ipv6.loadFail',{error:d.error}):tr('ui.ports.ipv6Hint');
+  syncIpv6Manual();
+}
+window.syncIpv6Manual=()=>{
+  const sel=document.getElementById('exp-ipv6-address');const mi=document.getElementById('exp-ipv6-manual');
+  if(!sel||!mi)return;
+  mi.style.display=(sel.value==='__manual')?'':'none';
+  if(sel.value==='__manual')mi.focus();
+};
 // provider=ssh: hide protocol (port-forward); auth change → render auth params group
 function syncProviderFields(){
   const sel=document.getElementById('exp-provider');if(!sel)return;
@@ -278,11 +364,23 @@ window.doExpose=async(port)=>{
     policy:document.getElementById('exp-policy').value||undefined,
   };
   if(needsTunnel)body.tunnel=tunnel;
-  // ipv6 模式: 显式入口地址（可选, 缺省自动检测第一个 global v6）
+  // ipv6 模式: 入口地址（select 候选 / __manual 手输 / auto 缺省自动检测）
   if(mode==='ipv6'){
-    const addrEl=document.getElementById('exp-ipv6-address');
-    const addr=addrEl?addrEl.value.trim():'';
+    const sel6=document.getElementById('exp-ipv6-address');
+    const v=sel6?sel6.value:'auto';
+    let addr='';
+    if(v==='__manual'){const mi=document.getElementById('exp-ipv6-manual');addr=mi?mi.value.trim():'';}
+    else if(v&&v!=='auto')addr=v;
     if(addr)body.ipv6={address:addr};
+  }
+  // portmap 模式: 路由器映射参数（空值不传，走库默认）
+  if(mode==='portmap'){
+    const pm={};
+    const m=document.getElementById('exp-pm-method');if(m&&m.value&&m.value!=='auto')pm.method=m.value;
+    const gw=document.getElementById('exp-pm-gateway');if(gw&&gw.value.trim())pm.gateway=gw.value.trim();
+    const ep=document.getElementById('exp-pm-externalPort');if(ep&&ep.value)pm.externalPort=Number(ep.value);
+    const ls=document.getElementById('exp-pm-leaseSeconds');if(ls&&ls.value)pm.leaseSeconds=Number(ls.value);
+    if(Object.keys(pm).length)body.portmap=pm;
   }
   if(ssh)body.provider='ssh';
   if(needsTunnel&&protocol==='tcp'){const tcp=(st.tunnelTcpSupport||[]);if(tcp.length&&!tcp.includes(tunnel)){toast(tr('ui.ports.tcpNotSupport'),true);return;}}
@@ -396,4 +494,3 @@ document.addEventListener('change',(e)=>{
   if(e.target&&e.target.id==='exp-provider'){authManual=true;syncProviderFields();}
   if(e.target&&e.target.id==='exp-protocol')syncAuthDefault();
 });
-document.addEventListener('change',(e)=>{if(e.target&&e.target.id==='exp-tunnel')refreshTunnelParams();});
