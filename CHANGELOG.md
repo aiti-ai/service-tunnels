@@ -1,3 +1,9 @@
+## 0.3.75 (2026-09-09)
+
+- **test(i18n): 测试密闭化**——`i18n.test.mjs` 的语言探测/默认实例用例依赖
+  `process.env.LANG`（zh* 机器上假红）；清除环境变量后再动态加载模块。
+  全量 339 用例首次 0 fail。纯测试改动，运行时无变化。
+
 ## 0.3.74 (2026-09-09)
 
 - **feat(exports): 官方 JS 子路径 `service-tunnels/i18n`、`/ui-shared`、`/port-identity`
