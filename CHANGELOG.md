@@ -1,3 +1,9 @@
+## 0.3.76 (2026-09-09)
+
+- **fix(i18n): 补 `ui.ddns.err.pp`（"Provider profile is required"）**——
+  pi-web 扩展 DdnsTab Profile 表单校验引用但 CATALOG 缺失（多语审计发现）。
+  纯文案，en/zh 成对。
+
 ## 0.3.75 (2026-09-09)
 
 - **test(i18n): 测试密闭化**——`i18n.test.mjs` 的语言探测/默认实例用例依赖
