@@ -6,7 +6,7 @@
   下拉移除 ssh-router（表单无 sshRouter 参数区，选中必失败——CLI 承担）；
   i18n 残留清零（presetDeleted/presetLoadFailed）；tokens 空态升级 .empty 块；
   exp-mode 联动改委托监听（10s 轮询重渲染后元素级 onchange 丢失致模式切换
-  失灵——E2E 实测发现）。
+  失灵——E2E 实测发现）；sites 空态升级 .empty 引导块。
 
 ## 0.3.68 (2026-09-09)
 
