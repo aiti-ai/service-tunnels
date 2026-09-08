@@ -457,6 +457,7 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.ddns.err.zone": "Zone is required (e.g. example.com)",
     "ui.ddns.err.zoneFormat": "Zone looks invalid (needs a dot, no spaces)",
     "ui.ddns.err.profile": "Profile is required",
+    "ui.ddns.err.pp": "Provider profile is required",
     "ui.ddns.err.flag": "Pick at least one record type (A/AAAA/CNAME/TXT)",
 
     // ── L-f i18n 清零（sites/tools/tokens/users/exposes/详情）──
@@ -977,6 +978,7 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.ddns.err.zone": "zone 必填（如 example.com）",
     "ui.ddns.err.zoneFormat": "zone 格式不对（需要含点号、无空格）",
     "ui.ddns.err.profile": "profile 必填",
+    "ui.ddns.err.pp": "Provider 凭据必填",
     "ui.ddns.err.flag": "至少勾选一种记录（A/AAAA/CNAME/TXT）",
 
     // ── L-f i18n 清零（sites/tools/tokens/users/exposes/详情）──
