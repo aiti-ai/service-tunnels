@@ -245,9 +245,7 @@ window.showLogFile=async(path)=>{
   }catch(err){toast(String(err),true);}
 };
 let authManual=false; // 用户手动改过 auth → 协议联动不再覆盖
-function afterExposeFormMount(){refreshTunnelParams();renderAuthParams();syncProviderFields();syncModeFields();detectPortProtocol(state._exposePort||0);loadPresets();
-  const modeSel=document.getElementById('exp-mode');if(modeSel)modeSel.onchange=syncModeFields;
-}
+function afterExposeFormMount(){refreshTunnelParams();renderAuthParams();syncProviderFields();syncModeFields();detectPortProtocol(state._exposePort||0);loadPresets();}
 // mode 联动: tunnel/both 显示隧道选择; ipv6 显示候选下拉（懒加载）; portmap 显示路由器映射参数区
 function syncModeFields(){
   const sel=document.getElementById('exp-mode');if(!sel)return;
@@ -500,7 +498,9 @@ window.loadPresets=async()=>{
   }catch(e){/* best-effort */}
 };
 document.addEventListener('change',(e)=>{
+  // 委托监听（元素级绑定会在 10s 轮询重渲染后丢失——exp-mode 联动曾因此失灵）
   if(e.target&&e.target.id==='exp-tunnel')refreshTunnelParams();
   if(e.target&&e.target.id==='exp-provider'){authManual=true;syncProviderFields();}
   if(e.target&&e.target.id==='exp-protocol')syncAuthDefault();
+  if(e.target&&e.target.id==='exp-mode')syncModeFields();
 });
