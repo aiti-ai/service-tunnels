@@ -1,3 +1,10 @@
+## 0.3.73 (2026-09-09)
+
+- **feat(ports): 实例 API `st.setServiceLabel(port, label)`**——用户自定义
+  服务名写入下沉到库（daemon `port.label.set` 优先，embedded 直写 state；
+  空 label 清除）。pi-web 扩展等嵌入方不再需要子路径 import `state.ts`/
+  `config.ts` 自行拼装（plain-node 测试环境不支持 strip node_modules 内 .ts）。
+
 ## 0.3.72 (2026-09-09)
 
 - **fix(ddns): 根导出的相对导入后缀改 `.ts`**——0.3.71 的追加导出行误写

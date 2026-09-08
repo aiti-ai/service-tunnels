@@ -321,6 +321,9 @@ export interface ServiceTunnels {
      *  when exposing a tcp port). */
     tcpSupport(): string[];
   };
+  /** 用户自定义服务名（label > title 主行）：daemon port.label.set 优先，
+   *  embedded 直写 state；label 空 = 清除。 */
+  setServiceLabel(port: number, label: string): Promise<{ port: number; label?: string }>;
   /** Router port-mapping (mode "portmap"): capability probe + live mapping control. */
   portmap: {
     probe(opts?: { gateway?: string; ssdpTimeoutMs?: number }): Promise<PortmapProbe>;
@@ -985,6 +988,21 @@ exposes.set(r.tunnel || `proxy:${port}:${r.label ?? ""}`, {
       stop: () => stopDaemon(dirs.cacheDir),
       request: <T>(method: string, params?: unknown, timeoutMs = 5_000) =>
         requestDaemon<T>(dirs.cacheDir, method, params, timeoutMs),
+    },
+    setServiceLabel: async (port: number, label: string) => {
+      const trimmed = String(label ?? "").trim().slice(0, 80);
+      // daemon 是 state.json 的写者（优先）；不在（embedded）则本进程直写
+      const viaDaemon = await requestDaemon<{ ok?: boolean }>(dirs.cacheDir, "port.label.set", { port, label: trimmed }, 5_000).catch(() => null);
+      if (viaDaemon === null) {
+        const { updateState } = await import("./state.ts");
+        const { cachePaths } = await import("./config.ts");
+        updateState(cachePaths(dirs.cacheDir).stateFile, (st: { serviceLabels?: Record<string, string> }) => {
+          st.serviceLabels ??= {};
+          if (trimmed) st.serviceLabels[String(port)] = trimmed;
+          else delete st.serviceLabels[String(port)];
+        });
+      }
+      return { port, label: trimmed || undefined };
     },
     portmap: {
       probe: (o?: { gateway?: string; ssdpTimeoutMs?: number }) => portmapProbe(o),
