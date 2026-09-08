@@ -1,3 +1,13 @@
+## 0.3.69 (2026-09-09)
+
+- **fix(ui): 深审安全与体验修补**——
+  favicon `src` 过 esc + 协议白名单（对端响应可控，原样拼接可属性逃逸）；
+  `confirmDlg` 补 role=dialog/aria-modal/Esc/确认钮聚焦；portmap 表单 method
+  下拉移除 ssh-router（表单无 sshRouter 参数区，选中必失败——CLI 承担）；
+  i18n 残留清零（presetDeleted/presetLoadFailed）；tokens 空态升级 .empty 块；
+  exp-mode 联动改委托监听（10s 轮询重渲染后元素级 onchange 丢失致模式切换
+  失灵——E2E 实测发现）。
+
 ## 0.3.68 (2026-09-09)
 
 - **feat(ui): 双端 UI 优化与全覆盖批次**——共享展示语义层 + 库 UI 友好化
