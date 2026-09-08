@@ -1,3 +1,37 @@
+## 0.3.68 (2026-09-09)
+
+- **feat(ui): 双端 UI 优化与全覆盖批次**——共享展示语义层 + 库 UI 友好化
+  （对应 docs/service-tunnels-ext-ui-integration-plan.md L 批；pi-web 扩展侧
+  同批独立发版，共享层/文案键单源消费本包）：
+  - **共享层 `src/ui-shared.ts`**（新）：modeOf/fmtAddr/fmtBytes/identityView/
+    ddnsBadge/netcheckEventView/adviceView 纯函数；dist 产物以
+    `<script type=module src=/ui/shared.js>` 加载挂 `window.__stShared`，
+    core.js 回落实现等价性由测试钉死；doctor 事件契约冻结
+    （`ui.doctor.ev.<type>` + tone 枚举，en/zh 入 CATALOG）。
+  - **新端点**：`GET /api/portmap-probe`（UPnP/NAT-PMP/PCP/CGNAT 判定）、
+    `GET /api/ipv6-addresses`（候选 + 公网出口探测，4s 兜底）、
+    `/api/status` 附 `version` + `netcheck` 能力位；`/api/expose` 透传
+    `portmap` 参数。
+  - **expose 表单**：portmap 模式参数区（method/gateway/externalPort/lease）
+    + 「探测路由器」按钮（CGNAT→建议 tunnel/ipv6、公网→无需映射）；
+    ipv6 模式候选下拉（auto/候选含出口标注/手动输入）。
+  - **暴露详情**：portmap 外部 ip:port + 租约剩余；ipv6 入口 + 候选地址。
+  - **doctor tab 骨架**：`POST /api/doctor-start`（409 单例）/`doctor-stop`/
+    `GET /api/doctor-events`（SSE：环形缓冲 500 Last-Event-ID 续传、心跳 20s、
+    连接上限 8→503）；真实事件源待库 netcheck 实现落库自动切换，mock 仅
+    `ST_UI_DOCTOR_MOCK=1` 开放（生产默认隐藏 tab）。
+  - **DDNS tab 重做**：provider 120 家下拉、token 遮蔽+👁、必填/格式校验
+    行内报错、三卡片化、空态三步引导。
+  - **i18n 清零**：sites/tools/tokens/users/exposes/详情硬编码全量走 `tr()`
+    （~70 键 zh/en）；新增 zh⇄en ui.* 键齐平守护测试。
+  - **响应式 + a11y**：`.tbl-wrap` 横向滚动、≤640px 表单/表格折叠
+    （exposes 表→卡片列表）、modal Esc/聚焦/role=dialog、toast role=status、
+    端口行键盘可达（tabindex + Enter/Space + aria-expanded）。
+  - **重命名 modal 化**（prompt() → 输入弹窗，清除/保存分立）；
+    header 显示版本号 + daemon 停止提示；端口空态引导。
+  - 测试：ui-shared 等价性/端点注入/doctor SSE 帧/Last-Event-ID 续传/连接上限/
+    能力门控（全绿；338 用例）。
+
 ## 0.3.67 (2026-09-08)
 
 - **fix(guardian): Windows 父进程存活探测改用 `process.kill(pid, 0)`**——
