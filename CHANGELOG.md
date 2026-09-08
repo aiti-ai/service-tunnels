@@ -1,3 +1,11 @@
+## 0.3.72 (2026-09-09)
+
+- **fix(ddns): 根导出的相对导入后缀改 `.ts`**——0.3.71 的追加导出行误写
+  `./ddns-registry.js`：dist 链路正确（tsc 透传），但 plain-node 直接执行
+  `src/index.ts`（type stripping 不解析 .js→.ts）的测试全量报
+  ERR_MODULE_NOT_FOUND。与仓库 `rewriteRelativeImportExtensions` 约定一致，
+  源内相对导入一律 `.ts`。
+
 ## 0.3.71 (2026-09-09)
 
 - **fix(ddns): 补齐 0.3.70 意图——`readRegistryConfig` / `writeRegistryConfig` /
