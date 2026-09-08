@@ -1,3 +1,10 @@
+## 0.3.70 (2026-09-09)
+
+- **feat(ddns): `readRegistryConfig` / `writeRegistryConfig` / `DdnsRegistryConfig` 提升根导出**——
+  pi-web 扩展等嵌入方此前只能经 `service-tunnels/src/ddns-registry.ts` 子路径 import
+  （plain-node 测试环境拒绝 strip node_modules 内 .ts）；升根后嵌入方与 CLI/自带 UI
+  同走根入口同源读写 registry（`ddns.json`）。随 0.3.69 双端 UI 批次一并发布。
+
 ## 0.3.69 (2026-09-09)
 
 - **fix(ui): 深审安全与体验修补**——
