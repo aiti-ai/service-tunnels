@@ -1,3 +1,10 @@
+## 0.3.66 (2026-09-08)
+
+- **refactor(ddns): 跟随 ddns 0.2.0 去 mock 重构**——mocks 独立为
+  `@aiti-ti/ddns-mocks` 子包（同 repo），运行时包不再带/导出 mock；
+  测试改用 `@aiti-ti/ddns-mocks`（devDependencies）；运行时依赖
+  `@aiti-ti/ddns@^0.2.0`。
+
 ## 0.3.65 (2026-09-08)
 
 - **fix(ddns): 依赖改用 `@aiti-ti/ddns@^0.1.2`（私有源）**——原 `file:../ddns` 本地链接
