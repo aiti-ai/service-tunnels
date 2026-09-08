@@ -43,8 +43,10 @@ function adviceView(a){return SH().adviceView(a);}
 function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.setAttribute('role','status');d.setAttribute('aria-live','polite');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
 function confirmDlg(title,body,confirmLabel,onOk){
   const root=document.getElementById('modalRoot');
-  root.innerHTML='<div class="modal-ov"><div class="modal"><h3>⚠ '+esc(title)+'</h3><div class="muted" style="line-height:1.7">'+body+'</div><div class="actions" style="margin-top:14px;justify-content:flex-end"><button class="btn" onclick="this.closest(\'.modal-ov\').remove()">'+esc(tr('ui.cancel'))+'</button><button class="btn btn-danger" id="confirmOk">'+esc(confirmLabel)+'</button></div></div></div>';
+  root.innerHTML='<div class="modal-ov"><div class="modal" role="dialog" aria-modal="true"><h3>⚠ '+esc(title)+'</h3><div class="muted" style="line-height:1.7">'+body+'</div><div class="actions" style="margin-top:14px;justify-content:flex-end"><button class="btn" onclick="this.closest(\'.modal-ov\').remove()">'+esc(tr('ui.cancel'))+'</button><button class="btn btn-danger" id="confirmOk">'+esc(confirmLabel)+'</button></div></div></div>';
   document.getElementById('confirmOk').onclick=()=>{root.innerHTML='';onOk();};
+  document.addEventListener('keydown',modalEsc);
+  const ok=document.getElementById('confirmOk');if(ok)ok.focus();
 }
 function openModal(html){
   const root=document.getElementById('modalRoot');

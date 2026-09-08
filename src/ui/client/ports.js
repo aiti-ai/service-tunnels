@@ -46,7 +46,9 @@ function renderPorts(){
       const tooltip=[(id.label&&id.title)?tr('ui.ports.detected')+': '+id.title:null,idMeta].filter(Boolean).join(' · ');
       // title/server 等来自对端响应，不可信——整串 esc 后再进 HTML 属性
       const tooltipAttr=tooltip?' title="'+esc(tooltip)+'"':'';
-      const icon=id.favicon?('<img class="svc-icon" src="'+id.favicon+'" alt="" loading="lazy"'+tooltipAttr+'>'):"";
+      // favicon 来自对端响应——src 必须过 esc + 协议白名单（http/https/站内相对路径），防属性逃逸
+      const safeFav=typeof id.favicon==='string'&&(/^(https?:)?\/\//.test(id.favicon)||id.favicon.startsWith('/'))?id.favicon:null;
+      const icon=safeFav?('<img class="svc-icon" src="'+esc(safeFav)+'" alt="" loading="lazy"'+tooltipAttr+'>'):"";
       const svcName=id.label||id.title;
       const titleLine=svcName?('<div class="svc-title"'+tooltipAttr+'>'+esc(svcName)+'</div>'):"";
       return '<div class="card" id="pc-'+s.port+'">'
@@ -130,7 +132,7 @@ function exposeForm(port){
     +'<div class="section-label">'+esc(tr('ui.portmap.title'))+'</div>'
     +'<div class="hint" style="margin-bottom:6px">'+esc(tr('ui.portmap.hint'))+'</div>'
     +'<div class="form-grid">'
-    +fld(tr('ui.portmap.method'),sel('exp-pm-method',[{value:'auto',label:'auto'},{value:'upnp',label:'UPnP'},{value:'pcp',label:'NAT-PMP/PCP'},{value:'ssh-router',label:'ssh-router'}],'auto'))
+    +fld(tr('ui.portmap.method'),sel('exp-pm-method',[{value:'auto',label:'auto'},{value:'upnp',label:'UPnP'},{value:'pcp',label:'NAT-PMP/PCP'}],'auto'))
     +fld(tr('ui.portmap.gateway'),'<input id="exp-pm-gateway" placeholder="192.168.1.1">')
     +fld(tr('ui.portmap.externalPort'),'<input id="exp-pm-externalPort" type="number" min="1" max="65535" placeholder="'+esc(tr('ui.portmap.autoAssign'))+'">')
     +fld(tr('ui.portmap.leaseSeconds'),'<input id="exp-pm-leaseSeconds" type="number" min="0" placeholder="1800">')
@@ -456,7 +458,7 @@ window.applyPreset=async(kind,type)=>{
   if(!name){if(kind==='tunnel')state._tunnelPresetName=null;else state._authPresetName=null;return;}
   try{
     const d=await api('/api/presets?kind='+kind+'&type='+encodeURIComponent(type)+'&name='+encodeURIComponent(name));
-    if(!d||d.error){toast((d&&d.error)||'preset load failed',true);return;}
+    if(!d||d.error){toast((d&&d.error)||tr('ui.ports.presetLoadFailed'),true);return;}
     // 非敏感字段带入; 敏感字段留空 + placeholder 提示用已存值
     const root=kind==='tunnel'?'exp-tunnel-params':'exp-auth-params';
     document.querySelectorAll('#'+root+' [data-k]').forEach((el)=>{
@@ -485,7 +487,7 @@ window.delPreset=async(kind,type)=>{
   const name=document.getElementById('pre-'+kind).value;
   if(!name){toast(tr('ui.ports.presetPick'),true);return;}
   confirmDlg(tr('ui.ports.presetDel'),esc(name),tr('ui.ports.presetDel'),async()=>{
-    try{await api('/api/presets',{method:'POST',body:{action:'remove',kind,type,name}});await loadPresets();if(kind==='tunnel')refreshTunnelParams();else renderAuthParams();toast('deleted');}catch(e){toast(String(e),true);}
+    try{await api('/api/presets',{method:'POST',body:{action:'remove',kind,type,name}});await loadPresets();if(kind==='tunnel')refreshTunnelParams();else renderAuthParams();toast(tr('ui.ports.presetDeleted'));}catch(e){toast(String(e),true);}
   });
 };
 window.loadPresets=async()=>{
