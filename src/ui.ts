@@ -162,6 +162,7 @@ ${CSS}
 window.UI_MSG = ${JSON.stringify(CATALOG[lang])};
 window.UI_CSRF = '${csrf}';
 </script>
+<script type="module" src="/ui/shared.js"></script>
 <script src="/ui/core.js"></script>
 <script src="/ui/ports.js"></script>
 <script src="/ui/exposes.js"></script>
@@ -218,6 +219,18 @@ function createHandler(ctx: UiContext): RequestListener {
     }
 
     try {
+      // 共享展示语义层（ui-shared.ts 的编译产物，module 脚本挂 window.__stShared；
+      // 客户端 core.js 对其缺失有本地回落，404 只降级不破页）
+      if (path === "/ui/shared.js") {
+        try {
+          const shared = readFileSync(join(dirname(import.meta.dirname), "dist", "ui-shared.js"), "utf8");
+          res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+          res.end(shared);
+        } catch {
+          json(res, 404, { error: "shared layer not built (run npm run build)" });
+        }
+        return;
+      }
       // 前端模块静态文件（/ui/*.js）
       if (path.startsWith("/ui/")) {
         const name = basename(path.slice(4));

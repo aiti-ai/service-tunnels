@@ -371,6 +371,24 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.confirmCommand": "type \"command\" executes your command directly (dangerous). Continue?",
     "ui.add.success": "✅ Added!",
     "ui.add.failed": "❌ Add failed: ",
+
+    // ── doctor/netcheck 事件（契约键：ui-shared.ts netcheckEventView 单源引用）──
+    "ui.doctor.ev.phase-start": "▶ {label}",
+    "ui.doctor.ev.probe-done": "{item}: {verdict} ({ms}ms)",
+    "ui.doctor.ev.tunnel-est": "Tunnel established: {provider} → {url} ({ms}ms)",
+    "ui.doctor.ev.tunnel-fail": "Tunnel failed: {provider} — {error} ({ms}ms)",
+    "ui.doctor.ev.channel-result": "{provider} external check [{channel}] level {level} ({ms}ms)",
+    "ui.doctor.ev.verdict-confirmed": "{provider} verdict {verdict} ({sourcesOk} sources, confirmed)",
+    "ui.doctor.ev.advice-update": "Advice updated: {note}",
+    "ui.doctor.ev.phase-end": "Phase {phase} done — {summary}",
+    "ui.doctor.ev.summary": "Report ready (see summary card)",
+    "ui.doctor.ev.done": "Netcheck finished",
+    "ui.doctor.ev.error": "Netcheck error: {message}",
+    "ui.doctor.ev.cancelled": "Netcheck cancelled (partial results kept)",
+    "ui.doctor.ev.unknown": "Unknown event: {type}",
+    "ui.doctor.advice.confirmed": "confirmed",
+    "ui.doctor.advice.unconfirmed": "unconfirmed",
+    "ui.doctor.advice.untested": "not tested",
   },
 
   zh: {
@@ -725,6 +743,24 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.confirmCommand": "type \"command\" 会直接执行你输入的命令(危险)。确定继续?",
     "ui.add.success": "✅ 添加成功!",
     "ui.add.failed": "❌ 添加失败: ",
+
+    // ── doctor/netcheck 事件（契约键：ui-shared.ts netcheckEventView 单源引用）──
+    "ui.doctor.ev.phase-start": "▶ {label}",
+    "ui.doctor.ev.probe-done": "{item}: {verdict}（{ms}ms）",
+    "ui.doctor.ev.tunnel-est": "隧道已建立：{provider} → {url}（{ms}ms）",
+    "ui.doctor.ev.tunnel-fail": "隧道失败：{provider} — {error}（{ms}ms）",
+    "ui.doctor.ev.channel-result": "{provider} 外部回连 [{channel}] 置信 {level}（{ms}ms）",
+    "ui.doctor.ev.verdict-confirmed": "{provider} 结论 {verdict}（{sourcesOk} 源一致，已确认）",
+    "ui.doctor.ev.advice-update": "建议已更新：{note}",
+    "ui.doctor.ev.phase-end": "阶段 {phase} 完成 — {summary}",
+    "ui.doctor.ev.summary": "报告已生成（见汇总卡片）",
+    "ui.doctor.ev.done": "体检完成",
+    "ui.doctor.ev.error": "体检出错：{message}",
+    "ui.doctor.ev.cancelled": "体检已取消（保留已完成部分）",
+    "ui.doctor.ev.unknown": "未知事件：{type}",
+    "ui.doctor.advice.confirmed": "已确认",
+    "ui.doctor.advice.unconfirmed": "单源未确认",
+    "ui.doctor.advice.untested": "未实测",
   },
 };
 

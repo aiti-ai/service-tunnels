@@ -16,15 +16,28 @@ const TAB_LABELS={ports:tr('ui.nav.dashboard'),exposes:tr('ui.nav.expose'),users
 let pollTimer=null;
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function fmtAddr(a){return a.includes(':')?'['+a+']':a;}
+// ── 共享展示语义（双端单源：src/ui-shared.ts → dist/ui-shared.js → /ui/shared.js）──
+// /ui/shared.js（module 脚本）加载后把全部导出挂到 window.__stShared；此处运行时
+// 优先取共享层，缺失（404/老缓存）回落 __stLocal 本地实现——等价性由
+// test/ui-shared.test.mjs 钉死（构建期同源，漂移即测试红）。
+const __stLocal={
+  modeOf:function(e){if(e&&e.mode)return e.mode;if(!e||!e.name)return '';if(e.name.indexOf('ipv6:')===0)return 'ipv6';if(e.name.indexOf('proxy:')===0)return 'proxy';return e.tunnelType||'';},
+  fmtAddr:function(a){return a.includes(':')?'['+a+']':a;},
+  fmtBytes:function(n){if(!Number.isFinite(n)||n<0)return '—';if(n>=1073741824)return (n/1073741824).toFixed(1)+' GB';if(n>=1048576)return (n/1048576).toFixed(1)+' MB';if(n>=1024)return (n/1024).toFixed(1)+' KB';return String(n)+' B';},
+  identityView:function(id){if(!id)return {};var isHttp=!!id.protocol&&id.protocol!=='tcp';var meta=isHttp?[id.protocol+(id.status?' '+id.status:''),id.server].filter(Boolean).join(' · '):'';var hasLabel=!!id.label;var title=id.label||id.title;var detected=id.label&&id.title&&id.label!==id.title?id.title:undefined;var tooltip=[detected,meta].filter(Boolean).join(' · ');var out={};if(id.favicon)out.icon=id.favicon;if(title)out.title=title;if(tooltip)out.tooltip=tooltip;if(hasLabel)out.hasLabel=true;if(detected)out.detected=detected;return out;},
+  ddnsBadge:function(ddns){if(!ddns||!Array.isArray(ddns.actions)||!ddns.actions.length)return null;var out={items:ddns.actions.map(function(a){return {type:String(a.type),ok:!!a.ok};})};if(ddns.profile)out.profile=ddns.profile;return out;},
+  netcheckEventView:function(ev){switch(ev.type){case 'phase-start':return {icon:'▶',textKey:'ui.doctor.ev.phase-start',params:{label:String(ev.label??''),total:ev.total!=null?String(ev.total):''},tone:'dim'};case 'probe-done':return {icon:ev.ok?'✓':'✗',textKey:'ui.doctor.ev.probe-done',params:{item:String(ev.item??''),verdict:String(ev.verdict??''),ms:String(ev.ms??'')},tone:ev.ok?'ok':'bad'};case 'tunnel-est':return {icon:'✓',textKey:'ui.doctor.ev.tunnel-est',params:{provider:String(ev.provider??''),url:String(ev.url??''),ms:String(ev.ms??'')},tone:'ok'};case 'tunnel-fail':return {icon:'✗',textKey:'ui.doctor.ev.tunnel-fail',params:{provider:String(ev.provider??''),error:String(ev.error??''),ms:String(ev.ms??'')},tone:'bad'};case 'channel-result':return {icon:ev.ok?'✓':'✗',textKey:'ui.doctor.ev.channel-result',params:{provider:String(ev.provider??''),channel:String(ev.channel??''),level:String(ev.level??''),ms:String(ev.ms??'')},tone:ev.ok?'ok':'bad'};case 'verdict-confirmed':return {icon:ev.confirmed?'★':'○',textKey:'ui.doctor.ev.verdict-confirmed',params:{provider:String(ev.provider??''),verdict:String(ev.verdict??''),sourcesOk:String(ev.sourcesOk??'')},tone:ev.confirmed?'ok':'warn'};case 'advice-update':return {icon:'💡',textKey:'ui.doctor.ev.advice-update',params:{note:String(ev.note??'')},tone:'warn'};case 'phase-end':return {icon:'■',textKey:'ui.doctor.ev.phase-end',params:{phase:String(ev.phase??''),summary:String(ev.summary??'')},tone:'dim'};case 'summary':return {icon:'📋',textKey:'ui.doctor.ev.summary',tone:'ok'};case 'done':return {icon:'✔',textKey:'ui.doctor.ev.done',tone:'ok'};case 'error':return {icon:'⚠',textKey:'ui.doctor.ev.error',params:{message:String(ev.message??'')},tone:'bad'};case 'cancelled':return {icon:'⏹',textKey:'ui.doctor.ev.cancelled',tone:'warn'};default:return {icon:'·',textKey:'ui.doctor.ev.unknown',params:{type:String(ev.type??'')},tone:'dim'};}},
+  adviceView:function(a){var score=typeof a.score==='number'&&Number.isFinite(a.score)?a.score:0;var confirmed=!!a.confirmed;var untested=!a.confidence||a.confidence==='none';var badgeKey=untested?'ui.doctor.advice.untested':confirmed?'ui.doctor.advice.confirmed':'ui.doctor.advice.unconfirmed';var tone=confirmed?'ok':untested?'dim':'warn';return {rank:score,badgeKey:badgeKey,tone:tone,key:String(a.id??'')};},
+};
+function SH(){return (typeof window!=='undefined'&&window.__stShared)||__stLocal;}
+function fmtAddr(a){return SH().fmtAddr(a);}
 /** Expose 条目的显示模式：优先记录自带 mode；老记录按 name 前缀推断。 */
-function modeOf(e){
-  if(e&&e.mode)return e.mode;
-  if(!e||!e.name)return '';
-  if(e.name.indexOf('ipv6:')===0)return 'ipv6';
-  if(e.name.indexOf('proxy:')===0)return 'proxy';
-  return e.tunnelType||'';
-}
+function modeOf(e){return SH().modeOf(e);}
+function fmtBytes(n){return SH().fmtBytes(n);}
+function identityView(id){return SH().identityView(id);}
+function ddnsBadge(ddns){return SH().ddnsBadge(ddns);}
+function netcheckEventView(ev){return SH().netcheckEventView(ev);}
+function adviceView(a){return SH().adviceView(a);}
 function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
 function confirmDlg(title,body,confirmLabel,onOk){
   const root=document.getElementById('modalRoot');
