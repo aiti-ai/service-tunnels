@@ -525,6 +525,8 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.k.started": "Started",
     "ui.detail.k.params": "Params",
     "ui.detail.k.urls": "URLs",
+    "ui.exposes.none": "No active exposes",
+    "ui.exposes.noneGuide": "Expand any port on the Ports tab to expose it — tunnels / router mapping / direct IPv6.",
   },
 
   zh: {
@@ -1033,6 +1035,8 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.k.started": "开始时间",
     "ui.detail.k.params": "参数",
     "ui.detail.k.urls": "链接",
+    "ui.exposes.none": "还没有活动暴露",
+    "ui.exposes.noneGuide": "在「端口」页签展开任意端口即可暴露——隧道 / 路由器映射 / IPv6 直连。",
   },
 };
 

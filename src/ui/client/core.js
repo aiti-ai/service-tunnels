@@ -40,7 +40,7 @@ function identityView(id){return SH().identityView(id);}
 function ddnsBadge(ddns){return SH().ddnsBadge(ddns);}
 function netcheckEventView(ev){return SH().netcheckEventView(ev);}
 function adviceView(a){return SH().adviceView(a);}
-function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
+function toast(msg,err,duration){const r=document.getElementById('toastRoot');const d=document.createElement('div');d.className='toast'+(err?' err':'');d.setAttribute('role','status');d.setAttribute('aria-live','polite');d.textContent=msg;r.appendChild(d);setTimeout(()=>d.remove(),duration||(err?8000:4000));}
 function confirmDlg(title,body,confirmLabel,onOk){
   const root=document.getElementById('modalRoot');
   root.innerHTML='<div class="modal-ov"><div class="modal"><h3>⚠ '+esc(title)+'</h3><div class="muted" style="line-height:1.7">'+body+'</div><div class="actions" style="margin-top:14px;justify-content:flex-end"><button class="btn" onclick="this.closest(\'.modal-ov\').remove()">'+esc(tr('ui.cancel'))+'</button><button class="btn btn-danger" id="confirmOk">'+esc(confirmLabel)+'</button></div></div></div>';
@@ -48,10 +48,15 @@ function confirmDlg(title,body,confirmLabel,onOk){
 }
 function openModal(html){
   const root=document.getElementById('modalRoot');
-  root.innerHTML='<div class="modal-ov"><div class="modal">'+html+'</div></div>';
+  root.innerHTML='<div class="modal-ov"><div class="modal" role="dialog" aria-modal="true">'+html+'</div></div>';
   root.querySelector('.modal-ov').onclick=(e)=>{if(e.target===e.currentTarget)root.innerHTML='';};
+  // a11y：打开即聚焦首输入控件；Esc 关闭
+  const first=root.querySelector('.modal input,.modal select,.modal textarea');
+  if(first)setTimeout(()=>{try{first.focus();}catch(e){}},0);
+  document.addEventListener('keydown',modalEsc);
 }
-function closeModal(){document.getElementById('modalRoot').innerHTML='';}
+function modalEsc(e){if(e.key==='Escape')closeModal();}
+function closeModal(){document.getElementById('modalRoot').innerHTML='';document.removeEventListener('keydown',modalEsc);}
 function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(t);}return Promise.reject(new Error('no clipboard'));}
 // ── data loading ─────────────────────────────────────────────────────────
 async function loadStatus(){try{state.status=await api('/api/status');renderHeader();renderTabs();renderTab();}catch(e){toast(String(e),true);}}

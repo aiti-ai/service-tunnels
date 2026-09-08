@@ -128,6 +128,9 @@ pre.log{max-height:140px;overflow:auto;padding:6px 8px;background:var(--bg);bord
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty{padding:28px;text-align:center;color:var(--dim)}
 .actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+/* L-g 响应式：宽表横向滚动容器 + 窄屏收窄留白/表单单列（exposes 表由 JS 分支折叠为卡片） */
+.tbl-wrap{overflow-x:auto}
+@media (max-width:640px){.wrap{padding:12px}.form-grid{grid-template-columns:1fr}.modal{width:96vw}}
 `;
 
 const SHELL = (lang: Lang, csrf: string) => {

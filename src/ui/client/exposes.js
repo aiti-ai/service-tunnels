@@ -3,7 +3,25 @@ function renderExposes(){
   const exs=(state.live&&state.live.exposes)||[];
   let h='<div class="actions" style="margin-bottom:10px"><div class="spacer"></div>'
     +'<button class="btn btn-sm btn-danger" onclick="stopAllExposes()">'+esc(tr('ui.ports.stopAll'))+'</button></div>';
-  if(!exs.length){h+='<div class="empty">'+esc(tr('ui.ports.none'))+'</div>';}
+  if(!exs.length){h+='<div class="empty"><div style="font-size:24px;margin-bottom:6px">🌐</div>'+esc(tr('ui.exposes.none'))+'<p class="hint" style="margin-top:6px">'+esc(tr('ui.exposes.noneGuide'))+'</p></div>';}
+  else if(window.matchMedia&&window.matchMedia('(max-width:640px)').matches){
+    // L-g: 窄屏（≤640px）9 列表折叠为卡片列表（零依赖：matchMedia + 渲染分支）
+    h+=exs.map((e)=>{
+      const b=ddnsBadge(e.ddns);
+      return '<div class="card" style="padding:8px 10px;margin-bottom:6px">'
+        +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+        +'<span class="port">'+e.port+'</span>'
+        +'<span class="mono" style="font-size:11px">'+esc(e.name)+'</span>'
+        +'<span class="badge">'+esc(modeOf(e)||'?')+'</span>'
+        +(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':'<span class="badge authnone">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
+        +'<span class="'+(e.running?'ok':'dim')+'" style="font-size:10px">'+(e.running?'● '+esc(tr('ui.tunnelRunning')):esc(tr('ui.tunnelStopped')))+'</span></div>'
+        +'<div class="dim" style="font-size:10px;margin-top:3px">'+esc(tr('ui.exposes.col.site'))+': '+esc(e.site||'default')+' · '+esc(e.protocol||'http')
+        +(b?' · DDNS: '+esc(b.items.map((a)=>a.type).join(' ')):'')+'</div>'
+        +'<div class="actions" style="margin-top:6px">'
+        +'<button class="btn btn-sm" onclick="showExposeDetail(\''+e.name+'\')">'+esc(tr('ui.ports.detail'))+'</button>'
+        +'<button class="btn btn-sm btn-danger" onclick="stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button></div></div>';
+    }).join('');
+  }
   else{
     h+='<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.exposes.col.port'))+'</th><th>'+esc(tr('ui.exposes.col.name'))+'</th><th>'+esc(tr('ui.exposes.col.mode'))+'</th><th>'+esc(tr('ui.exposes.col.provider'))+'</th><th>'+esc(tr('ui.exposes.col.protocol'))+'</th><th>'+esc(tr('ui.exposes.col.site'))+'</th><th>DDNS</th><th>'+esc(tr('ui.exposes.col.status'))+'</th><th></th></tr></thead><tbody>';
     h+=exs.map((e)=>'<tr><td class="mono">'+e.port+'</td><td class="mono">'+esc(e.name)+'</td><td>'+esc(modeOf(e)||'')+'</td>'

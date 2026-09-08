@@ -8,7 +8,7 @@ async function renderUsers(){
     const cols=[...new Set(rows.map((r)=>r.provider))];
     if(cols.includes('ssh'))cols.sort((a,b)=>(a==='ssh'?-1:b==='ssh'?1:a.localeCompare(b)));
     let h='<div class="section-label">'+esc(tr('ui.users.sitesTitle'))+'</div>';
-    h+='<table><thead><tr><th>site</th>'+cols.map((p)=>'<th>'+esc(p)+'</th>').join('')+'</tr></thead><tbody>';
+    h+='<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.exposes.col.site'))+'</th>'+cols.map((p)=>'<th>'+esc(p)+'</th>').join('')+'</tr></thead><tbody>';
     h+=sites.map((s)=>{
       const cells=cols.map((p)=>{
         const r=rows.find((x)=>x.site===s&&x.provider===p);
@@ -18,7 +18,7 @@ async function renderUsers(){
       });
       return '<tr><td><strong>'+esc(s)+'</strong></td>'+cells.join('')+'</tr>';
     }).join('');
-    h+='</tbody></table>';
+    h+='</tbody></table></div>';
     h+='<div class="hint" style="margin-top:8px">'+esc(tr('ui.users.clickToEdit'))+'</div>';
     c.innerHTML=h;
   }catch(e){c.innerHTML='<div class="bad">'+esc(String(e))+'</div>';}

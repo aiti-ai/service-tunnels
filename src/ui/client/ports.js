@@ -48,7 +48,7 @@ function renderPorts(){
       const svcName=id.label||id.title;
       const titleLine=svcName?('<div class="svc-title"'+tooltipAttr+'>'+esc(svcName)+'</div>'):"";
       return '<div class="card" id="pc-'+s.port+'">'
-        +'<div class="row" onclick="togglePort('+s.port+')" role="button">'
+        +'<div class="row" onclick="togglePort('+s.port+')" role="button" tabindex="0" aria-expanded="'+(open?'true':'false')+'" onkeydown="rowKey(event,'+s.port+')">'
         +'<span class="port">'+s.port+'</span>'
         +icon
         +'<div style="flex:1;min-width:0">'
@@ -167,6 +167,7 @@ function schemaFields(specs){
   }).join('')+'</div>';
 }
 // exposed globals used by inline onclick
+window.rowKey=(e,p)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();togglePort(p);}};
 window.togglePort=(p)=>{if(state.expanded.has(p))state.expanded.delete(p);else state.expanded.add(p);state._exposePort=p;renderTab();setTimeout(afterExposeFormMount,0);};
 // 服务重命名：用户自定义识别（label > 探测 title；留空清除）
 window.renameService=async(port)=>{
