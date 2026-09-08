@@ -4,15 +4,15 @@ function renderTools(){
   const allow=state.status&&state.status.tools?state.status.tools.allowDownload:null;
   let h='';
   if(allow!==null)h+='<label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer"><input type="checkbox" id="toolDl" '+(allow?'checked':'')+'> '+esc(tr('ui.ports.allowDownload'))+'</label>';
-  h+='<table><thead><tr><th>tool</th><th>path</th><th>source</th><th></th></tr></thead><tbody>'
+  h+='<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.tools.col.tool'))+'</th><th>'+esc(tr('ui.tools.col.path'))+'</th><th>'+esc(tr('ui.tools.col.source'))+'</th><th></th></tr></thead><tbody>'
     +tools.map((t)=>{
       const missing=!t.path;
       const dlBtn=missing
-        ?'<button class="btn btn-sm" id="dl-'+esc(t.name)+'" onclick="downloadTool(\''+esc(t.name)+'\')"'+(allow===false?' disabled title="downloads disabled"':'')+'>'+esc(tr('ui.tools.download'))+'</button>'
+        ?'<button class="btn btn-sm" id="dl-'+esc(t.name)+'" onclick="downloadTool(\''+esc(t.name)+'\')"'+(allow===false?' disabled title="'+esc(tr('ui.tools.disabledTitle'))+'"':'')+'>'+esc(tr('ui.tools.download'))+'</button>'
         :'';
-      return '<tr><td class="mono">'+esc(t.name)+'</td><td class="mono">'+esc(t.path||'-')+'</td><td><span class="badge'+(missing?' bad':'')+'">'+esc(t.source||'missing')+'</span></td><td>'+dlBtn+'</td></tr>';
+      return '<tr><td class="mono">'+esc(t.name)+'</td><td class="mono">'+esc(t.path||'-')+'</td><td><span class="badge'+(missing?' bad':'')+'">'+esc(t.source||tr('ui.tools.missing'))+'</span></td><td>'+dlBtn+'</td></tr>';
     }).join('')
-    +'</tbody></table>';
+    +'</tbody></table></div>';
   c.innerHTML=h;
   const dl=document.getElementById('toolDl');
   if(dl)dl.onchange=()=>{api('/api/settings',{method:'POST',body:{allowToolDownload:dl.checked}}).catch((e)=>toast(String(e),true));};

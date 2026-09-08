@@ -21,8 +21,8 @@ function renderPorts(){
         +'<span class="mono">127.0.0.1:'+e.port+'</span>'
         +'<span class="badge">'+esc(modeOf(e)||'?')+'</span>'
         +'<span class="badge">'+(e.protocol||'http')+'</span>'
-        +(e.provider?'<span class="badge">auth: '+esc(e.provider)+'</span>':'<span class="badge authnone">⚠ none</span>')
-        +'<span class="ok" style="font-size:10px">● running</span>'
+        +(e.provider?'<span class="badge">auth: '+esc(e.provider)+'</span>':'<span class="badge authnone">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
+        +'<span class="ok" style="font-size:10px">'+esc(tr('ui.ports.runningBadge'))+'</span>'
         +'<div class="spacer"></div>'
         +'<button class="btn btn-sm" onclick="showExposeDetail(\''+e.name+'\')">'+esc(tr('ui.ports.detail'))+'</button>'
         +'<button class="btn btn-sm btn-danger" onclick="stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button>'
@@ -85,7 +85,7 @@ function expandPort(s,exs,urls){
   if(exs.length){
     h+='<div class="section-label">'+esc(tr('ui.ports.thisPortExposes'))+'</div>';
     h+=exs.map((e)=>'<div class="row" style="padding:5px 0;cursor:default"><span class="badge">'+esc(modeOf(e)||'?')+'</span>'
-      +(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':'<span class="badge authnone">⚠ none</span>')
+      +(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':'<span class="badge authnone">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
       +'<span class="'+(e.running?'ok':'dim')+'" style="font-size:10px">'+(e.running?'● '+esc(tr('ui.tunnelRunning')):esc(tr('ui.tunnelStopped')))+'</span>'
       +'<div class="spacer"></div>'
       +'<button class="btn btn-sm" onclick="showExposeDetail(\''+e.name+'\')">'+esc(tr('ui.ports.detail'))+'</button>'
@@ -185,7 +185,7 @@ window.showExposeDetail=async(name)=>{
     const e=(state.live&&state.live.exposes||[]).find((x)=>x.name===name)||{name};
     let logs='';
     if(e.accessLog){
-      try{const d=await api('/api/logs?name='+encodeURIComponent(name));logs='<div class="section-label">access</div><pre class="log">'+esc(d.access||'(empty)')+'</pre><div class="section-label">error</div><pre class="log" style="color:var(--danger)">'+esc(d.error||'(empty)')+'</pre>';}catch(err){logs='<div class="muted">'+(err.message||'')+'</div>';}
+      try{const d=await api('/api/logs?name='+encodeURIComponent(name));logs='<div class="section-label">'+esc(tr('ui.ports.accessLog'))+'</div><pre class="log">'+esc(d.access||'(empty)')+'</pre><div class="section-label">'+esc(tr('ui.ports.errorLog'))+'</div><pre class="log" style="color:var(--danger)">'+esc(d.error||'(empty)')+'</pre>';}catch(err){logs='<div class="muted">'+(err.message||'')+'</div>';}
       // log files (M2): list *.log under the expose's nginx logs dir
       try{
         const lf=await api('/api/logs-list?name='+encodeURIComponent(name));
@@ -202,17 +202,17 @@ window.showExposeDetail=async(name)=>{
     const pm=e.portmap&&modeOf(e)==='portmap'?e.portmap:null;
     const ip6=e.ipv6&&modeOf(e)==='ipv6'?e.ipv6:null;
     openModal('<h3>'+esc(e.name)+' · <span class="mono">127.0.0.1:'+e.port+'</span></h3>'
-      +kv('mode',modeOf(e)||'')
-      +kv('provider',e.provider||'<span class="bad">⚠ none</span>')
-      +kv('tunnel',e.tunnelType||'—')+kv('site',e.site||'default')+kv('protocol',e.protocol||'http')
-      +kv('started',e.startedAt?new Date(e.startedAt).toLocaleString():'—')
+      +kv(tr('ui.detail.k.mode'),modeOf(e)||'')
+      +kv(tr('ui.detail.k.provider'),e.provider||'<span class="bad">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
+      +kv(tr('ui.detail.k.tunnel'),e.tunnelType||'—')+kv(tr('ui.detail.k.site'),e.site||'default')+kv(tr('ui.detail.k.protocol'),e.protocol||'http')
+      +kv(tr('ui.detail.k.started'),e.startedAt?new Date(e.startedAt).toLocaleString():'—')
       +(pm?kv(tr('ui.detail.portmap'),'<span class="mono">'+esc(fmtAddr(pm.externalIp)+':'+pm.externalPort)+'</span> <span class="badge">'+esc(pm.backend)+'</span>')
         +kv(tr('ui.detail.leaseLeft'),leaseLeft(e))
-        +kv('gateway',esc(pm.gateway||'—')):'')
+        +kv(tr('ui.portmap.gateway'),esc(pm.gateway||'—')):'')
       +(ip6?kv(tr('ui.detail.ipv6Entry'),'<span class="mono">['+esc(ip6.address)+']:'+ip6.transportPort+'</span>')
         +kv(tr('ui.detail.ipv6Candidates'),esc((ip6.addresses||[]).map(fmtAddr).join(', ')||'—')):'')
-      +(e.params&&Object.keys(e.params).length?kv('params','<div class="mono">'+Object.entries(e.params).map(([k,v])=>esc(k)+': '+esc(v)).join('<br>')+'</div>'):'')
-      +(links.length?kv('urls',links.map((u)=>'<div class="url-row"><a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('')):'')
+      +(e.params&&Object.keys(e.params).length?kv(tr('ui.detail.k.params'),'<div class="mono">'+Object.entries(e.params).map(([k,v])=>esc(k)+': '+esc(v)).join('<br>')+'</div>'):'')
+      +(links.length?kv(tr('ui.detail.k.urls'),links.map((u)=>'<div class="url-row"><a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('')):'')
       +logs
       +'<div class="actions" style="margin-top:12px"><div class="spacer"></div>'
       +'<button class="btn btn-danger" onclick="closeModal();stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button>'

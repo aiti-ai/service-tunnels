@@ -65,17 +65,17 @@ function renderUsersTable(site,users){
         :'';
       const bioBtns=bios.includes(u.provider)
         ?((bio.face
-            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">face off</button>'
-            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">face on</button>')
+            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">'+esc(tr('ui.users.faceOff'))+'</button>'
+            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'face\')">'+esc(tr('ui.users.faceOn'))+'</button>')
           +(bio.voice
-            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">voice off</button>'
-            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">voice on</button>'))
+            ?'<button class="btn btn-sm" onclick="bioDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">'+esc(tr('ui.users.voiceOff'))+'</button>'
+            :'<button class="btn btn-sm" onclick="bioEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\',\'voice\')">'+esc(tr('ui.users.voiceOn'))+'</button>'))
         :'';
       return '<tr><td>'+esc(u.name)+'</td><td><span class="badge">'+pv+'</span></td><td>'+(u.totp?'<span class="ok">●</span>':'<span class="dim">○</span>')+'</td><td>'+bioCell+'</td>'
       +'<td><div class="actions"><button class="btn btn-sm" onclick="userPass(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.btn.setPassword'))+'</button>'
       +(totps.includes(u.provider)?(u.totp
-        ?'<button class="btn btn-sm" onclick="totpDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">2fa off</button>'
-        :'<button class="btn btn-sm" onclick="totpEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">2fa on</button>'):'')
+        ?'<button class="btn btn-sm" onclick="totpDisable(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.users.totpOff'))+'</button>'
+        :'<button class="btn btn-sm" onclick="totpEnroll(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.users.totpOn'))+'</button>'):'')
       +bioBtns
       +'<button class="btn btn-sm btn-danger" onclick="userRemove(\''+site+'\',\''+pv+'\',\''+esc(u.name)+'\')">'+esc(tr('ui.ssh.removeBtn'))+'</button></div></td></tr>';
     }).join('')
@@ -84,8 +84,8 @@ function renderUsersTable(site,users){
   return h;
 }
 function renderTokensTable(site,tokens){
-  let h='<div class="actions" style="margin:8px 0;flex-wrap:wrap"><input id="tok-desc" placeholder="'+esc(tr('ui.tokens.desc'))+'" style="max-width:160px"><select id="tok-exp"><option value="never">never</option><option value="+7d">+7d</option><option value="+30d">+30d</option></select>'
-    +'<button class="btn btn-sm btn-primary" onclick="createTokenFor(\''+site+'\')">create</button></div>';
+  let h='<div class="actions" style="margin:8px 0;flex-wrap:wrap"><input id="tok-desc" placeholder="'+esc(tr('ui.tokens.desc'))+'" style="max-width:160px"><select id="tok-exp"><option value="never">'+esc(tr('ui.tokens.never'))+'</option><option value="+7d">'+esc(tr('ui.tokens.7d'))+'</option><option value="+30d">'+esc(tr('ui.tokens.30d'))+'</option></select>'
+    +'<button class="btn btn-sm btn-primary" onclick="createTokenFor(\''+site+'\')">'+esc(tr('ui.tokens.create'))+'</button></div>';
   h+='<table><thead><tr><th>id</th><th>description</th><th>created</th><th>expires</th><th></th></tr></thead><tbody>'
     +(tokens.length?tokens.map((t)=>'<tr><td class="mono">'+esc(t.id.slice(0,8))+'…</td><td>'+esc(t.description||'-')+'</td><td class="dim">'+new Date(t.createdAt).toLocaleString()+'</td><td>'+(t.expiresAt?new Date(t.expiresAt).toLocaleString():'<span class="badge">never</span>')+'</td>'
       +'<td><button class="btn btn-sm btn-danger" onclick="revokeToken(\''+site+'\',\''+t.id+'\')">revoke</button></td></tr>').join('')
@@ -94,8 +94,8 @@ function renderTokensTable(site,tokens){
   return h;
 }
 function renderKeys(site,keys){
-  let h='<div class="actions" style="margin:8px 0"><button class="btn btn-sm btn-primary" onclick="sshGen(\''+site+'\')">generate</button></div>';
-  h+='<textarea id="ssh-pub" rows="2" placeholder="ssh-ed25519 AAAA… user@host" style="margin:4px 0"></textarea>'
+  let h='<div class="actions" style="margin:8px 0"><button class="btn btn-sm btn-primary" onclick="sshGen(\''+site+'\')">'+esc(tr('ui.users.generate'))+'</button></div>';
+  h+='<textarea id="ssh-pub" rows="2" placeholder="'+esc(tr('ui.ssh.pubPlaceholder'))+'" style="margin:4px 0"></textarea>'
     +'<button class="btn btn-sm btn-primary" onclick="sshAdd(\''+site+'\')">'+esc(tr('ui.ssh.addKey'))+'</button>';
   h+='<table style="margin-top:8px"><thead><tr><th>alias</th><th>fingerprint</th><th></th></tr></thead><tbody>'
     +(keys.length?keys.map((k)=>'<tr><td class="mono">'+esc(k.alias||k.comment||'')+'</td><td class="mono">'+esc(k.fingerprint)+'</td>'
@@ -104,16 +104,16 @@ function renderKeys(site,keys){
     +'</tbody></table>';
   return h;
 }
-window.addUser=async(site)=>{const name=document.getElementById('nu-name').value,pass=document.getElementById('nu-pass').value;const provider=document.getElementById('nu-provider')?document.getElementById('nu-provider').value:undefined;if(!name||!pass)return;try{await api('/api/user-add',{method:'POST',body:{name,password:pass,site,provider}});toast('added');goSite(site,'users');}catch(e){toast(String(e),true);}};
-window.createTokenFor=async(site)=>{const description=document.getElementById('tok-desc').value;const expiresAt=document.getElementById('tok-exp').value;try{const d=await api('/api/token-create',{method:'POST',body:{description,expiresAt,site}});const tok=d.tokens&&d.tokens[0]&&d.tokens[0].token&&d.tokens[0].token.token;if(tok)openModal('<h3>'+esc(tr('ui.tokens.created'))+'</h3><div class="muted">'+esc(tr('ui.tokens.once'))+'</div><textarea readonly rows="3">'+esc(tok)+'</textarea><div class="actions" style="margin-top:10px"><button class="btn btn-sm btn-primary" onclick="copyText(document.querySelector(\'#modalRoot textarea\').value).then(()=>toast(\'copied\'))">copy</button><button class="btn btn-sm" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');loadSiteBlock(site,'tokens');}catch(e){toast(String(e),true);}};
-window.userPass=async(site,provider,name)=>{const p=prompt('new password');if(!p)return;try{await api('/api/user-set-password',{method:'POST',body:{name,password:p,site,provider}});toast('ok');}catch(e){toast(String(e),true);}};
-window.userRemove=async(site,provider,name)=>{confirmDlg('remove user',esc(name),'remove',async()=>{try{await api('/api/user-remove',{method:'POST',body:{name,site,provider}});toast('removed');goSite(site,provider);}catch(e){toast(String(e),true);}});};
-window.totpEnroll=async(site,provider,name)=>{try{const d=await api('/api/totp-enroll',{method:'POST',body:{name,site,provider}});openModal('<h3>2FA · '+esc(name)+'</h3><div class="muted" style="word-break:break-all">'+esc(d.otpauthUrl||'')+'</div><div class="hint">'+esc(d.secret||'')+'</div><div class="actions" style="margin-top:10px"><input id="totp-code" placeholder="6-digit" style="max-width:100px"><button class="btn btn-sm btn-primary" onclick="totpActivate(\''+site+'\',\''+provider+'\',\''+esc(name)+'\')">activate</button></div>');}catch(e){toast(String(e),true);}};
-window.totpActivate=async(site,provider,name)=>{const code=document.getElementById('totp-code').value;if(!/^\d{6}$/.test(code)){toast('6-digit code');return;}try{const d=await api('/api/totp-activate',{method:'POST',body:{name,code,site,provider}});toast(d.activated?'activated':'wrong code');closeModal();}catch(e){toast(String(e),true);}};
-window.totpDisable=async(site,provider,name)=>{try{await api('/api/totp-disable',{method:'POST',body:{name,site,provider}});toast('2fa off');}catch(e){toast(String(e),true);}};
+window.addUser=async(site)=>{const name=document.getElementById('nu-name').value,pass=document.getElementById('nu-pass').value;const provider=document.getElementById('nu-provider')?document.getElementById('nu-provider').value:undefined;if(!name||!pass)return;try{await api('/api/user-add',{method:'POST',body:{name,password:pass,site,provider}});toast(tr('ui.users.added'));goSite(site,'users');}catch(e){toast(String(e),true);}};
+window.createTokenFor=async(site)=>{const description=document.getElementById('tok-desc').value;const expiresAt=document.getElementById('tok-exp').value;try{const d=await api('/api/token-create',{method:'POST',body:{description,expiresAt,site}});const tok=d.tokens&&d.tokens[0]&&d.tokens[0].token&&d.tokens[0].token.token;if(tok)openModal('<h3>'+esc(tr('ui.tokens.created'))+'</h3><div class="muted">'+esc(tr('ui.tokens.once'))+'</div><textarea readonly rows="3">'+esc(tok)+'</textarea><div class="actions" style="margin-top:10px"><button class="btn btn-sm btn-primary" onclick="copyText(document.querySelector(\'#modalRoot textarea\').value).then(()=>toast(tr(\'ui.copied\')))">'+esc(tr('ui.copy'))+'</button><button class="btn btn-sm" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');loadSiteBlock(site,'tokens');}catch(e){toast(String(e),true);}};
+window.userPass=async(site,provider,name)=>{const p=prompt(tr('ui.promptPassword'));if(!p)return;try{await api('/api/user-set-password',{method:'POST',body:{name,password:p,site,provider}});toast(tr('ui.users.passwordSet'));}catch(e){toast(String(e),true);}};
+window.userRemove=async(site,provider,name)=>{confirmDlg(tr('ui.users.removeConfirm'),esc(name),tr('ui.users.remove'),async()=>{try{await api('/api/user-remove',{method:'POST',body:{name,site,provider}});toast(tr('ui.users.removed'));goSite(site,provider);}catch(e){toast(String(e),true);}});};
+window.totpEnroll=async(site,provider,name)=>{try{const d=await api('/api/totp-enroll',{method:'POST',body:{name,site,provider}});openModal('<h3>2FA · '+esc(name)+'</h3><div class="muted" style="word-break:break-all">'+esc(d.otpauthUrl||'')+'</div><div class="hint">'+esc(d.secret||'')+'</div><div class="actions" style="margin-top:10px"><input id="totp-code" placeholder="'+esc(tr('ui.users.codePlaceholder'))+'" style="max-width:100px"><button class="btn btn-sm btn-primary" onclick="totpActivate(\''+site+'\',\''+provider+'\',\''+esc(name)+'\')">'+esc(tr('ui.users.activate'))+'</button></div>');}catch(e){toast(String(e),true);}};
+window.totpActivate=async(site,provider,name)=>{const code=document.getElementById('totp-code').value;if(!/^\d{6}$/.test(code)){toast(tr('ui.users.codeRequired'),true);return;}try{const d=await api('/api/totp-activate',{method:'POST',body:{name,code,site,provider}});toast(d.activated?tr('ui.users.activated'):tr('ui.users.wrongCode'));closeModal();}catch(e){toast(String(e),true);}};
+window.totpDisable=async(site,provider,name)=>{try{await api('/api/totp-disable',{method:'POST',body:{name,site,provider}});toast(tr('ui.users.totpOff'));}catch(e){toast(String(e),true);}};
 window.bioEnroll=async(site,provider,name,method)=>{try{const d=await api('/api/biometric-enroll-ticket',{method:'POST',body:{name,method,site,provider}});if(d.url){window.open(d.url,'_blank');toast(tr('ui.biometricEnrollTicket',{method}));}else{toast(String(d),true);}}catch(e){toast(String(e),true);}};
-window.bioDisable=async(site,provider,name,method)=>{try{if(!confirm(tr('ui.confirmDisableBiometric',{name,method})))return;await api('/api/biometric-disable',{method:'POST',body:{name,method,site,provider}});toast(method+' off');loadSiteBlock(site,'users');}catch(e){toast(String(e),true);}};
-window.sshAdd=async(site)=>{const pub=document.getElementById('ssh-pub').value;if(!pub)return;try{await api('/api/ssh-keys',{method:'POST',body:{action:'add',site,publicKey:pub}});toast('added');goSite(site,'ssh');}catch(e){toast(String(e),true);}};
-window.sshRevoke=async(site,fp)=>{confirmDlg('revoke key',esc(fp),'revoke',async()=>{try{await api('/api/ssh-keys',{method:'POST',body:{action:'revoke',site,fingerprint:fp}});toast('revoked');goSite(site,'ssh');}catch(e){toast(String(e),true);}});};
-window.sshGen=async(site)=>{try{const d=await api('/api/ssh-keys',{method:'POST',body:{action:'generate',site,type:'ed25519'}});const k=Array.isArray(d)?d[0]:d;openModal('<h3>'+esc(tr('ui.ssh.privateKeyTitle'))+'</h3><div class="muted">'+esc(tr('ui.ssh.privateKeyHint'))+'</div><textarea readonly rows="10" id="ssh-priv">'+esc(k.privateKey)+'</textarea><div class="actions" style="margin-top:10px"><button class="btn btn-sm btn-primary" onclick="copyPriv()">copy</button><button class="btn btn-sm" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');}catch(e){toast(String(e),true);}};
-window.copyPriv=()=>{const t=document.getElementById('ssh-priv').value;copyText(t).then(()=>toast('copied')).catch(()=>toast('copy failed',true));};
+window.bioDisable=async(site,provider,name,method)=>{try{if(!confirm(tr('ui.confirmDisableBiometric',{name,method})))return;await api('/api/biometric-disable',{method:'POST',body:{name,method,site,provider}});toast(tr('ui.users.bioOff',{method}));loadSiteBlock(site,'users');}catch(e){toast(String(e),true);}};
+window.sshAdd=async(site)=>{const pub=document.getElementById('ssh-pub').value;if(!pub)return;try{await api('/api/ssh-keys',{method:'POST',body:{action:'add',site,publicKey:pub}});toast(tr('ui.users.added'));goSite(site,'ssh');}catch(e){toast(String(e),true);}};
+window.sshRevoke=async(site,fp)=>{confirmDlg(tr('ui.ssh.revokeConfirm'),esc(fp),tr('ui.tokens.revoke'),async()=>{try{await api('/api/ssh-keys',{method:'POST',body:{action:'revoke',site,fingerprint:fp}});toast(tr('ui.ssh.revoked'));goSite(site,'ssh');}catch(e){toast(String(e),true);}});};
+window.sshGen=async(site)=>{try{const d=await api('/api/ssh-keys',{method:'POST',body:{action:'generate',site,type:'ed25519'}});const k=Array.isArray(d)?d[0]:d;openModal('<h3>'+esc(tr('ui.ssh.privateKeyTitle'))+'</h3><div class="muted">'+esc(tr('ui.ssh.privateKeyHint'))+'</div><textarea readonly rows="10" id="ssh-priv">'+esc(k.privateKey)+'</textarea><div class="actions" style="margin-top:10px"><button class="btn btn-sm btn-primary" onclick="copyPriv()">'+esc(tr('ui.copy'))+'</button><button class="btn btn-sm" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');}catch(e){toast(String(e),true);}};
+window.copyPriv=()=>{const t=document.getElementById('ssh-priv').value;copyText(t).then(()=>toast(tr('ui.copied'))).catch(()=>toast(tr('ui.copyFailed'),true));};
