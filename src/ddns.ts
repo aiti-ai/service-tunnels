@@ -10,18 +10,18 @@
  *      the latest tunnel even when nothing else is reachable.
  */
 
-import { readConfig, writeConfig, configPath as ddnsConfigPath } from "ddns";
+import { readConfig, writeConfig, configPath as ddnsConfigPath } from "@aiti-ti/ddns";
 import { readFileSync } from "node:fs";
 import { join as pathJoin } from "node:path";
-import { updateEntry, runOnce, startLoop } from "ddns";
-import { resolvePublicIp } from "ddns";
-import { setBeacon as ddnsSetBeacon, beaconValue, providerMetas } from "ddns";
-import type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "ddns";
+import { updateEntry, runOnce, startLoop } from "@aiti-ti/ddns";
+import { resolvePublicIp } from "@aiti-ti/ddns";
+import { setBeacon as ddnsSetBeacon, beaconValue, providerMetas } from "@aiti-ti/ddns";
+import type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "@aiti-ti/ddns";
 
-export type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "ddns";
+export type { DdnsEntry, DdnsResult, DdnsLoopHandle } from "@aiti-ti/ddns";
 /** Legacy alias. */
 export type DdnsUpdateResult = DdnsResult;
-export type { ProviderName } from "ddns";
+export type { ProviderName } from "@aiti-ti/ddns";
 
 // -- legacy aliases (pre-integration names; kept for callers) --------------
 

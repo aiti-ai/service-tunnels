@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { readRegistryConfig, resolveEntry, registerPortmap, registerTunnel, urlHost, writeRegistryConfig } = await import("../src/ddns-registry.ts");
-const { startCloudflareMock } = await import("ddns/src/mocks/cloudflare.ts");
+const { startCloudflareMock } = await import("@aiti-ti/ddns/mocks/cloudflare");
 
 let CFG = null;
 function makeCfg(mock) {
@@ -184,7 +184,7 @@ test("registerTunnel: txt (doc syntax) triggers TXT like txtUrl", async () => {
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { startCloudflareMock } = await import("ddns/src/mocks/cloudflare.ts");
+  const { startCloudflareMock } = await import("@aiti-ti/ddns/mocks/cloudflare");
   const dir = mkdtempSync(join(tmpdir(), "st-reg-txt-"));
   const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
   const zoneId = [...mock.state.zones.values()][0].id;
@@ -224,7 +224,7 @@ test("legacy plain array config reads as empty registry (no entries)", async () 
 test("expose-bound ddns: portmap + ddns option registers A/TXT and exposes record carries it", async () => {
   // createServiceTunnels with a ddns.json profile + expose(port, {mode:portmap, ddns})
   const { createServiceTunnels } = await import("../src/index.ts");
-  const { startCloudflareMock } = await import("ddns/src/mocks/cloudflare.ts");
+  const { startCloudflareMock } = await import("@aiti-ti/ddns/mocks/cloudflare");
   const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");

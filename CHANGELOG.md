@@ -1,3 +1,10 @@
+## 0.3.65 (2026-09-08)
+
+- **fix(ddns): 依赖改用 `@aiti-ti/ddns@^0.1.2`（私有源）**——原 `file:../ddns` 本地链接
+  发布后消费者无法解析（dist 运行时报 ERR_MODULE_NOT_FOUND）；同源 imports/
+  动态 import/测试全部切换；ddns 包入口修正为 dist 编译产物并新增 `./mocks/*`
+  子路径导出（测试用 mock server）。
+
 ## 0.3.64 (2026-09-08)
 
 - **feat(port-identity): 端口列表识别 HTTP 服务——favicon + document title**

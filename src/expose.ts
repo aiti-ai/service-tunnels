@@ -591,7 +591,7 @@ async function ipv6Expose(
   // ── 1) 解析入口 IPv6 地址：显式 > 自动检测（global 单播候选）──
   const detectExternal = async () => {
     try {
-      const { resolvePublicIp } = await import("ddns");
+      const { resolvePublicIp } = await import("@aiti-ti/ddns");
       return await resolvePublicIp(6);
     } catch {
       return null; // 无 egress 探测也不挡 auto 枚举路径
