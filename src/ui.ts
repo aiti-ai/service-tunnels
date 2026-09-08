@@ -86,6 +86,10 @@ button{font:inherit;cursor:pointer}
 .row{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer}
 .row:hover{background:rgba(128,128,128,.06)}
 .port{font-family:ui-monospace,monospace;font-size:14px;font-weight:700;color:var(--accent);min-width:56px}
+.svc-icon{width:18px;height:18px;border-radius:4px;flex:none;object-fit:contain;background:rgba(128,128,128,.08)}
+.svc-title{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.svc-rename{opacity:.4;padding:2px 7px;font-size:11px;flex:none}
+.svc-rename:hover{opacity:1}
 .mono{font-family:ui-monospace,monospace}
 .dim{color:var(--dim)} .ok{color:var(--ok)} .bad{color:var(--danger)}
 .badge{display:inline-block;padding:1px 7px;border-radius:4px;background:rgba(128,128,128,.14);color:var(--dim);font-size:10px;white-space:nowrap}

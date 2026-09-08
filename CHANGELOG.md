@@ -1,3 +1,36 @@
+## Unreleased
+
+- **feat(port-identity): 端口列表识别 HTTP 服务——favicon + document title**
+  - 新增 `src/port-identity.ts`：对本机回环端口做轻量 HTTP(S) 探测（`GET /`，
+    v4 失败再试 ::1；TLS 痕迹 → https 重试），提取 `<title>` 与 favicon
+    （`<link rel*=icon>` 优先，缺省 `/favicon.ico`），favicon 取回转 data: URL
+    供 UI 直接 `<img>`；另附 status/Content-Type/Server 供 tooltip；
+  - 安全边界：只探测回环、重定向只跟随回环目标（不外呼）、64KB/32KB 体积
+    上限 + 900ms 超时 + 整体硬截止、socket 显式销毁（L4 纪律）；
+  - 成本：结果按端口缓存（成功 5min/失败 30s，globalThis），UI 10s 轮询
+    零成本（实机 12 端口首探 786ms、缓存命中 0ms）；`image/x-icon` 万能桶
+    标签用魔数嗅探纠偏；`SERVICE_TUNNELS_NO_PORT_IDENTITY=1` 整体关闭；
+  - 接入：daemon `port.list`、`/api/live` embedded 兑底、`/api/port-detect`
+    均附 `identity`；UI 端口卡片显示 `[icon] title` 主行（cmdline 降为次要行），
+    无识别结果时外观零回归；
+  - 测试：`test/port-identity.test.mjs`（10 case）；文档：
+    `docs/port-identity-design.md`。
+- **feat(service-labels): 用户自定义服务识别——label 覆盖探测 title**
+  - `state.json` 新增 `serviceLabels`（端口 → label，人工事实，重启保留）；
+    `PortIdentity` 加 `label` 槽位；
+  - daemon IPC `port.label.set`（trim/截断 80 字符/空 = 清除/非法端口拒绝）+
+    `port.list` 合并下发（daemon 与 embedded 兑底同逻辑）；UI
+    `POST /api/port-label`（daemon 优先，embedded 直接 updateState）；
+  - UI：端口卡片主行显示 `label || title`（tooltip 附"探测: <title>"与
+    协议/状态/Server）；行尾 ✎ 重命名（prompt 预填，留空清除，
+    stopPropagation 不触发展开）；i18n 中英四键；
+  - 测试：`test/service-labels.test.mjs`（daemon e2e：set → 合并 → 拒绝 →
+    持久化 → 重启仍在 → 清除）；文档 §5 更新为已实现。
+  - 审查加固：畸形 `Location` 头不再击穿进程（响应回调内 `new URL` 包裹，
+    按停在 30x 处理）；`Content-Type` 声明值过 `image/[a-z0-9.+-]` 白名单
+    （注入引号原先进 `data:` URL 会在 UI `src` 属性 breakout）；UI tooltip
+    整串 esc 后再进 HTML 属性（`Server` 头此前未转义）；+2 回归用例。
+
 ## 0.3.73 (2026-09-01)
 
 - **feat(internal-access): 内部可信客户端放行——内存轮换 token + Linux 进程凭证旁路**

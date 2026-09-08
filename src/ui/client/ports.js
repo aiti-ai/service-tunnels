@@ -37,12 +37,26 @@ function renderPorts(){
       const open=state.expanded.has(s.port);
       const exs=exposeForPort(s.port);
       const urls=exs.flatMap((e)=>[(e.localUrl?{u:e.localUrl,l:tr('ui.ports.proxyLocal')+' '+esc(e.name),n:e.name}:null),(e.baseUrl?{u:e.baseUrl,l:tr('ui.ports.proxyDomain')+' '+esc(e.name),n:e.name}:null),(e.domainUrl?{u:e.domainUrl,l:tr('ui.ports.proxyDomain')+' '+esc(e.name),n:e.name}:null)].filter(Boolean));
+      // 服务识别：用户 label（人工事实）> HTTP 探测 title；tooltip 附探测元信息
+      const id=s.identity||{};
+      const isHttp=id.protocol&&id.protocol!=='tcp';
+      const idMeta=isHttp?[id.protocol+(id.status?' '+id.status:''),id.server].filter(Boolean).join(' · '):'';
+      const tooltip=[(id.label&&id.title)?tr('ui.ports.detected')+': '+id.title:null,idMeta].filter(Boolean).join(' · ');
+      // title/server 等来自对端响应，不可信——整串 esc 后再进 HTML 属性
+      const tooltipAttr=tooltip?' title="'+esc(tooltip)+'"':'';
+      const icon=id.favicon?('<img class="svc-icon" src="'+id.favicon+'" alt="" loading="lazy"'+tooltipAttr+'>'):"";
+      const svcName=id.label||id.title;
+      const titleLine=svcName?('<div class="svc-title"'+tooltipAttr+'>'+esc(svcName)+'</div>'):"";
       return '<div class="card" id="pc-'+s.port+'">'
         +'<div class="row" onclick="togglePort('+s.port+')" role="button">'
         +'<span class="port">'+s.port+'</span>'
-        +'<div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.cmdline||s.process||('pid '+s.pid))+'</div>'
+        +icon
+        +'<div style="flex:1;min-width:0">'
+        +titleLine
+        +'<div'+(titleLine?' class="dim"':'')+' style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.cmdline||s.process||('pid '+s.pid))+'</div>'
         +'<div class="dim" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(tr('ui.ports.listenOn'))+' '+esc((s.addresses||[]).join(', '))+' · pid '+s.pid+'</div></div>'
         +(exs.some((e)=>e.running)?'<span class="badge ok">●</span>':'')
+        +'<button class="btn btn-sm svc-rename" title="'+esc(tr('ui.ports.rename'))+'" onclick="event.stopPropagation();renameService('+s.port+')">✎</button>'
         +'<span class="dim">'+(open?'▾':'▸')+'</span></div>'
         +(open?expandPort(s,exs,urls):'')
         +'</div>';
@@ -140,6 +154,13 @@ function schemaFields(specs){
 }
 // exposed globals used by inline onclick
 window.togglePort=(p)=>{if(state.expanded.has(p))state.expanded.delete(p);else state.expanded.add(p);state._exposePort=p;renderTab();setTimeout(afterExposeFormMount,0);};
+// 服务重命名：用户自定义识别（label > 探测 title；留空清除）
+window.renameService=async(port)=>{
+  const cur=((((state.live||{}).ports)||[]).find((p)=>p.port===port)||{}).identity?.label||'';
+  const name=prompt(tr('ui.ports.renamePrompt'),cur);
+  if(name===null)return;
+  try{await api('/api/port-label',{method:'POST',body:{port,label:name}});toast(tr('ui.ports.renamed'));await loadLive();}catch(e){toast(String(e),true);}
+};
 window.stopExpose=async(name)=>{
   confirmDlg(tr('ui.ports.stopConfirm',{name}),tr('ui.ports.stopHint'),tr('ui.ports.stop'),async()=>{
     try{await api('/api/expose-stop',{method:'POST',body:{name}});toast(tr('ui.ports.stopped'));await loadLive();}catch(e){toast(String(e),true);}

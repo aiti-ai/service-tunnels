@@ -50,10 +50,17 @@ if (path === "/api/live" && req.method === "GET") {
   // user services, mirrors daemon port.list).
   const ports = (await daemonOrLocal<any[]>(ctx, "port.list", { scope: "current-user" }, async () => {
     const { listListeningPorts } = await import("./ports.ts");
+    const { enrichWithIdentity } = await import("./port-identity.ts");
     const internalPorts = new Set((st.internal.list() ?? []).map((p) => p.port));
-    return listListeningPorts("current-user")
-      .filter((p) => !internalPorts.has(p.port) && p.port !== ctx.port)
-      .map((p) => ({ ...p, addresses: ["127.0.0.1"] }));
+    const labels = st.state().serviceLabels ?? {};
+    return (await enrichWithIdentity(
+      listListeningPorts("current-user")
+        .filter((p) => !internalPorts.has(p.port) && p.port !== ctx.port)
+        .map((p) => ({ ...p, addresses: ["127.0.0.1"] })),
+    )).map((p) => {
+      const label = labels[String(p.port)];
+      return label ? { ...p, identity: { ...p.identity, label } } : p;
+    });
   })) ?? [];
   const internal = (await daemonOrLocal<any[]>(ctx, "internal.list", undefined, () => st.internal.list())) ?? [];
   const tunnels = (await daemonOrLocal<any[]>(ctx, "tunnel.list", undefined, () => st.tunnels.list())) ?? [];
@@ -468,14 +475,45 @@ if (path === "/api/port-detect" && req.method === "GET") {
   }
   const { detectProtocol } = await import("./gateway.ts");
   const { tunnelSupportsTcp } = await import("./tunnels.ts");
+  const { identifyPort } = await import("./port-identity.ts");
   let protocol: "http" | "https" | "tcp" = "tcp";
   try { protocol = await detectProtocol(port, 1200); } catch { protocol = "tcp"; }
+  // 服务识别（title/favicon；命中缓存则零成本，未命中补充探测）
+  let identity: unknown;
+  try { identity = await identifyPort(port); } catch { /* best-effort */ }
   const types = ["ngrok", "ssh", "frpc", "cloudflared", "localtunnel", "bore", "serveo", "command"];
   json(res, 200, {
     port,
     protocol,
+    identity,
     tunnelTypes: types.filter((t) => t === "command" || (protocol === "tcp" ? tunnelSupportsTcp(t) : true)),
   });
+  return true;
+}
+
+// ── 用户自定义服务名：label > 探测 title（服务页签）──────────────────
+if (path === "/api/port-label" && req.method === "POST") {
+  const body = await readJson<{ port?: number; label?: string }>(req);
+  const port = Number(body.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    json(res, 400, { error: "port required (1-65535)" });
+    return true;
+  }
+  const label = String(body.label ?? "").trim().slice(0, 80);
+  // daemon 优先（它是 state.json 的写者）；不在（embedded）则本进程直接写
+  const viaDaemon = await ctx.st.daemon
+    .request("port.label.set", { port, label }, 5_000)
+    .catch(() => null);
+  if (viaDaemon === null) {
+    const { updateState } = await import("./state.ts");
+    const { cachePaths } = await import("./config.ts");
+    updateState(cachePaths(ctx.st.dirs.cacheDir).stateFile, (s) => {
+      s.serviceLabels ??= {};
+      if (label) s.serviceLabels[String(port)] = label;
+      else delete s.serviceLabels[String(port)]; // 空 label = 清除
+    });
+  }
+  json(res, 200, { port, label: label || undefined });
   return true;
 }
 

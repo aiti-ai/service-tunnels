@@ -17,7 +17,7 @@ import { randomBytes } from "crypto";
 import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
 import { getServicePorts } from "./discovery.ts";
-import { readState, writeState } from "./state.ts";
+import { readState, writeState, updateState } from "./state.ts";
 import type { ExposeRuntimeState } from "./state.ts";
 import { readSites, writeSites, validateSiteName, defaultSiteConfig, type SiteConfig } from "./sites.ts";
 import { listListeningPorts } from "./ports.ts";
@@ -121,12 +121,35 @@ let lastError: string | null = null;
 const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
   ["daemon.last-error", () => ({ error: lastError })],
-  ["port.list", (params) => {
+  ["port.list", async (params) => {
     const ports = listListeningPorts(String((params as { scope?: string } | undefined)?.scope ?? "current-user"));
     // SSH 网关端口是内部服务（认证层），不作为暴露目标
     const gwPorts = new Set(ssh.list().map((d) => d.port));
-    return ports.filter((p) => !gwPorts.has(p.port));
+    const filtered = ports.filter((p) => !gwPorts.has(p.port));
+    // HTTP 服务识别（title + favicon，带缓存；SERVICE_TUNNELS_NO_PORT_IDENTITY 可关）
+    // + 用户自定义 label 合并（state.json serviceLabels，人工事实优先于探测）
+    const labels = readState(stateFile).serviceLabels ?? {};
+    const { enrichWithIdentity } = await import("./port-identity.ts");
+    return (await enrichWithIdentity(filtered)).map((p) => {
+      const label = labels[String(p.port)];
+      return label ? { ...p, identity: { ...p.identity, label } } : p;
+    });
   }],
+  [
+    "port.label.set",
+    (params) => {
+      const { port, label } = (params ?? {}) as { port?: unknown; label?: unknown };
+      const p = Number(port);
+      if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error("port required (1-65535)");
+      const text = String(label ?? "").trim().slice(0, 80);
+      updateState(stateFile, (s) => {
+        s.serviceLabels ??= {};
+        if (text) s.serviceLabels[String(p)] = text;
+        else delete s.serviceLabels[String(p)]; // 空 label = 清除
+      });
+      return { port: p, label: text || undefined };
+    },
+  ],
   [
     "discover",
     (params) => {

@@ -90,10 +90,13 @@ export interface RuntimeState {
   /** Persisted expose metadata (M0b) — display only; tunnel processes are
    *  restored by `tunnels` hydrate, bindings by `proxy.restore`. */
   exposes?: ExposeRuntimeState[];
+  /** 用户自定义服务识别：端口(十进制字符串) → label。服务页签显示优先于
+   *  探测 title（port-identity），这是人工事实，永不覆盖。 */
+  serviceLabels?: Record<string, string>;
 }
 
 export function emptyState(): RuntimeState {
-  return { internal: [], tunnels: {}, auth: { registered: [] }, bindings: [], exposes: [] };
+  return { internal: [], tunnels: {}, auth: { registered: [] }, bindings: [], exposes: [], serviceLabels: {} };
 }
 
 export function readState(stateFile: string): RuntimeState {
@@ -108,6 +111,7 @@ export function readState(stateFile: string): RuntimeState {
       auth: { ...emptyState().auth, ...parsed.auth },
       bindings: Array.isArray(parsed.bindings) ? parsed.bindings : [],
       exposes: Array.isArray(parsed.exposes) ? parsed.exposes : [],
+      serviceLabels: parsed.serviceLabels ?? {},
     };
   } catch {
     return emptyState();
