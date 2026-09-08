@@ -1,3 +1,11 @@
+## 0.3.67 (2026-09-08)
+
+- **fix(guardian): Windows 父进程存活探测改用 `process.kill(pid, 0)`**——
+  原来走 `tasklist /FI`（每 1s 轮询一次），且 `execFileSync` 未设
+  `windowsHide: true`，每次探测都会闪出一个 conhost 窗口（双实例下桌面每秒
+  闪 2 次 cmd 窗口）；现改为无窗口探测（ESRCH=死 / EPERM=活，实测可靠），
+  tasklist 仅保留作未知错误兜底并加 `windowsHide: true`。
+
 ## 0.3.66 (2026-09-08)
 
 - **refactor(ddns): 跟随 ddns 0.2.0 去 mock 重构**——mocks 独立为

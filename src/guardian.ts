@@ -26,8 +26,10 @@ import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
  *      - Linux: process.kill(pid, 0) + /proc/<pid>/stat starttime comparison
  *        to reject pid-reuse false positives
  *      - macOS: process.kill(pid, 0) (ESRCH = parent gone; zombies reaped by init)
- *      - Windows: tasklist /FI "PID eq <pid>" (process.kill(pid,0) semantics
- *        for nonexistent pids are unreliable there)
+ *      - Windows: process.kill(pid, 0) (ESRCH = gone, EPERM = exists).
+ *        Legacy tasklist fallback kept window-hidden (windowsHide: true)
+ *        — a bare `tasklist` spawn flashes a conhost window on every probe,
+ *        which at 1 Hz looked like constantly popping cmd windows.
  *
  * Spawn:  node guardian.ts <parentPid> <parentStarttime?> <intervalMs?>
  */
@@ -36,10 +38,19 @@ import { killRoleProcesses, killRoleProcessesSync } from "./cleanup.ts";
 export function parentAlive(pid: number, starttime: string): boolean {
   if (process.platform === "win32") {
     try {
+      process.kill(pid, 0);
+      return true;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code;
+      if (code === "EPERM") return true; // exists, but no permission to signal
+      if (code === "ESRCH") return false; // gone
+    }
+    // Unknown error: fall back to tasklist (window-hidden, no console flash).
+    try {
       const out = execFileSync(
         "tasklist",
         ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
       );
       return out.includes(`"${pid}"`);
     } catch {
