@@ -527,6 +527,12 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.k.urls": "URLs",
     "ui.exposes.none": "No active exposes",
     "ui.exposes.noneGuide": "Expand any port on the Ports tab to expose it — tunnels / router mapping / direct IPv6.",
+    "ui.ports.renamePlaceholder": "e.g. my-blog",
+    "ui.ports.renameHint": "Custom service name shown in the port list — leave empty to clear and fall back to the detected title.",
+    "ui.ports.renameClear": "Clear",
+    "ui.ports.renameSave": "Save",
+    "ui.ports.noneGuide": "Start a local service first (e.g. python3 -m http.server 8000), then refresh this page.",
+    "ui.status.startHint": "daemon not running (starts automatically on expose)",
   },
 
   zh: {
@@ -1037,6 +1043,12 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.k.urls": "链接",
     "ui.exposes.none": "还没有活动暴露",
     "ui.exposes.noneGuide": "在「端口」页签展开任意端口即可暴露——隧道 / 路由器映射 / IPv6 直连。",
+    "ui.ports.renamePlaceholder": "如：我的博客",
+    "ui.ports.renameHint": "显示在端口列表的自定义服务名——留空清除，回落到探测到的服务名。",
+    "ui.ports.renameClear": "清除",
+    "ui.ports.renameSave": "保存",
+    "ui.ports.noneGuide": "先在本地起一个服务（如 python3 -m http.server 8000），再刷新本页。",
+    "ui.status.startHint": "daemon 未运行（暴露时自动启动）",
   },
 };
 

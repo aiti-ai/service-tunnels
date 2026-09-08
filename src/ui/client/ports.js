@@ -31,7 +31,9 @@ function renderPorts(){
     html+='</div>';
   }
   if(!ports.length){
-    html+='<div class="empty">'+esc(tr('ui.ports.none'))+'</div>';
+    // L-k 空态引导：给下一步（起一个本地服务）
+    html+='<div class="empty"><div style="font-size:26px;margin-bottom:6px">🔍</div><p>'+esc(tr('ui.ports.none'))+'</p>'
+      +'<p class="hint" style="margin-top:8px;line-height:1.8">'+esc(tr('ui.ports.noneGuide'))+'</p></div>';
   } else {
     html+=ports.map((s)=>{
       const open=state.expanded.has(s.port);
@@ -169,12 +171,19 @@ function schemaFields(specs){
 // exposed globals used by inline onclick
 window.rowKey=(e,p)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();togglePort(p);}};
 window.togglePort=(p)=>{if(state.expanded.has(p))state.expanded.delete(p);else state.expanded.add(p);state._exposePort=p;renderTab();setTimeout(afterExposeFormMount,0);};
-// 服务重命名：用户自定义识别（label > 探测 title；留空清除）
-window.renameService=async(port)=>{
+// 服务重命名（L-i modal 化）：预填当前 label；「清除」与「保存」分立（留空=清除语义）
+window.renameService=(port)=>{
   const cur=((((state.live||{}).ports)||[]).find((p)=>p.port===port)||{}).identity?.label||'';
-  const name=prompt(tr('ui.ports.renamePrompt'),cur);
-  if(name===null)return;
-  try{await api('/api/port-label',{method:'POST',body:{port,label:name}});toast(tr('ui.ports.renamed'));await loadLive();}catch(e){toast(String(e),true);}
+  openModal('<h3>'+esc(tr('ui.ports.rename'))+' · <span class="mono">'+port+'</span></h3>'
+    +'<input id="rn-label" value="'+esc(cur)+'" placeholder="'+esc(tr('ui.ports.renamePlaceholder'))+'" style="width:100%">'
+    +'<div class="hint" style="margin-top:4px">'+esc(tr('ui.ports.renameHint'))+'</div>'
+    +'<div class="actions" style="margin-top:12px"><div class="spacer"></div>'
+    +'<button class="btn btn-danger" onclick="renameLabelDo('+port+',true)">'+esc(tr('ui.ports.renameClear'))+'</button>'
+    +'<button class="btn btn-primary" onclick="renameLabelDo('+port+',false)">'+esc(tr('ui.ports.renameSave'))+'</button></div>');
+};
+window.renameLabelDo=async(port,clear)=>{
+  const v=clear?'':document.getElementById('rn-label').value.trim();
+  try{await api('/api/port-label',{method:'POST',body:{port,label:v}});closeModal();toast(tr('ui.ports.renamed'));await loadLive();}catch(e){toast(String(e),true);}
 };
 window.stopExpose=async(name)=>{
   confirmDlg(tr('ui.ports.stopConfirm',{name}),tr('ui.ports.stopHint'),tr('ui.ports.stop'),async()=>{

@@ -74,6 +74,12 @@ function renderHeader(){
   dot.className='dot '+(running?'on':'off');
   txt.textContent=running?('daemon '+(d.pid||'')):tr('ui.status.stopped');
   document.getElementById('modeTxt').textContent=state.status&&state.status.mode?('mode: '+state.status.mode):'';
+  // L-j header 增强：库版本 + daemon 停止提示（pollTxt 位原为死节点，复用）
+  const poll=document.getElementById('pollTxt');
+  if(poll){
+    const ver=state.status&&state.status.version;
+    poll.textContent=(ver?('v'+ver):'')+((!running&&state.status)?((ver?' · ':'')+tr('ui.status.startHint')):'');
+  }
 }
 function renderTabs(){
   const el=document.getElementById('tabs');
