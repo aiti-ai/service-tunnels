@@ -5,8 +5,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { translate, resolveLang, localizeSpecs, withSchemaI18nKeys, createI18n, setLang, getLang, t } from "../src/i18n.ts";
-import { tunnelParamSchema } from "../src/tunnels.ts";
+// 密闭化：语言探测/默认实例依赖 process.env.LANG——先清除环境变量再动态加载
+// 模块（静态 import 会先于本代码求值，LANG=zh* 的机器上两个用例假红）。
+delete process.env.LANG;
+delete process.env.LC_ALL;
+const { translate, resolveLang, localizeSpecs, withSchemaI18nKeys, createI18n, setLang, getLang, t } = await import("../src/i18n.ts");
+const { tunnelParamSchema } = await import("../src/tunnels.ts");
 
 test("默认英文:spec 数据是英文(国际化 npm 包)", async () => {
   const ngrok = tunnelParamSchema("ngrok");
