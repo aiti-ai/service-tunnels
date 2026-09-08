@@ -1,3 +1,11 @@
+## 0.3.74 (2026-09-09)
+
+- **feat(exports): 官方 JS 子路径 `service-tunnels/i18n`、`/ui-shared`、`/port-identity`
+  + 根导出 `enrichWithIdentity` / `identifyPort` / `peekIdentity`**——pi-web 扩展等
+  嵌入方此前经 `./src/*.ts` 子路径消费（plain-node 测试环境不支持 strip
+  node_modules 内 .ts）；现提供编译产物 JS 子路径与根导出，运行时与测试
+  环境统一。`src/*.ts` 通配导出保留（内部/特殊场景）。
+
 ## 0.3.73 (2026-09-09)
 
 - **feat(ports): 实例 API `st.setServiceLabel(port, label)`**——用户自定义

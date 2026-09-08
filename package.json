@@ -1,6 +1,6 @@
 {
   "name": "service-tunnels",
-  "version": "0.3.73",
+  "version": "0.3.74",
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
@@ -14,7 +14,19 @@
     },
     "./src/index.ts": "./src/index.ts",
     "./src/*.ts": "./src/*.ts",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./i18n": {
+      "types": "./dist/i18n.d.ts",
+      "default": "./dist/i18n.js"
+    },
+    "./ui-shared": {
+      "types": "./dist/ui-shared.d.ts",
+      "default": "./dist/ui-shared.js"
+    },
+    "./port-identity": {
+      "types": "./dist/port-identity.d.ts",
+      "default": "./dist/port-identity.js"
+    }
   },
   "files": [
     "dist",

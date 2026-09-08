@@ -144,6 +144,7 @@ export {
 } from "./ddns.ts";
 export type { DdnsProviderKind, DdnsRecordConfig, DdnsUpdateResult, DdnsLoopHandle, BeaconTarget, DdnsEntry } from "./ddns.ts";
 export { readRegistryConfig, writeRegistryConfig, type DdnsRegistryConfig } from "./ddns-registry.ts";
+export { enrichWithIdentity, identifyPort, peekIdentity, type PortIdentity, type IdentityTarget } from "./port-identity.ts";
 export { createProxyServer, parseServiceHost, validBasicAuth, authHeader, proxyTarget, DEFAULT_SUFFIXES } from "./proxy.ts";
 export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 
