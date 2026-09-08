@@ -24,8 +24,8 @@ function renderPorts(){
         +(e.provider?'<span class="badge">auth: '+esc(e.provider)+'</span>':'<span class="badge authnone">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
         +'<span class="ok" style="font-size:10px">'+esc(tr('ui.ports.runningBadge'))+'</span>'
         +'<div class="spacer"></div>'
-        +'<button class="btn btn-sm" onclick="showExposeDetail(\''+e.name+'\')">'+esc(tr('ui.ports.detail'))+'</button>'
-        +'<button class="btn btn-sm btn-danger" onclick="stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button>'
+        +'<button class="btn btn-sm" data-st-detail="'+esc(e.name)+'">'+esc(tr('ui.ports.detail'))+'</button>'
+        +'<button class="btn btn-sm btn-danger" data-st-stop="'+esc(e.name)+'">'+esc(tr('ui.ports.stop'))+'</button>'
         +'</div>';
     }).join('');
     html+='</div>';
@@ -92,8 +92,8 @@ function expandPort(s,exs,urls){
       +(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':'<span class="badge authnone">'+esc(tr('ui.ports.authNoneBadge'))+'</span>')
       +'<span class="'+(e.running?'ok':'dim')+'" style="font-size:10px">'+(e.running?'● '+esc(tr('ui.tunnelRunning')):esc(tr('ui.tunnelStopped')))+'</span>'
       +'<div class="spacer"></div>'
-      +'<button class="btn btn-sm" onclick="showExposeDetail(\''+e.name+'\')">'+esc(tr('ui.ports.detail'))+'</button>'
-      +'<button class="btn btn-sm btn-danger" onclick="stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button></div>').join('');
+      +'<button class="btn btn-sm" data-st-detail="'+esc(e.name)+'">'+esc(tr('ui.ports.detail'))+'</button>'
+      +'<button class="btn btn-sm btn-danger" data-st-stop="'+esc(e.name)+'">'+esc(tr('ui.ports.stop'))+'</button></div>').join('');
   }
   h+='</div>';
   return h;
@@ -205,7 +205,7 @@ window.showExposeDetail=async(name)=>{
           logs+='<div class="section-label">'+esc(tr('ui.ports.logFiles'))+'</div>'
             +lf.files.map((f)=>'<div class="row" style="padding:3px 0;cursor:default"><span class="mono" style="font-size:10px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">'+esc(f.name)+'</span>'
             +'<span class="dim" style="font-size:10px">'+(f.size>=1048576?(f.size/1048576).toFixed(1)+' MB':f.size>=1024?(f.size/1024).toFixed(1)+' KB':f.size+' B')+'</span>'
-            +'<button class="btn btn-sm" onclick="showLogFile(\''+esc(f.path)+'\')">'+esc(tr('ui.ports.view'))+'</button></div>').join('');
+            +'<button class="btn btn-sm" data-logfile="'+esc(f.path)+'">'+esc(tr('ui.ports.view'))+'</button></div>').join('');
         }
       }catch(err){/* logs-list best-effort */}
     }
@@ -227,7 +227,7 @@ window.showExposeDetail=async(name)=>{
       +(links.length?kv(tr('ui.detail.k.urls'),links.map((u)=>'<div class="url-row"><a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a></div>').join('')):'')
       +logs
       +'<div class="actions" style="margin-top:12px"><div class="spacer"></div>'
-      +'<button class="btn btn-danger" onclick="closeModal();stopExpose(\''+e.name+'\')">'+esc(tr('ui.ports.stop'))+'</button>'
+      +'<button class="btn btn-danger" data-st-stop="'+esc(e.name)+'">'+esc(tr('ui.ports.stop'))+'</button>'
       +'<button class="btn" onclick="closeModal()">'+esc(tr('ui.close'))+'</button></div>');
   }catch(err){toast(String(err),true);}
 }
@@ -270,13 +270,9 @@ window.probeRouter=async()=>{
   try{
     const q=gwEl&&gwEl.value.trim()?('?gateway='+encodeURIComponent(gwEl.value.trim())):'';
     const r=await api('/api/portmap-probe'+q);
-    let msg;let bad=false;
-    if(r.ipClass==='cgnat'){msg=tr('ui.portmap.probeCgnat');bad=true;}
-    else if(r.ipClass==='public'){msg=tr('ui.portmap.probePublic');}
-    else if(r.upnp&&r.upnp.ok){msg=tr('ui.portmap.probeOkUpnp');}
-    else if(r.pcp&&r.pcp.ok){msg=tr('ui.portmap.probeOkPcp');}
-    else{msg=tr('ui.portmap.probeNone');bad=true;}
-    if(hint){hint.textContent=msg;hint.style.color=bad?'var(--danger)':'';}
+    const v=portmapProbeView(r);
+    const msg=tr(v.key);
+    if(hint){hint.textContent=msg;hint.style.color=v.bad?'var(--danger)':'';}
     toast(msg);
   }catch(e){
     const m=tr('ui.portmap.probeFail',{error:String(e.message||e)});
@@ -500,7 +496,15 @@ window.loadPresets=async()=>{
   }catch(e){/* best-effort */}
 };
 document.addEventListener('change',(e)=>{
-  // 委托监听（元素级绑定会在 10s 轮询重渲染后丢失——exp-mode 联动曾因此失灵）
+  // expose 行按钮统一 data 属性 + 事件委托（name/path 含引号时不再进 onclick JS 上下文）
+document.addEventListener('click',(ev)=>{
+  const el=ev.target instanceof Element?ev.target.closest('[data-st-detail],[data-st-stop],[data-logfile]'):null;
+  if(!el)return;
+  if(el.dataset.stDetail!==undefined)showExposeDetail(el.dataset.stDetail);
+  else if(el.dataset.stStop!==undefined)stopExpose(el.dataset.stStop);
+  else if(el.dataset.logfile!==undefined)showLogFile(el.dataset.logfile);
+});
+// 委托监听（元素级绑定会在 10s 轮询重渲染后丢失——exp-mode 联动曾因此失灵）
   if(e.target&&e.target.id==='exp-tunnel')refreshTunnelParams();
   if(e.target&&e.target.id==='exp-provider'){authManual=true;syncProviderFields();}
   if(e.target&&e.target.id==='exp-protocol')syncAuthDefault();

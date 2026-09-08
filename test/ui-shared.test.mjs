@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  modeOf, fmtAddr, fmtBytes, identityView, ddnsBadge, netcheckEventView, adviceView,
+  modeOf, fmtAddr, fmtBytes, identityView, ddnsBadge, netcheckEventView, adviceView, portmapProbeView,
 } from "../src/ui-shared.ts";
 import { CATALOG } from "../src/i18n.ts";
 
@@ -113,6 +113,16 @@ test("adviceView: confirmed/unconfirmed/untested 角标与语气", () => {
   assert.equal(adviceView({}).rank, 0);
 });
 
+// ── portmapProbeView ─────────────────────────────────────────────────────────
+test("portmapProbeView: CGNAT>公网>UPnP>PCP>不支持 决策单源", () => {
+  assert.deepEqual(portmapProbeView({ ipClass: "cgnat" }), { key: "ui.portmap.probeCgnat", bad: true });
+  assert.deepEqual(portmapProbeView({ ipClass: "public" }), { key: "ui.portmap.probePublic", bad: false });
+  assert.deepEqual(portmapProbeView({ ipClass: "private", upnp: { ok: true }, pcp: { ok: true } }), { key: "ui.portmap.probeOkUpnp", bad: false });
+  assert.deepEqual(portmapProbeView({ ipClass: "private", pcp: { ok: true } }), { key: "ui.portmap.probeOkPcp", bad: false });
+  assert.deepEqual(portmapProbeView({ ipClass: "private" }), { key: "ui.portmap.probeNone", bad: true });
+  assert.deepEqual(portmapProbeView(null), { key: "ui.portmap.probeNone", bad: true });
+});
+
 // ── 共享层 ⇄ core.js 回落实现 等价性（防双源漂移）────────────────────────────
 /** 从 core.js 提取 __stLocal 对象字面量并在隔离作用域求值（经典脚本，无模块系统）。 */
 function extractCoreFallback() {
@@ -179,6 +189,16 @@ test("core.js 回落实现与 ui-shared.ts 等价（漂移即红）", () => {
     {},
   ];
   for (const f of adviceFixtures) assert.deepEqual(local.adviceView(f), adviceView(f));
+
+  const probeFixtures = [
+    { ipClass: "cgnat" },
+    { ipClass: "public" },
+    { ipClass: "private", upnp: { ok: true } },
+    { ipClass: "private", pcp: { ok: true } },
+    { ipClass: "private" },
+    null,
+  ];
+  for (const f of probeFixtures) assert.deepEqual(local.portmapProbeView(f), portmapProbeView(f));
 });
 
 // ── i18n 键存在性：netcheckEventView 引用的每个键在 en/zh 都有译文 ─────────────
@@ -192,7 +212,7 @@ test("netcheckEventView/adviceView 引用的 i18n 键在 CATALOG en/zh 齐备", 
     { type: "summary", report: {}, text: "", markdown: "" }, { type: "done", report: {} },
     { type: "error", message: "m" }, { type: "cancelled" }, { type: "unknown-x" },
   ];
-  const keys = new Set(["ui.doctor.advice.confirmed", "ui.doctor.advice.unconfirmed", "ui.doctor.advice.untested"]);
+  const keys = new Set(["ui.doctor.advice.confirmed", "ui.doctor.advice.unconfirmed", "ui.doctor.advice.untested", "ui.portmap.probeCgnat", "ui.portmap.probePublic", "ui.portmap.probeOkUpnp", "ui.portmap.probeOkPcp", "ui.portmap.probeNone"]);
   for (const ev of events) keys.add(netcheckEventView(ev).textKey);
   for (const lang of ["en", "zh"]) {
     for (const k of keys) {

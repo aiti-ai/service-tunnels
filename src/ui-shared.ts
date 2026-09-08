@@ -114,6 +114,29 @@ export function ddnsBadge(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// portmap 探测结果 → 表单 hint（双端同一段 if-else 的单源化）
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PortmapProbeView {
+  /** hint 文案键（ui.portmap.probe*，权威表在 CATALOG）。 */
+  key: string;
+  /** true = 结论不利于 portmap（CGNAT/路由器不支持）→ 渲染端着色提示。 */
+  bad: boolean;
+}
+
+/** probePortmap 报告 → hint 键与语气（CGNAT > 公网直连 > UPnP > PCP > 不支持）。 */
+export function portmapProbeView(
+  report: { ipClass?: string; upnp?: { ok?: boolean }; pcp?: { ok?: boolean } } | null | undefined,
+): PortmapProbeView {
+  const cls = report?.ipClass;
+  if (cls === "cgnat") return { key: "ui.portmap.probeCgnat", bad: true };
+  if (cls === "public") return { key: "ui.portmap.probePublic", bad: false };
+  if (report?.upnp?.ok) return { key: "ui.portmap.probeOkUpnp", bad: false };
+  if (report?.pcp?.ok) return { key: "ui.portmap.probeOkPcp", bad: false };
+  return { key: "ui.portmap.probeNone", bad: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // doctor（netcheck）事件渲染 — 双端同构（契约冻结：键名 ui.doctor.ev.<type>）
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -197,6 +220,7 @@ const exportsTable = {
   ddnsBadge,
   netcheckEventView,
   adviceView,
+  portmapProbeView,
 };
 type ExportsTable = typeof exportsTable;
 

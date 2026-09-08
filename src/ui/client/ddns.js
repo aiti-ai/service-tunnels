@@ -12,6 +12,7 @@ async function renderDdns(){
     }
     const d=await api('/api/ddns-registry',{method:'GET'});
     const pps=d.providerProfiles||{};
+    state._ddnsPps=pps; // token 查表（不落 DOM 属性）
     const profs=d.profiles||{};
     const entries=d.entries||[];
     let h='';
@@ -27,7 +28,7 @@ async function renderDdns(){
       +(Object.keys(pps).length
         ?'<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.ddns.pp.name'))+'</th><th>'+esc(tr('ui.ddns.pp.provider'))+'</th><th>token</th><th></th></tr></thead><tbody>'
           +Object.keys(pps).map((k)=>'<tr><td class="mono">'+esc(k)+'</td><td>'+esc(pps[k].provider||'')+'</td>'
-            +'<td class="mono"><span class="ddns-tok" data-tok="'+esc(pps[k].token||'')+'">••••••••</span> '
+            +'<td class="mono"><span class="ddns-tok" data-pp="'+esc(k)+'">••••••••</span> '
             +'<button class="icon-btn" title="'+esc(tr('ui.ddns.reveal'))+'" onclick="toggleToken(this)" aria-label="'+esc(tr('ui.ddns.reveal'))+'">👁</button></td>'
             +'<td><button class="btn btn-sm btn-danger" data-del-pp="'+esc(k)+'">'+esc(tr('ui.ddns.del'))+'</button></td></tr>').join('')
           +'</tbody></table></div>'
@@ -176,7 +177,9 @@ function ddnsProviderOptions(){
 window.toggleToken=(btn)=>{
   const span=btn.parentElement.querySelector('.ddns-tok');
   const shown=span.dataset.shown==='1';
-  span.textContent=shown?'••••••••':(span.dataset.tok||'—');
+  const pps=state._ddnsPps||{};
+  const tok=(pps[span.dataset.pp]||{}).token||'—';
+  span.textContent=shown?'••••••••':tok;
   span.dataset.shown=shown?'':'1';
   btn.title=tr(shown?'ui.ddns.reveal':'ui.ddns.hide');
 };
