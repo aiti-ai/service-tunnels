@@ -11,8 +11,10 @@ async function api(path,opts){
 }
 // ── state ────────────────────────────────────────────────────────────────
 const state={status:null,live:null,lang:(document.documentElement.lang==='zh-CN'?'zh':'en'),expanded:new Set(),logsFor:null,logsData:null,tab:'ports',protoDetect:{},authDefault:'',presets:{tunnelPresets:{},authPresets:{}},_tunnelPresetName:null,_authPresetName:null};
-const TABS=['ports','exposes','users','tokens','sites','tools','config','ddns'];
-const TAB_LABELS={ports:tr('ui.nav.dashboard'),exposes:tr('ui.nav.expose'),users:tr('ui.nav.users'),tokens:tr('ui.nav.tokens'),sites:tr('ui.nav.sites'),tools:tr('ui.tools.tab'),config:tr('ui.nav.config'),ddns:tr('ui.nav.ddns')};
+const TABS=['ports','exposes','users','tokens','sites','tools','config','ddns','doctor'];
+const TAB_LABELS={ports:tr('ui.nav.dashboard'),exposes:tr('ui.nav.expose'),users:tr('ui.nav.users'),tokens:tr('ui.nav.tokens'),sites:tr('ui.nav.sites'),tools:tr('ui.tools.tab'),config:tr('ui.nav.config'),ddns:tr('ui.nav.ddns'),doctor:tr('ui.nav.doctor')};
+/** doctor tab 能力门控：/api/status netcheck=false（未实现且未开 mock）→ 隐藏。 */
+function visibleTabs(){return TABS.filter((t)=>t!=='doctor'||canDoctor());}
 let pollTimer=null;
 // ── helpers ──────────────────────────────────────────────────────────────
 function esc(v){return String(v??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
@@ -70,8 +72,10 @@ function renderHeader(){
 }
 function renderTabs(){
   const el=document.getElementById('tabs');
-  el.innerHTML=TABS.map((t)=>'<button class="tab'+(state.tab===t?' active':'')+'" data-tab="'+t+'">'+esc(TAB_LABELS[t])+'</button>').join('');
+  const tabs=visibleTabs();
+  if(!tabs.includes(state.tab))state.tab=tabs[0];
+  el.innerHTML=tabs.map((t)=>'<button class="tab'+(state.tab===t?' active':'')+'" data-tab="'+t+'" role="tab" aria-selected="'+(state.tab===t)+'">'+esc(TAB_LABELS[t])+'</button>').join('');
   el.querySelectorAll('.tab').forEach((b)=>b.onclick=()=>{state.tab=b.dataset.tab;location.hash='#/'+state.tab;renderTabs();renderTab();});
 }
-function renderTab(){const f={ports:renderPorts,exposes:renderExposes,users:renderUsers,tokens:renderTokens,sites:renderSites,tools:renderTools,config:renderConfig,ddns:renderDdns}[state.tab];f();}
+function renderTab(){const f={ports:renderPorts,exposes:renderExposes,users:renderUsers,tokens:renderTokens,sites:renderSites,tools:renderTools,config:renderConfig,ddns:renderDdns,doctor:renderDoctor}[state.tab];if(f)f();}
 // ── ports tab ────────────────────────────────────────────────────────────

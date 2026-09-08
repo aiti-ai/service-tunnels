@@ -414,6 +414,16 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.leaseLeft": "Lease remaining",
     "ui.detail.ipv6Entry": "IPv6 entry",
     "ui.detail.ipv6Candidates": "Candidate addresses",
+
+    // ── doctor tab（L-d 骨架；事件文案键 ui.doctor.ev.* 由 ui-shared 单源引用）──
+    "ui.nav.doctor": "Doctor",
+    "ui.doctor.start": "Run netcheck",
+    "ui.doctor.stop": "Stop",
+    "ui.doctor.running": "netcheck running…",
+    "ui.doctor.advice": "Suggestions",
+    "ui.doctor.report": "Report",
+    "ui.doctor.copyMd": "Copy Markdown",
+    "ui.doctor.copied": "copied",
   },
 
   zh: {
@@ -811,6 +821,16 @@ export const CATALOG: Record<Lang, Record<string, string>> = {
     "ui.detail.leaseLeft": "租约剩余",
     "ui.detail.ipv6Entry": "IPv6 入口",
     "ui.detail.ipv6Candidates": "候选地址",
+
+    // ── doctor tab（L-d 骨架；事件文案键 ui.doctor.ev.* 由 ui-shared 单源引用）──
+    "ui.nav.doctor": "体检",
+    "ui.doctor.start": "开始体检",
+    "ui.doctor.stop": "停止",
+    "ui.doctor.running": "体检进行中…",
+    "ui.doctor.advice": "建议",
+    "ui.doctor.report": "报告",
+    "ui.doctor.copyMd": "复制 Markdown",
+    "ui.doctor.copied": "已复制",
   },
 };
 

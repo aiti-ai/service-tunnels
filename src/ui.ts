@@ -54,7 +54,7 @@ function clientDir(): string {
   return join(dirname(import.meta.dirname), "src", "ui", "client");
 }
 
-const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.js", "sites.js", "tools.js", "config.js", "ddns.js", "main.js"];
+const CLIENT_FILES = ["core.js", "ports.js", "exposes.js", "users.js", "tokens.js", "sites.js", "tools.js", "config.js", "ddns.js", "doctor.js", "main.js"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SPA shell — HTML + CSS only; 前端 JS 全部外置到 /ui/*.js（模块化）
@@ -91,7 +91,8 @@ button{font:inherit;cursor:pointer}
 .svc-rename{opacity:.4;padding:2px 7px;font-size:11px;flex:none}
 .svc-rename:hover{opacity:1}
 .mono{font-family:ui-monospace,monospace}
-.dim{color:var(--dim)} .ok{color:var(--ok)} .bad{color:var(--danger)}
+.dim{color:var(--dim)} .ok{color:var(--ok)} .bad{color:var(--danger)} .warn{color:#b45309}
+.badge.warn{background:rgba(180,83,9,.15);color:#b45309}
 .badge{display:inline-block;padding:1px 7px;border-radius:4px;background:rgba(128,128,128,.14);color:var(--dim);font-size:10px;white-space:nowrap}
 .badge.authnone{background:rgba(248,113,113,.15);border:1px solid rgba(248,113,113,.45);color:var(--danger);font-weight:700}
 .badge.ssh{background:rgba(124,58,237,.15);color:#7c3aed}
@@ -171,6 +172,7 @@ window.UI_CSRF = '${csrf}';
 <script src="/ui/sites.js"></script>
 <script src="/ui/tools.js"></script>
 <script src="/ui/ddns.js"></script>
+<script src="/ui/doctor.js"></script>
 <script src="/ui/config.js"></script>
 <script src="/ui/main.js"></script>
 </body>

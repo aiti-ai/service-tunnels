@@ -29,6 +29,14 @@ function hasNetcheck(st: UiContext["st"]): boolean {
   return typeof (st as { netcheck?: { run?: unknown } }).netcheck?.run === "function";
 }
 
+/** doctor hub 惰性单例（挂在 UiContext 上，与 UI server 同生命周期）。 */
+function getDoctorHub(ctx: UiContext) {
+  const o = ctx as UiContext & { _doctorHub?: ReturnType<typeof createDoctorHub> };
+  if (!o._doctorHub) o._doctorHub = createDoctorHub(o.st);
+  return o._doctorHub;
+}
+import { createDoctorHub, doctorMockEnabled, doctorAvailable } from "./ui-doctor.ts";
+
 /** Promise 超时兜底（超时/拒绝 → fallback，外呼探测不拖死 UI 轮询）。 */
 async function withTimeout<T>(p: Promise<T> | undefined, ms: number, fallback: T): Promise<T> {
   if (!p) return fallback;
@@ -81,7 +89,8 @@ if (path === "/api/status" && req.method === "GET") {
     daemon: dstat,
     mode: dstat.running ? "daemon" : "embedded",
     version: libVersion(),
-    netcheck: hasNetcheck(st),
+    // 真实实现优先；ST_UI_DOCTOR_MOCK=1 时 mock 骨架点亮（dev/test 专用）
+    netcheck: hasNetcheck(st) || doctorMockEnabled(),
   });
   return true;
 }
@@ -658,6 +667,34 @@ if (path === "/api/ipv6-addresses" && req.method === "GET") {
   const addresses = (o._listIpv6 ?? listIpv6Addresses)();
   const publicAddrs = await withTimeout((o._detectPublicIpv6 ?? detectPublicIpv6)(), 4_000, [] as string[]);
   json(res, 200, { addresses, public: publicAddrs });
+  return true;
+}
+
+// ── doctor（netcheck）：job 单例 + SSE 事件流（骨架；真实事件源落库后自动切换）──
+if (path === "/api/doctor-start" && req.method === "POST") {
+  if (!doctorAvailable(ctx.st)) {
+    json(res, 404, { error: "netcheck not available on this install" });
+    return true;
+  }
+  const body = await readJson<{ mode?: string }>(req);
+  try {
+    json(res, 200, await getDoctorHub(ctx).start(body));
+  } catch (err) {
+    json(res, 409, { error: err instanceof Error ? err.message : String(err) });
+  }
+  return true;
+}
+if (path === "/api/doctor-stop" && req.method === "POST") {
+  if (!doctorAvailable(ctx.st)) { json(res, 404, { error: "netcheck not available" }); return true; }
+  getDoctorHub(ctx).stop();
+  json(res, 200, { stopped: true });
+  return true;
+}
+if (path === "/api/doctor-events" && req.method === "GET") {
+  if (!doctorAvailable(ctx.st)) { json(res, 404, { error: "netcheck not available" }); return true; }
+  const lastEventId = req.headers["last-event-id"];
+  const ok = getDoctorHub(ctx).subscribe(res, Array.isArray(lastEventId) ? lastEventId[0] : lastEventId);
+  if (!ok) json(res, 503, { error: "too many doctor streams — reuse an existing connection" });
   return true;
 }
 
