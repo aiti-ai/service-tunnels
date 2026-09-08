@@ -4,6 +4,10 @@ async function renderSites(){
   try{
     const d=await api('/api/sites-list',{method:'GET'});
     const sites=d.sites||[];
+    if(!sites.length){
+      c.innerHTML='<div class="empty"><div style="font-size:24px;margin-bottom:6px">🏠</div>'+esc(tr('ui.sites.none'))+'<p class="hint" style="margin-top:6px">'+esc(tr('ui.sites.noneGuide'))+'</p></div>';
+      return;
+    }
     let h=sites.map((s)=>{
       const urls=[s.localUrl,s.baseUrl,s.domainUrl].filter(Boolean);
       return '<div class="card" style="padding:12px"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
