@@ -44,7 +44,7 @@ import { createProxyServer, parseServiceHost, validBasicAuth, proxyTarget, DEFAU
 import { TunnelManager, extractTunnelUrl, tunnelSupportsTcp, tunnelParamSchema, tunnelParamSchemas, tunnelMeta, tunnelMetas, type TunnelConfig, type TunnelInfo, type TunnelType, type ParamSpec, type TunnelMeta , TUNNEL_SCHEMAS_VERSION } from "./tunnels.ts";
 import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readDdnsConfigs, updateBeacon } from "./ddns.ts";
-import { readRegistryConfig, registerTunnel, registerPortmap, type RegistrationEntry } from "./ddns-registry.ts";
+import { readRegistryConfig, writeRegistryConfig, registerTunnel, registerPortmap, type RegistrationEntry } from "./ddns-registry.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
 import { expose as exposeFlow, listIpv6Transports, stopIpv6Transport, type ExposeOptions, type ExposeResult } from "./expose.ts";
 import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
@@ -143,6 +143,7 @@ export {
   beaconValue,
 } from "./ddns.ts";
 export type { DdnsProviderKind, DdnsRecordConfig, DdnsUpdateResult, DdnsLoopHandle, BeaconTarget, DdnsEntry } from "./ddns.ts";
+export { readRegistryConfig, writeRegistryConfig, type DdnsRegistryConfig } from "./ddns-registry.js";
 export { createProxyServer, parseServiceHost, validBasicAuth, authHeader, proxyTarget, DEFAULT_SUFFIXES } from "./proxy.ts";
 export type { ProxyOptions, ServiceHostMatch } from "./proxy.ts";
 

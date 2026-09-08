@@ -1,3 +1,11 @@
+## 0.3.71 (2026-09-09)
+
+- **fix(ddns): 补齐 0.3.70 意图——`readRegistryConfig` / `writeRegistryConfig` /
+  `DdnsRegistryConfig` 根导出**——0.3.70 发布时该修改因并行改动被覆盖丢失
+  （CHANGELOG 已述、dist 未含导出）；本版补齐。pi-web 扩展等嵌入方据此
+  回归根入口（免去 `src/ddns-registry.ts` 子路径 .ts import——plain-node
+  测试环境不支持 strip node_modules 内 .ts）。
+
 ## 0.3.70 (2026-09-09)
 
 - **feat(ddns): `readRegistryConfig` / `writeRegistryConfig` / `DdnsRegistryConfig` 提升根导出**——
