@@ -1,148 +1,194 @@
-/** DDNS registration tab — provider profiles (credentials), profiles
- *  (provider+domain targets) and registration entries (portmap/tunnel →
- *  A/TXT/CNAME auto-registration). Zero-dependency, like the other tabs. */
+/** DDNS tab（L-e 重做）— provider 凭据 / profiles / 注册条目 三卡片。
+ *  provider 枚举走 /api/ddns-providers（120 家下拉）；token 遮蔽 + 👁 切换；
+ *  必填/格式校验行内报错；空态引导；文案全量 ui.ddns.*。零依赖，同其他 tab。 */
 
 async function renderDdns(){
   const c=document.getElementById('content');
   c.innerHTML='<div class="muted">'+esc(tr('ui.ports.loading'))+'…</div>';
   try{
+    if(!state.ddnsProviders){
+      try{const p=await api('/api/ddns-providers');state.ddnsProviders=p.providers||[];}
+      catch(e){state.ddnsProviders=[];}
+    }
     const d=await api('/api/ddns-registry',{method:'GET'});
     const pps=d.providerProfiles||{};
     const profs=d.profiles||{};
     const entries=d.entries||[];
-
-    let h='<div class="card" style="padding:12px;margin-bottom:10px">'
-      +'<div class="section-label">Provider Profiles（凭据）</div>'
-      +'<table><tbody>'
-      +Object.keys(pps).map((k)=>'<tr><td class="mono">'+esc(k)+'</td><td>'+esc(pps[k].provider||'')+'</td>'
-        +'<td><button data-del-pp="'+esc(k)+'">删除</button></td></tr>').join('')
-      +'</tbody></table>'
-      +'<div style="margin-top:6px"><input id="ddns-pp-name" placeholder="profile名" style="width:110px"> '
-      +'<input id="ddns-pp-provider" placeholder="provider" style="width:110px"> '
-      +'<input id="ddns-pp-token" type="password" placeholder="token" style="width:160px"> '
-      +'<button id="ddns-pp-add">+ 添加</button></div></div>';
-
+    let h='';
+    // 空态引导（L-k）：先凭据 → 再 profile → exposes 表单绑定自动注册
+    if(!Object.keys(pps).length&&!Object.keys(profs).length&&!entries.length){
+      h+='<div class="empty"><div style="font-size:26px;margin-bottom:6px">🌐</div>'
+        +'<p>'+esc(tr('ui.ddns.emptyTitle'))+'</p>'
+        +'<p class="hint" style="margin-top:6px;line-height:1.8">'+esc(tr('ui.ddns.emptyGuide'))+'</p></div>';
+    }
+    // ── 卡片 1：provider 凭据 ──
     h+='<div class="card" style="padding:12px;margin-bottom:10px">'
-      +'<div class="section-label">Profiles（provider+域名目标）</div>'
-      +'<table><tbody>'
-      +Object.keys(profs).map((k)=>'<tr><td class="mono">'+esc(k)+'</td>'
-        +'<td>pp: '+esc(profs[k].providerProfile||'-')+'</td>'
-        +'<td class="mono">'+esc(profs[k].zone||'')+'</td>'
-        +'<td class="mono">'+esc(profs[k].record||'')+'</td>'
-        +'<td class="mono">txt: '+esc(profs[k].txtName||'-')+'</td>'
-        +'<td><button data-del-pf="'+esc(k)+'">删除</button></td></tr>').join('')
-      +'</tbody></table>'
-      +'<div style="margin-top:6px"><input id="ddns-pf-name" placeholder="profile名" style="width:100px"> '
-      +'<input id="ddns-pf-pp" placeholder="providerProfile" style="width:110px"> '
-      +'<input id="ddns-pf-zone" placeholder="zone" style="width:130px"> '
-      +'<input id="ddns-pf-record" placeholder="record(CNAME/A)" style="width:150px"> '
-      +'<input id="ddns-pf-txt" placeholder="txtName" style="width:150px"> '
-      +'<button id="ddns-pf-add">+ 添加</button></div></div>';
-
+      +'<div class="section-label">'+esc(tr('ui.ddns.pp.title'))+'</div>'
+      +(Object.keys(pps).length
+        ?'<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.ddns.pp.name'))+'</th><th>'+esc(tr('ui.ddns.pp.provider'))+'</th><th>token</th><th></th></tr></thead><tbody>'
+          +Object.keys(pps).map((k)=>'<tr><td class="mono">'+esc(k)+'</td><td>'+esc(pps[k].provider||'')+'</td>'
+            +'<td class="mono"><span class="ddns-tok" data-tok="'+esc(pps[k].token||'')+'">••••••••</span> '
+            +'<button class="icon-btn" title="'+esc(tr('ui.ddns.reveal'))+'" onclick="toggleToken(this)" aria-label="'+esc(tr('ui.ddns.reveal'))+'">👁</button></td>'
+            +'<td><button class="btn btn-sm btn-danger" data-del-pp="'+esc(k)+'">'+esc(tr('ui.ddns.del'))+'</button></td></tr>').join('')
+          +'</tbody></table></div>'
+        :'<div class="muted">'+esc(tr('ui.ddns.pp.empty'))+'</div>')
+      +'<div class="form-grid" style="margin-top:8px">'
+      +'<div><label>'+esc(tr('ui.ddns.pp.name'))+' *</label><input id="ddns-pp-name" placeholder="cloudflare-main"></div>'
+      +'<div><label>'+esc(tr('ui.ddns.pp.provider'))+' *</label><select id="ddns-pp-provider">'+ddnsProviderOptions()+'</select></div>'
+      +'<div><label>token *</label><input id="ddns-pp-token" type="password" autocomplete="off" style="padding-right:26px"><button class="icon-btn ddns-eye" onclick="toggleTokenInput(this)" title="'+esc(tr('ui.ddns.reveal'))+'">👁</button></div>'
+      +'</div><div class="bad hint" id="ddns-pp-err" style="display:none"></div>'
+      +'<div style="margin-top:6px"><button class="btn btn-sm btn-primary" id="ddns-pp-add">'+esc(tr('ui.ddns.add'))+'</button></div></div>';
+    // ── 卡片 2：profiles（provider+域名目标）──
+    h+='<div class="card" style="padding:12px;margin-bottom:10px">'
+      +'<div class="section-label">'+esc(tr('ui.ddns.pf.title'))+'</div>'
+      +(Object.keys(profs).length
+        ?'<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.ddns.pf.name'))+'</th><th>'+esc(tr('ui.ddns.pp.name'))+'</th><th>zone</th><th>record</th><th>txtName</th><th></th></tr></thead><tbody>'
+          +Object.keys(profs).map((k)=>'<tr><td class="mono">'+esc(k)+'</td>'
+            +'<td class="mono">'+esc(profs[k].providerProfile||'-')+'</td>'
+            +'<td class="mono">'+esc(profs[k].zone||'')+'</td>'
+            +'<td class="mono">'+esc(profs[k].record||'-')+'</td>'
+            +'<td class="mono">'+esc(profs[k].txtName||'-')+'</td>'
+            +'<td><button class="btn btn-sm btn-danger" data-del-pf="'+esc(k)+'">'+esc(tr('ui.ddns.del'))+'</button></td></tr>').join('')
+          +'</tbody></table></div>'
+        :'<div class="muted">'+esc(tr('ui.ddns.pf.empty'))+'</div>')
+      +'<div class="form-grid" style="margin-top:8px">'
+      +'<div><label>'+esc(tr('ui.ddns.pf.name'))+' *</label><input id="ddns-pf-name" placeholder="home-tunnel"></div>'
+      +'<div><label>'+esc(tr('ui.ddns.pf.pp'))+' *</label><select id="ddns-pf-pp">'+Object.keys(pps).map((k)=>'<option value="'+esc(k)+'">'+esc(k)+'</option>').join('')+'</select></div>'
+      +'<div><label>zone *</label><input id="ddns-pf-zone" placeholder="example.com"></div>'
+      +'<div><label>record</label><input id="ddns-pf-record" placeholder="CNAME / A"></div>'
+      +'<div><label>txtName</label><input id="ddns-pf-txt" placeholder="_st.home.example.com"></div>'
+      +'</div><div class="bad hint" id="ddns-pf-err" style="display:none"></div>'
+      +'<div style="margin-top:6px"><button class="btn btn-sm btn-primary" id="ddns-pf-add">'+esc(tr('ui.ddns.add'))+'</button></div></div>';
+    // ── 卡片 3：注册条目 ──
+    const kindSel=(id)=>'<select id="'+id+'"><option value="tunnel">tunnel</option><option value="portmap">portmap</option><option value="ipv6">ipv6</option></select>';
+    const flagBoxes=(p)=>['cname:CNAME','txtUrl:TXT(url)','ip:A','aaaa:AAAA','txt:TXT(ip:port)'].map((f)=>{const [k,l]=f.split(':');return '<label style="display:inline-flex;align-items:center;gap:4px;margin-right:8px"><input type="checkbox" id="ddns-'+p+'-'+k+'"> '+l+'</label>';}).join('');
     h+='<div class="card" style="padding:12px">'
-      +'<div class="section-label">Registration Entries（portmap/tunnel → 自动注册）</div>'
-      +'<table><tbody>'
-      +entries.map((e,i)=>'<tr><td class="mono">'+esc(e.name)+'</td>'
-        +'<td>'+esc(e.kind||'')+'</td>'
-        +'<td>'+(e.profile?'profile: '+esc(e.profile):(e.provider?'provider: '+esc(e.provider):(e.providerProfile?'pp: '+esc(e.providerProfile):'-')))+'</td>'
-        +'<td>'+(e.zone?esc(e.zone):'-')+'</td>'
-        +'<td class="mono">'+esc(e.record||'-')+'</td>'
-        +'<td class="mono">txt: '+esc(e.txtName||'-')+'</td>'
-        +'<td>follow: '+esc(e.followTunnel||'-')+'</td>'
-        +'<td>'+(e.ip?'A ':'')+(e.aaaa?'AAAA ':'')+(e.txt?'TXT(ip:port) ':'')+(e.cname?'CNAME ':'')+(e.txtUrl?'TXT(url) ':'')+'</td>'
-        +'<td><button data-del-entry="'+i+'">删除</button></td></tr>').join('')
-      +'</tbody></table>'
-      // 添加表单：profile 引用（快捷）
-      +'<div class="section-label" style="margin-top:10px">添加（profile 引用）</div>'
-      +'<div style="margin-top:4px"><input id="ddns-e-name" placeholder="条目名" style="width:90px"> '
-      +'<input id="ddns-e-profile" placeholder="profile" style="width:100px"> '
-      +'<select id="ddns-e-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option><option value="ipv6">ipv6</option></select> '
-      +'<input id="ddns-e-follow" placeholder="followTunnel" style="width:110px"> '
-      +'<label><input type="checkbox" id="ddns-e-cname"> CNAME</label> '
-      +'<label><input type="checkbox" id="ddns-e-txturl"> TXT(url)</label> '
-      +'<label><input type="checkbox" id="ddns-e-ip"> A</label> '
-      +'<label><input type="checkbox" id="ddns-e-aaaa"> AAAA</label> '
-      +'<label><input type="checkbox" id="ddns-e-txt"> TXT(ip:port)</label> '
-      +'<button id="ddns-e-add">+ 添加</button></div>'
-      // 添加表单：完整信息直填（不依赖 profile）
-      +'<div class="section-label" style="margin-top:10px">添加（完整信息，单独注册）</div>'
-      +'<div style="margin-top:4px"><input id="ddns-e2-name" placeholder="条目名" style="width:90px"> '
-      +'<input id="ddns-e2-provider" placeholder="provider" style="width:110px"> '
-      +'<input id="ddns-e2-token" type="password" placeholder="token" style="width:140px"> '
-      +'<input id="ddns-e2-zone" placeholder="zone" style="width:130px"> '
-      +'<input id="ddns-e2-record" placeholder="record" style="width:140px"> '
-      +'<input id="ddns-e2-txtname" placeholder="txtName" style="width:130px"> '
-      +'<select id="ddns-e2-kind"><option value="tunnel">tunnel</option><option value="portmap">portmap</option><option value="ipv6">ipv6</option></select> '
-      +'<input id="ddns-e2-follow" placeholder="followTunnel" style="width:110px"> '
-      +'<label><input type="checkbox" id="ddns-e2-cname"> CNAME</label> '
-      +'<label><input type="checkbox" id="ddns-e2-txturl"> TXT(url)</label> '
-      +'<label><input type="checkbox" id="ddns-e2-ip"> A</label> '
-      +'<label><input type="checkbox" id="ddns-e2-aaaa"> AAAA</label> '
-      +'<label><input type="checkbox" id="ddns-e2-txt"> TXT(ip:port)</label> '
-      +'<button id="ddns-e2-add">+ 添加</button></div></div>';
+      +'<div class="section-label">'+esc(tr('ui.ddns.e.title'))+'</div>'
+      +(entries.length
+        ?'<div class="tbl-wrap"><table><thead><tr><th>'+esc(tr('ui.ddns.e.name'))+'</th><th>kind</th><th>'+esc(tr('ui.ddns.e.target'))+'</th><th>zone</th><th>record</th><th>txtName</th><th>follow</th><th>'+esc(tr('ui.ddns.e.flags'))+'</th><th></th></tr></thead><tbody>'
+          +entries.map((e,i)=>'<tr><td class="mono">'+esc(e.name)+'</td><td>'+esc(e.kind||'')+'</td>'
+            +'<td>'+(e.profile?'<span class="badge">profile: '+esc(e.profile)+'</span>':(e.provider?'<span class="badge">'+esc(e.provider)+'</span>':(e.providerProfile?'<span class="badge">pp: '+esc(e.providerProfile)+'</span>':'<span class="dim">-</span>')))+'</td>'
+            +'<td class="mono">'+esc(e.zone||'-')+'</td>'
+            +'<td class="mono">'+esc(e.record||'-')+'</td>'
+            +'<td class="mono">'+esc(e.txtName||'-')+'</td>'
+            +'<td class="mono">'+esc(e.followTunnel||'-')+'</td>'
+            +'<td>'+['ip:A','aaaa:AAAA','txt:TXT','cname:CNAME','txtUrl:TXT(url)'].map((f)=>{const [k,l]=f.split(':');return e[k]?'<span class="badge">'+l+'</span>':'';}).join(' ')+'</td>'
+            +'<td><button class="btn btn-sm btn-danger" data-del-entry="'+i+'">'+esc(tr('ui.ddns.del'))+'</button></td></tr>').join('')
+          +'</tbody></table></div>'
+        :'<div class="muted">'+esc(tr('ui.ddns.e.empty'))+'</div>')
+      // 添加表单 A：profile 引用
+      +'<div class="section-label" style="margin-top:10px">'+esc(tr('ui.ddns.e.addByProfile'))+'</div>'
+      +'<div class="form-grid">'
+      +'<div><label>'+esc(tr('ui.ddns.e.name'))+' *</label><input id="ddns-e-name" placeholder="web-tunnel"></div>'
+      +'<div><label>'+esc(tr('ui.ddns.pf.name'))+' *</label><select id="ddns-e-profile">'+Object.keys(profs).map((k)=>'<option value="'+esc(k)+'">'+esc(k)+'</option>').join('')+'</select></div>'
+      +'<div><label>kind *</label>'+kindSel('ddns-e-kind')+'</div>'
+      +'<div><label>followTunnel</label><input id="ddns-e-follow" placeholder="tunnel name"></div>'
+      +'</div>'
+      +'<div style="margin-top:6px">'+flagBoxes('e')+'</div>'
+      +'<div class="bad hint" id="ddns-e-err" style="display:none"></div>'
+      +'<div style="margin-top:4px"><button class="btn btn-sm btn-primary" id="ddns-e-add">'+esc(tr('ui.ddns.add'))+'</button></div>'
+      // 添加表单 B：完整信息直填
+      +'<div class="section-label" style="margin-top:12px">'+esc(tr('ui.ddns.e.addFull'))+'</div>'
+      +'<div class="form-grid">'
+      +'<div><label>'+esc(tr('ui.ddns.e.name'))+' *</label><input id="ddns-e2-name" placeholder="home-a"></div>'
+      +'<div><label>'+esc(tr('ui.ddns.pp.provider'))+' *</label><select id="ddns-e2-provider">'+ddnsProviderOptions()+'</select></div>'
+      +'<div><label>token</label><input id="ddns-e2-token" type="password" autocomplete="off"></div>'
+      +'<div><label>zone *</label><input id="ddns-e2-zone" placeholder="example.com"></div>'
+      +'<div><label>record</label><input id="ddns-e2-record" placeholder="home.example.com"></div>'
+      +'<div><label>txtName</label><input id="ddns-e2-txtname" placeholder="_st.home.example.com"></div>'
+      +'<div><label>kind *</label>'+kindSel('ddns-e2-kind')+'</div>'
+      +'<div><label>followTunnel</label><input id="ddns-e2-follow" placeholder="tunnel name"></div>'
+      +'</div>'
+      +'<div style="margin-top:6px">'+flagBoxes('e2')+'</div>'
+      +'<div class="bad hint" id="ddns-e2-err" style="display:none"></div>'
+      +'<div style="margin-top:4px"><button class="btn btn-sm btn-primary" id="ddns-e2-add">'+esc(tr('ui.ddns.add'))+'</button></div></div>';
     c.innerHTML=h;
 
-    c.querySelectorAll('[data-del-pp]').forEach((b)=>b.onclick=async()=>{
-      delete pps[b.dataset.delPp]; await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
-    });
-    c.querySelectorAll('[data-del-pf]').forEach((b)=>b.onclick=async()=>{
-      delete profs[b.dataset.delPf]; await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
-    });
-    c.querySelectorAll('[data-del-entry]').forEach((b)=>b.onclick=async()=>{
-      entries.splice(Number(b.dataset.delEntry),1); await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
-    });
+    const save=async()=>{await saveDdns({providerProfiles:pps,profiles:profs,entries});renderDdns();};
+    const err=(id,msg)=>{const el=document.getElementById(id);if(el){el.textContent=msg;el.style.display=msg?'':'none';}return !msg;};
+    c.querySelectorAll('[data-del-pp]').forEach((b)=>b.onclick=async()=>{delete pps[b.dataset.delPp];await save();});
+    c.querySelectorAll('[data-del-pf]').forEach((b)=>b.onclick=async()=>{delete profs[b.dataset.delPf];await save();});
+    c.querySelectorAll('[data-del-entry]').forEach((b)=>b.onclick=async()=>{entries.splice(Number(b.dataset.delEntry),1);await save();});
     document.getElementById('ddns-pp-add').onclick=async()=>{
-      pps[document.getElementById('ddns-pp-name').value]={
-        provider:document.getElementById('ddns-pp-provider').value,
-        token:document.getElementById('ddns-pp-token').value,
-      };
-      await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
+      const name=document.getElementById('ddns-pp-name').value.trim();
+      const provider=document.getElementById('ddns-pp-provider').value;
+      const token=document.getElementById('ddns-pp-token').value;
+      if(!err('ddns-pp-err',!name?tr('ui.ddns.err.name'):(!provider?tr('ui.ddns.err.provider'):(!token?tr('ui.ddns.err.token'):''))))return;
+      pps[name]={provider,token};
+      await save();
     };
     document.getElementById('ddns-pf-add').onclick=async()=>{
-      profs[document.getElementById('ddns-pf-name').value]={
-        providerProfile:document.getElementById('ddns-pf-pp').value,
-        zone:document.getElementById('ddns-pf-zone').value,
-        record:document.getElementById('ddns-pf-record').value||undefined,
-        txtName:document.getElementById('ddns-pf-txt').value||undefined,
+      const name=document.getElementById('ddns-pf-name').value.trim();
+      const pp=document.getElementById('ddns-pf-pp').value;
+      const zone=document.getElementById('ddns-pf-zone').value.trim();
+      if(!err('ddns-pf-err',!name?tr('ui.ddns.err.name'):(!pp?tr('ui.ddns.err.pp'):(!zone?tr('ui.ddns.err.zone'):(zone.indexOf('.')<0||/\s/.test(zone)?tr('ui.ddns.err.zoneFormat'):'')))))return;
+      profs[name]={
+        providerProfile:pp,
+        zone,
+        record:document.getElementById('ddns-pf-record').value.trim()||undefined,
+        txtName:document.getElementById('ddns-pf-txt').value.trim()||undefined,
       };
-      await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
+      await save();
+    };
+    const readEntry=(p,withProvider)=>{
+      const o={
+        name:document.getElementById('ddns-'+p+'-name').value.trim(),
+        kind:document.getElementById('ddns-'+p+'-kind').value,
+        followTunnel:document.getElementById('ddns-'+p+'-follow').value.trim()||undefined,
+        cname:document.getElementById('ddns-'+p+'-cname').checked,
+        txtUrl:document.getElementById('ddns-'+p+'-txturl').checked,
+        ip:document.getElementById('ddns-'+p+'-ip').checked,
+        aaaa:document.getElementById('ddns-'+p+'-aaaa').checked,
+        txt:document.getElementById('ddns-'+p+'-txt').checked,
+      };
+      if(withProvider){
+        o.provider=document.getElementById('ddns-'+p+'-provider').value||undefined;
+        o.token=document.getElementById('ddns-'+p+'-token').value||undefined;
+        o.zone=document.getElementById('ddns-'+p+'-zone').value.trim()||undefined;
+        o.record=document.getElementById('ddns-'+p+'-record').value.trim()||undefined;
+        o.txtName=document.getElementById('ddns-'+p+'-txtname').value.trim()||undefined;
+      }else{
+        o.profile=document.getElementById('ddns-'+p+'-profile').value||undefined;
+      }
+      return o;
     };
     document.getElementById('ddns-e-add').onclick=async()=>{
-      entries.push({
-        name:document.getElementById('ddns-e-name').value,
-        profile:document.getElementById('ddns-e-profile').value||undefined,
-        kind:document.getElementById('ddns-e-kind').value,
-        followTunnel:document.getElementById('ddns-e-follow').value||undefined,
-        cname:document.getElementById('ddns-e-cname').checked,
-        txtUrl:document.getElementById('ddns-e-txturl').checked,
-        ip:document.getElementById('ddns-e-ip').checked,
-        aaaa:document.getElementById('ddns-e-aaaa').checked,
-        txt:document.getElementById('ddns-e-txt').checked,
-      });
-      await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
+      const e=readEntry('e',false);
+      const anyFlag=e.cname||e.txtUrl||e.ip||e.aaaa||e.txt;
+      if(!err('ddns-e-err',!e.name?tr('ui.ddns.err.name'):(!e.profile?tr('ui.ddns.err.profile'):(!anyFlag?tr('ui.ddns.err.flag'):''))))return;
+      entries.push(e);await save();
     };
     document.getElementById('ddns-e2-add').onclick=async()=>{
-      entries.push({
-        name:document.getElementById('ddns-e2-name').value,
-        provider:document.getElementById('ddns-e2-provider').value||undefined,
-        token:document.getElementById('ddns-e2-token').value||undefined,
-        zone:document.getElementById('ddns-e2-zone').value||undefined,
-        record:document.getElementById('ddns-e2-record').value||undefined,
-        txtName:document.getElementById('ddns-e2-txtname').value||undefined,
-        kind:document.getElementById('ddns-e2-kind').value,
-        followTunnel:document.getElementById('ddns-e2-follow').value||undefined,
-        cname:document.getElementById('ddns-e2-cname').checked,
-        txtUrl:document.getElementById('ddns-e2-txturl').checked,
-        ip:document.getElementById('ddns-e2-ip').checked,
-        aaaa:document.getElementById('ddns-e2-aaaa').checked,
-        txt:document.getElementById('ddns-e2-txt').checked,
-      });
-      await saveDdns({providerProfiles:pps,profiles:profs,entries}); renderDdns();
+      const e=readEntry('e2',true);
+      const anyFlag=e.cname||e.txtUrl||e.ip||e.aaaa||e.txt;
+      const zoneOk=!e.zone||(e.zone.indexOf('.')>=0&&!/\s/.test(e.zone));
+      if(!err('ddns-e2-err',!e.name?tr('ui.ddns.err.name'):(!e.provider?tr('ui.ddns.err.provider'):(!e.zone?tr('ui.ddns.err.zone'):(!zoneOk?tr('ui.ddns.err.zoneFormat'):(!anyFlag?tr('ui.ddns.err.flag'):''))))))return;
+      entries.push(e);await save();
     };
   }catch(e){c.innerHTML='<div class="bad">'+esc(String(e))+'</div>';}
 }
+function ddnsProviderOptions(){
+  const list=state.ddnsProviders||[];
+  return '<option value="">'+esc(tr('ui.ddns.pickProvider',(list.length?String(list.length):'—')))+'…</option>'
+    +list.map((p)=>{const name=typeof p==='string'?p:(p.name||String(p));return '<option value="'+esc(name)+'">'+esc(name)+'</option>';}).join('');
+}
+// token 遮蔽 👁：表格行内（data-tok 存原文，点击切换显示）
+window.toggleToken=(btn)=>{
+  const span=btn.parentElement.querySelector('.ddns-tok');
+  const shown=span.dataset.shown==='1';
+  span.textContent=shown?'••••••••':(span.dataset.tok||'—');
+  span.dataset.shown=shown?'':'1';
+  btn.title=tr(shown?'ui.ddns.reveal':'ui.ddns.hide');
+};
+// token 输入框 👁：password ⇄ text
+window.toggleTokenInput=(btn)=>{
+  const input=btn.parentElement.querySelector('input');
+  const show=input.type==='password';
+  input.type=show?'text':'password';
+  btn.title=tr(show?'ui.ddns.hide':'ui.ddns.reveal');
+};
 
 async function saveDdns(cfg){
   await api('/api/ddns-registry',{method:'POST',body:JSON.stringify(cfg)});
-  toast('ddns 配置已保存');
+  toast(tr('ui.ddns.saved'));
 }
