@@ -3,10 +3,54 @@
  * createApiHandler 处理全部 /api/* 端点；返回 true=已处理。
  */
 import type { IncomingMessage, ServerResponse } from "http";
+import { readFileSync } from "fs";
+import { join, dirname } from "path";
 import { resolveLang, type Lang } from "./i18n.ts";
 import { parseTokenExpiry } from "./providers/token.ts";
 import { json, readJson, daemonOrLocal, maskParams, findExpose, sshDomainFor, type UiContext } from "./ui-helpers.ts";
 import { listPortmaps, stopPortmap } from "./portmap/index.ts";
+
+/** 包版本（package.json，读一次缓存；读不到 undefined——status 展示用）。 */
+let cachedVersion: string | undefined;
+function libVersion(): string | undefined {
+  if (cachedVersion === undefined) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(dirname(import.meta.dirname), "package.json"), "utf8")) as { version?: string };
+      cachedVersion = pkg.version ?? "";
+    } catch {
+      cachedVersion = "";
+    }
+  }
+  return cachedVersion || undefined;
+}
+
+/** netcheck 能力探测（设计稿已定稿、实现未落——落库后此处自动点亮）。 */
+function hasNetcheck(st: UiContext["st"]): boolean {
+  return typeof (st as { netcheck?: { run?: unknown } }).netcheck?.run === "function";
+}
+
+/** Promise 超时兜底（超时/拒绝 → fallback，外呼探测不拖死 UI 轮询）。 */
+async function withTimeout<T>(p: Promise<T> | undefined, ms: number, fallback: T): Promise<T> {
+  if (!p) return fallback;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); }),
+    ]);
+  } catch {
+    return fallback;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** 测试注入口：ctx 上的下划线内部字段覆盖真实探测实现（e2e 不做真实 SSDP/外呼）。 */
+type ProbeOverrides = UiContext & {
+  _probePortmap?: (opts: { gateway?: string }) => Promise<unknown>;
+  _listIpv6?: () => Array<{ address: string; scope: string; iface: string; internal: boolean }>;
+  _detectPublicIpv6?: (prefer?: string) => Promise<string[]>;
+};
 
 export async function createApiHandler(
   ctx: UiContext,
@@ -36,6 +80,8 @@ if (path === "/api/status" && req.method === "GET") {
     allowAuthNone: st.auth.noneAllowed(),
     daemon: dstat,
     mode: dstat.running ? "daemon" : "embedded",
+    version: libVersion(),
+    netcheck: hasNetcheck(st),
   });
   return true;
 }
@@ -582,6 +628,33 @@ if (path === "/api/ddns-registry" && req.method === "POST") {
 if (path === "/api/ddns-providers" && req.method === "GET") {
   const { DDNS_PROVIDERS } = await import("./ddns.ts");
   json(res, 200, { providers: DDNS_PROVIDERS });
+  return true;
+}
+
+// ── portmap 探测（路由器 UPnP/NAT-PMP/PCP/CGNAT 判定；expose 表单「探测路由器」）
+if (path === "/api/portmap-probe" && req.method === "GET") {
+  const { probePortmap } = await import("./portmap/probe.ts");
+  const gateway = url.searchParams.get("gateway") ?? undefined;
+  // SSDP 等待预算可调（默认库内 3s；钳制 500ms–10s 防滥用）
+  const ssdpRaw = Number(url.searchParams.get("ssdpTimeoutMs"));
+  const ssdpTimeoutMs = Number.isFinite(ssdpRaw) ? Math.min(10_000, Math.max(500, ssdpRaw)) : undefined;
+  const probe = (ctx as ProbeOverrides)._probePortmap ?? probePortmap;
+  try {
+    const report = await probe({ gateway, ssdpTimeoutMs });
+    json(res, 200, report);
+  } catch (err) {
+    json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+  }
+  return true;
+}
+
+// ── IPv6 候选地址（expose 表单 ipv6 模式下拉：global 标注 + 公网出口探测）──
+if (path === "/api/ipv6-addresses" && req.method === "GET") {
+  const { listIpv6Addresses, detectPublicIpv6 } = await import("./ipv6.ts");
+  const o = ctx as ProbeOverrides;
+  const addresses = (o._listIpv6 ?? listIpv6Addresses)();
+  const publicAddrs = await withTimeout((o._detectPublicIpv6 ?? detectPublicIpv6)(), 4_000, [] as string[]);
+  json(res, 200, { addresses, public: publicAddrs });
   return true;
 }
 
