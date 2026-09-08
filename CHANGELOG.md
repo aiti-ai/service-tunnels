@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.64 (2026-09-08)
 
 - **feat(port-identity): 端口列表识别 HTTP 服务——favicon + document title**
   - 新增 `src/port-identity.ts`：对本机回环端口做轻量 HTTP(S) 探测（`GET /`，
