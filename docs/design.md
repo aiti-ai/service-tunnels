@@ -466,6 +466,7 @@ await st.shutdown();                          // 清理全部子进程
 | 能力 | Linux | macOS | Windows |
 |---|---|---|---|
 | 进程发现 | /proc（含 env 标记） | ps+lsof | PowerShell+netstat |
+| `port.list`（当前用户/进程树监听口，daemon IPC + UI 兜底） | /proc inode 反查 | lsof+ps（按 uid） | netstat -ano+Cim 全表（按 SessionId） |
 | 泛域名代理 | ✅ 零依赖 Node | ✅ | ✅ |
 | Authelia 二进制 | ✅ 官方 tar.gz | brew（无官方 darwin 包） | WSL2 / Docker（无官方 win 包） |
 | nginx | ✅ 官方包/仓库 | brew | ✅ 官方 zip（功能受限） |

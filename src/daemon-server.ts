@@ -122,7 +122,7 @@ const methods = new Map<string, Handler>([
   ["ping", () => ({ pong: true, pid: process.pid })],
   ["daemon.last-error", () => ({ error: lastError })],
   ["port.list", async (params) => {
-    const ports = listListeningPorts(String((params as { scope?: string } | undefined)?.scope ?? "current-user"));
+    const ports = await listListeningPorts(String((params as { scope?: string } | undefined)?.scope ?? "current-user"));
     // SSH 网关端口是内部服务（认证层），不作为暴露目标
     const gwPorts = new Set(ssh.list().map((d) => d.port));
     const filtered = ports.filter((p) => !gwPorts.has(p.port));

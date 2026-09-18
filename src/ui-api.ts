@@ -109,7 +109,7 @@ if (path === "/api/live" && req.method === "GET") {
     const internalPorts = new Set((st.internal.list() ?? []).map((p) => p.port));
     const labels = st.state().serviceLabels ?? {};
     return (await enrichWithIdentity(
-      listListeningPorts("current-user")
+      (await listListeningPorts("current-user"))
         .filter((p) => !internalPorts.has(p.port) && p.port !== ctx.port)
         .map((p) => ({ ...p, addresses: ["127.0.0.1"] })),
     )).map((p) => {

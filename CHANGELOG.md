@@ -1,3 +1,26 @@
+## 0.3.77 (待发布)
+
+- **feat(ports): daemon IPC `port.list` 跨平台化**——`src/ports.ts`
+  `listListeningPorts()` 原为纯 `/proc` 实现（Windows/macOS 恒空），现按平台
+  分派：linux 保持原样；**win32** = `netstat -ano`（端口→pid）+ 一次
+  `Get-CimInstance Win32_Process` 全表（name/cmdline/PPid 链/SessionId，
+  脚本首行输出 `#SID=` 当前会话号）；**darwin** = `lsof -nP -iTCP -sTCP:LISTEN`
+  + `ps -axo pid,uid,command`（`pid:<n>` scope 另取 `pid,ppid` 表）。
+  - **签名改 `async`**（返回 `Promise<PortInfo[]>`）：powershell 全表实测
+    ~0.7-1.2s，禁同步阻塞；两个消费点（`daemon-server.ts` `port.list`、
+    `ui-api.ts` `/api/live` 兜底）随之 `await`。
+  - **5s TTL 缓存 + 同 scope 并发合流**（`globalThis.__serviceTunnelsPortListCache`
+    跨热重载存活；`force` 参数绕过）——port.list 是 10s 轮询面板数据源。
+  - scope 语义：`current-user` 在 Windows 按**会话号**过滤（无廉价的
+    per-pid owner 查询；session 0 系统服务自然排除），macOS 按 uid。
+  - 框架名单补 Windows 噪音（`svchost.exe`、pid 4 `System`/`Registry` 等
+    内核态宿主端口，SMB 445/RPC 135 不再进暴露下拉）。
+  - 本模块**零依赖**（不复用 `discovery.ts` 的解析器）：它是 UI/daemon 兜底
+    数据源，不得因 import 触发 `ensureMarker()` 的 env 副作用。
+  - 测试：`test/ports.test.mjs` 9 用例（netstat/Cim TSV/lsof/ps fixture +
+    `buildPorts` scope 与过滤 + 真机冒烟只验返回数组与缓存）。
+    Windows 11 真机：起监听子进程 → `current-user` 与 `pid:<n>` 双命中。
+
 ## 0.3.76 (2026-09-09)
 
 - **fix(i18n): 补 `ui.ddns.err.pp`（"Provider profile is required"）**——
