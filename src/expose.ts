@@ -74,12 +74,74 @@ export function unflattenParams(params: Record<string, unknown>): Record<string,
 
 import { ensurePortmap, PortmapUnavailableError, type MapHandle } from "./portmap/index.ts";
 import { openFirewall, removeFirewall } from "./portmap/firewall.ts";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 /** Registry of live mode-"ipv6" transports (one dedicated ProxyManager per
  *  expose — independent transport port, no ipDirectPort collision with
  *  portmap or other ipv6 exposes). Managed like portmap's `active` map:
  *  stop() closes the transport + removes the firewall rule. */
 const activeIpv6 = new Map<string, { proxy: ProxyManager; transportPort: number; address: string; fwCleanup?: () => Promise<void> }>();
+
+// ── 防火墙规则日志（遗留项 3：退出防火墙残留）──
+// fwCleanup 闭包只随 handle 存活——kill -9 / 崩溃 / 重启后无人执行 removeFirewall，
+// ufw/ip6tables 放行规则泄漏 = 多开入站口。arm 时写 journal（<configDir>/ipv6-fw-journal.json），
+// stop 成功即删条目；createServiceTunnels 启动时 sweepIpv6Firewall 对账——无存活 handle 的规则一律撤除。
+interface FwJournalEntry { key: string; address: string; transportPort: number; armedAt: string }
+function fwJournalPath(configDir: string): string {
+  return join(configDir, "ipv6-fw-journal.json");
+}
+/** @internal 测试消费（journal 往返） */
+export function readFwJournal(configDir: string): FwJournalEntry[] {
+  try {
+    const raw = JSON.parse(readFileSync(fwJournalPath(configDir), "utf8"));
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+/** @internal 测试消费 */
+export function writeFwJournal(configDir: string, entries: FwJournalEntry[]): void {
+  try {
+    mkdirSync(dirname(fwJournalPath(configDir)), { recursive: true });
+    writeFileSync(fwJournalPath(configDir), JSON.stringify(entries, null, 2));
+  } catch { /* journal 写失败不阻断主流程（最坏=残留规则，下次 sweep 再试） */ }
+}
+function fwJournalArm(configDir: string, entry: { key: string; address: string; transportPort: number }): void {
+  const entries = readFwJournal(configDir).filter((e) => e.key !== entry.key);
+  entries.push({ ...entry, armedAt: new Date().toISOString() });
+  writeFwJournal(configDir, entries);
+}
+function fwJournalDisarm(configDir: string, key: string): void {
+  writeFwJournal(configDir, readFwJournal(configDir).filter((e) => e.key !== key));
+}
+function configDirOfKey(key: string): string {
+  const marker = ":ipv6:";
+  const i = key.indexOf(marker);
+  return i > 0 ? key.slice(0, i) : "";
+}
+/** 启动/暴露前对账：journal 里无存活 handle 的规则一律 removeFirewall（removeFn 可注入供测试）。 */
+export async function sweepIpv6Firewall(
+  configDir: string,
+  removeFn: (address: string, port: number) => Promise<void> = removeFirewall,
+): Promise<number> {
+  const entries = readFwJournal(configDir);
+  if (!entries.length) return 0;
+  const live = new Set(activeIpv6.keys());
+  const keep: FwJournalEntry[] = [];
+  let removed = 0;
+  for (const e of entries) {
+    if (live.has(e.key)) { keep.push(e); continue; }
+    try {
+      await removeFn(e.address, e.transportPort);
+      removed++;
+    } catch {
+      keep.push(e); // 撤除失败保留条目，下次 sweep 再试
+    }
+  }
+  if (removed || keep.length !== entries.length) writeFwJournal(configDir, keep);
+  return removed;
+}
 
 export function listIpv6Transports(): Array<{ key: string; address: string; transportPort: number }> {
   return [...activeIpv6].map(([key, h]) => ({ key, address: h.address, transportPort: h.transportPort }));
@@ -91,6 +153,8 @@ export async function stopIpv6Transport(key: string): Promise<boolean> {
   activeIpv6.delete(key);
   await h.proxy.stop().catch(() => {});
   await h.fwCleanup?.().catch(() => {});
+  const cfgDir = configDirOfKey(key);
+  if (cfgDir) fwJournalDisarm(cfgDir, key);
   return true;
 }
 
@@ -650,6 +714,9 @@ async function ipv6Expose(
     if (fw.detail && !fw.detail.startsWith("already")) {
       log(`expose ${port} (ipv6): firewall opened — ${fw.detail}`);
       fwCleanup = () => removeFirewall(address, transportPort);
+      // journal：进程退出（含 kill -9）后由启动 sweep 撤除残留放行规则（遗留项 3）
+      const key0 = `${ctx.configDir}:ipv6:${port}:${proxyResult.label ?? ""}`;
+      fwJournalArm(ctx.configDir, { key: key0, address, transportPort });
     }
   } catch (e) {
     ipv6Proxy.removeBinding(port, proxyResult.label ?? "");
@@ -659,6 +726,12 @@ async function ipv6Expose(
 
   // ── 5) registry 托管 stop ──
   const key = `${ctx.configDir}:ipv6:${port}:${proxyResult.label ?? ""}`;
+  // 防重（遗留项 1）：同 key 重复暴露先停旧 transport——Map.set 直接覆盖会让旧代理
+  // 句柄/防火墙清理闭包永久泄漏（无法再停）。复用 stopIpv6Transport 完整停止语义。
+  if (activeIpv6.has(key)) {
+    await stopIpv6Transport(key);
+    log(`expose ${port} (ipv6): duplicate key — stopped stale transport first (${key})`);
+  }
   activeIpv6.set(key, { proxy: ipv6Proxy, transportPort, address, fwCleanup });
 
   // ── 6) URL + 结果 ──

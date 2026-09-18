@@ -46,7 +46,7 @@ import { customTunnelTemplates } from "./tunnels-custom.ts";
 import { readDdnsConfigs, updateBeacon } from "./ddns.ts";
 import { readRegistryConfig, writeRegistryConfig, registerTunnel, registerPortmap, type RegistrationEntry } from "./ddns-registry.ts";
 import { readTunnelConfigs, writeTunnelConfigs } from "./tunnels-config.ts";
-import { expose as exposeFlow, listIpv6Transports, stopIpv6Transport, type ExposeOptions, type ExposeResult } from "./expose.ts";
+import { expose as exposeFlow, listIpv6Transports, stopIpv6Transport, type ExposeOptions, type ExposeResult, sweepIpv6Firewall } from "./expose.ts";
 import { probePortmap as portmapProbe, listPortmaps, stopPortmap, type PortmapProbe } from "./portmap/index.ts";
 import { GatewayController, type GatewayInject } from "./gateway.ts";
 import { RedisController } from "./redis.ts";
@@ -616,6 +616,9 @@ export function createServiceTunnels(opts: ServiceTunnelsOptions = {}): ServiceT
   // this file on its low-frequency scan and reaps them on parent death.
   // Scoped per parent pid so multiple owners never share a file.
   const registerPid = (role: string, pid: number) => registerPidToFile(dirs.cacheDir, process.pid, role, pid);
+  // 防火墙残留清扫（遗留项 3）：启动即对账 ipv6-fw journal——进程上次退出（含 kill -9）
+  // 未撤除的 ufw/ip6tables 放行规则一律补撤。异步后台执行，不阻塞构造。
+  void sweepIpv6Firewall(dirs.configDir).catch(() => {});
   if (opts.guardian !== false) {
     spawnGuardian(process.pid, { registrationFile: registrationFilePath(dirs.cacheDir, process.pid), cacheDir: dirs.cacheDir, nodePath: opts.nodePath });
   }

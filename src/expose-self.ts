@@ -60,7 +60,7 @@ export interface SelfExposeEnv {
 }
 
 const EXPOSE_SCALAR_KEYS = new Set(["mode", "auth", "policy", "tunnel", "protocol", "allowToolDownload", "port", "ngrokAuthtoken", "allowlocal"]);
-const VALID_MODES = new Set(["tunnel", "proxy", "both", "none"]);
+const VALID_MODES = new Set(["tunnel", "proxy", "both", "portmap", "ipv6", "none"]); // 遗留项2：env 路径补 portmap/ipv6 两模式
 
 function coerce(value: string): unknown {
   if (value === "true") return true;
@@ -118,7 +118,7 @@ export function parseExposeEnv(raw: string | undefined | null): SelfExposeEnv | 
   out.mode = String(out.mode ?? "none");
   if (!VALID_MODES.has(out.mode)) {
     // eslint-disable-next-line no-console
-    console.warn(`[service-tunnels] SERVICE_TUNNELS_EXPOSE: 非法 mode "${out.mode}"（tunnel|proxy|both|none），不启用`);
+    console.warn(`[service-tunnels] SERVICE_TUNNELS_EXPOSE: 非法 mode "${out.mode}"（tunnel|proxy|both|portmap|ipv6|none），不启用`);
     return null;
   }
   return out;
@@ -246,7 +246,7 @@ export async function maybeExposeSelf(
   if (cfg.mode === "none") return { exposed: false };
   try {
     await exposeSelf(st.authExpose, {
-      mode: cfg.mode as "tunnel" | "proxy" | "both",
+      mode: cfg.mode as "tunnel" | "proxy" | "both" | "portmap" | "ipv6",
       auth: cfg.auth as string | undefined,
       policy: cfg.policy as "one_factor" | "two_factor" | "deny" | undefined,
       tunnel: cfg.tunnel,
