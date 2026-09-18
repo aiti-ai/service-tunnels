@@ -22,7 +22,7 @@ import type { ServiceTunnels } from "./index.ts";
 
 export interface SelfExposeOptions {
   /** tunnel/proxy/both。缺省 proxy。 */
-  mode?: "tunnel" | "proxy" | "both";
+  mode?: "tunnel" | "proxy" | "both" | "portmap" | "ipv6";
   /** 认证 provider（site "self" 默认 portal）。 */
   auth?: string;
   policy?: "one_factor" | "two_factor" | "deny";
