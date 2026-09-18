@@ -1,4 +1,6 @@
-## 0.3.77 (待发布)
+## 0.3.79 (待发布)
+
+> 版本号跳过 0.3.77/0.3.78（expose/ipv6 线已从另一 checkout 发布，本条目只含 port.list 跨平台化）。
 
 - **feat(ports): daemon IPC `port.list` 跨平台化**——`src/ports.ts`
   `listListeningPorts()` 原为纯 `/proc` 实现（Windows/macOS 恒空），现按平台
