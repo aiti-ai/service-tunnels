@@ -1,6 +1,7 @@
 ## 0.3.82 (2026-11-14)
 
 - **chore: CHANGELOG 措辞修正**——0.3.81 条目中提及的内部 registry 域名字样替换为通用表述（发布内容隐私卫生，代码无变化）。
+- **chore: 移除 `alias/` 子包**——npmjs 侧的 scoped 别名包已下架（它的 `service-tunnels` 依赖曾阻断旧版本 unpublish，且与私源上同名 pi-web 扩展制品撞名）；主包 `service-tunnels` 名字本身即官方入口，别名不再需要。
 
 ## 0.3.81 (2026-11-14)
 

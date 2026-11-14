@@ -105,53 +105,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --registry https://registry.npmjs.org
 
-      # ---- Scoped alias: @aiti-ai/service-tunnels ----
-      # Placeholder shell depending on "service-tunnels": "*" (always-latest);
-      # re-exports the API + shims the CLI bins. Rides the same version line
-      # as the main package. NOTE: published to npmjs ONLY — the private
-      # registry (npm.alot.pw) uses this exact name for the pi-web extension,
-      # a different artifact; alias/package.json pins publishConfig to npmjs.
-      - name: Sync alias version
-        run: node scripts/sync-alias-version.mjs
-
-      - name: Pack alias — verify tarball (files + version parity + "*" dep contract)
-        # Same npm 10/11 normalization as the main pack check above.
-        working-directory: alias
-        run: |
-          npm pack --dry-run --json > /tmp/alias-pack.json 2>/dev/null
-          node -e "
-            const raw = require('fs').readFileSync('/tmp/alias-pack.json','utf8');
-            function extractJson(s) {
-              try { return JSON.parse(s); } catch {}
-              const lines = s.split('\n');
-              for (let i = 0; i < lines.length; i++) {
-                if (lines[i].trim() === '[') { try { return JSON.parse(lines.slice(i).join('\n')); } catch {} }
-              }
-              throw new Error('no JSON array found in npm pack output');
-            }
-            const pack = extractJson(raw)[0];
-            const files = pack.files.map(f => f.path.replace(/^package\//, ''));
-            const mustHave = ['index.js', 'index.d.ts', 'bin.js', 'README.md', 'package.json'];
-            const missing = mustHave.filter(f => !files.includes(f));
-            if (missing.length) { console.error('missing from alias tarball: ' + missing.join(', ')); process.exit(1); }
-            const leaked = files.filter(f => f.startsWith('node_modules/') || f.startsWith('test/'));
-            if (leaked.length) { console.error('internal paths leaked into the alias tarball: ' + leaked.join(', ')); process.exit(1); }
-            const root = JSON.parse(require('fs').readFileSync('../package.json','utf8'));
-            if (pack.version !== root.version) { console.error('alias version ' + pack.version + ' != root version ' + root.version); process.exit(1); }
-            const deps = JSON.parse(require('fs').readFileSync('package.json','utf8')).dependencies;
-            if (deps['service-tunnels'] !== '*') { console.error('alias dep on service-tunnels must be \"*\" (always-latest contract), got: ' + deps['service-tunnels']); process.exit(1); }
-            console.log('alias tarball ok: ' + pack.name + '@' + pack.version + ', ' + files.length + ' files');
-          "
-
-      - name: Publish alias (@aiti-ai/service-tunnels)
-        if: ${{ inputs.dry_run == 'false' }}
-        working-directory: alias
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --registry https://registry.npmjs.org
-
       - name: Summary
         run: |
           echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_STEP_SUMMARY"
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_STEP_SUMMARY"
-          echo "alias=@aiti-ai/service-tunnels@$(node -p "require('./alias/package.json').version") (always-latest shell)" >> "$GITHUB_STEP_SUMMARY"
