@@ -73,9 +73,11 @@ test("vendored parseKey: rejects garbage, accepts valid public key", () => {
   // ssh2 parseKey returns an Error object (does not throw) on garbage
   const bad = parseKey("not a key at all");
   assert.ok(bad instanceof Error, "garbage must yield an Error");
+  // vendor keygen returns the OpenSSH public-key line as a plain string
   const kp = generateKeyPairSync("ed25519");
+  assert.equal(typeof kp.public, "string");
   const parsed = parseKey(kp.public);
-  assert.equal(parsed.type, "ssh-ed25519");
+  assert.equal(parsed?.type, "ssh-ed25519");
 });
 
 test("gateway -L: correct key roundtrips, wrong key rejected, target pinned", async () => {

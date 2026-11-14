@@ -203,7 +203,18 @@ test("lifecycle: start (tool resolved) → url parsed → stop (group kill)", { 
   }
 });
 
-test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", { timeout: 200_000 }, async () => {
+// CI runners have no sshd self-connection (ssh <user>@localhost would fail
+// with "Permission denied"): probe once at load time and skip when unusable.
+const SSH_LOCAL_AVAILABLE = await (async () => {
+  try {
+    execFileSync("ssh", ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=4", `${userInfo().username}@localhost`, "true"], { stdio: "ignore", timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("ssh: real user@localhost reverse tunnel — argv/forward/URL synthesis", { timeout: 200_000, skip: SSH_LOCAL_AVAILABLE ? false : "needs sshd with key auth for user@localhost (absent on CI runners)" }, async () => {
   // 真实本机 ssh 测试:ssh -R <remotePort>:127.0.0.1:<target> user@localhost。
   // 用户名取当前用户(os.userInfo().username)——不依赖任何 fake 脚本。
   // 验证:1) 真实 -R 转发把 sshd 侧端口导到本地 target 服务 2) URL 合成
