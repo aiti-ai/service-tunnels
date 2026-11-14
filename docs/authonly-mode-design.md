@@ -242,7 +242,7 @@ WantedBy=multi-user.target
 - basePath 随机（如 `/nhgf`）——路径不可枚举；site 随机（存储位置不可枚举）。
 - 脚本 0700、配置 0600（沿用 hardenDir / writeConfigFile 约定）。
 
-## 12. 发布清洗注意（AGENTS.md）
+## 12. 发布清洗注意（内部开发约定）
 
 - 脚本/文档中不写死内部端口/域名；auth 端口随机分配，示例用占位。
 - 不引入内部应用名（pi-web → embedder）。

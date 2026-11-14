@@ -26,7 +26,7 @@ function tempDirs(tag) {
   return { base, cacheDir: join(base, "cache"), configDir: join(base, "config") };
 }
 
-/** 随机空闲端口（AGENTS.md：e2e 勿用固定端口）。 */
+/** 随机空闲端口（内部约定：e2e 勿用固定端口）。 */
 function pickFreePort() {
   return new Promise((resolve, reject) => {
     const s = httpServer();
