@@ -249,7 +249,7 @@ is not defined`）。修法：exports 改为 `./dist/browser/index.js`
 **② 阻断（对测试页）：CDN 加载路径 404。**
 tests/browser-test.html 里
 `import('https://cdn.jsdelivr.net/npm/justget@0.2.0/dist/browser/index.js')`
-不可用：公共 npm 上 justget 最新为 0.1.7（0.2.x 仅内部源 npm.example.com），
+不可用：公共 npm 上 justget 最新为 0.1.7（0.2.x 当时尚未发官方源），
 jsdelivr/unpkg 只镜像公共 npm，且即使发布后路径也需对（见①）。
 结论：**portal 集成必须同源自托管**——参照 service-tunnels 既有
 `scripts/build-justget.mjs`（esbuild bundle→`src/vendor/justget/justget.mjs`
@@ -308,7 +308,7 @@ jsdelivr 作为默认主源的理由又多一条。
 
 ### 8.5 修复后待补的验证
 
-- [x] exports 修复后 `import { download } from 'justget/browser'` 实测（0.2.2 已发 npm.example.com）
+- [x] exports 修复后 `import { download } from 'justget/browser'` 实测（0.2.2 已发内部源验证）
 - [x] browser bundle（esbuild 单文件）经 portal `/assets/` 加载实测
 - [x] 三源竞速 + npmmirror 403 负样本 + checksum 篡改样本（降级重跑验证，场景 1/2/5）
 - [x] fetch 拦截 → loadFromUri 端到端（同下）
