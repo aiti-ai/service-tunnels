@@ -1,0 +1,94 @@
+# publish-npm.yml — publish `service-tunnels` to the npm official registry.
+#
+# Single-package variant of the aiti-ai/aiti-ai publish-npm.yml decision
+# matrix: this repo ships one package, so the content-hash skip / auto-bump
+# machinery is unnecessary — the version is bumped manually on release.
+#
+# Trigger: workflow_dispatch (manual)
+#   dry_run: true (default) — preflight + typecheck + tests + build + pack
+#   verification (dist/src/docs present, no test/node_modules leakage into the
+#   tarball); false — publish for real.
+#
+# Auth (either path works):
+#   NPM_TOKEN secret — granular automation token with read/write on the
+#     service-tunnels package (publisher nightwend).
+#   npmjs Trusted Publishing (OIDC, token-free) — bind the package on
+#     npmjs.com to aiti-ai/service-tunnels + this workflow file; then
+#     --provenance works without any token. Preferred once bound.
+
+name: NPM Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (preflight + tests + build + pack verification, no publish)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  id-token: write # npm provenance (official publishes carry --provenance)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org" # writes ~/.npmrc for publish auth
+          cache: npm
+
+      - name: Preflight — registry identity
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm whoami
+
+      # npm install (not ci): the lockfile pins @aiti-ai/ddns from the private
+      # staging registry where integrity may differ from the official tarball;
+      # install re-resolves and self-heals. Official publishes are gated by
+      # tests below either way.
+      - name: Install deps
+        run: npm install --include=dev --no-audit --no-fund --loglevel=error
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests (all green or no publish)
+        run: npm test
+
+      # dist/ is gitignored — the tarball can only ship what CI builds here.
+      # build = justget browser bundle + vendor copy + tsc + dts fixups.
+      - name: Build
+        run: npm run build
+
+      - name: Pack — verify tarball contents (dist + src + docs present, no test/node_modules leakage)
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e "
+            const files = JSON.parse(require('fs').readFileSync('pack.json','utf8'))[0].files.map(f => f.path);
+            const mustHave = ['package/dist/index.js', 'package/dist/index.d.ts', 'package/dist/cli.js', 'package/src/index.ts', 'package/README.md', 'package/LICENSE', 'package/CHANGELOG.md'];
+            const missing = mustHave.filter(f => !files.includes(f));
+            if (missing.length) { console.error('missing from tarball: ' + missing.join(', ')); process.exit(1); }
+            const leaked = files.filter(f => f.startsWith('package/test/') || f.startsWith('package/node_modules/'));
+            if (leaked.length) { console.error('internal paths leaked into the tarball: ' + leaked.join(', ')); process.exit(1); }
+            console.log('tarball ok: ' + files.length + ' files');
+          "
+
+      - name: Publish
+        if: ${{ inputs.dry_run == 'false' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+      - name: Summary
+        run: |
+          echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_STEP_SUMMARY"
