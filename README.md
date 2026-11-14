@@ -43,6 +43,10 @@ service-tunnels stop-all              # 停止守护 + 清理全部子进程
 > `sts daemon start` / `sts tunnel list` / `sts status`。
 > （`st` 别名不发布：npm 上 `st` 是月下载百万级的静态服务器包，避免全局安装冲突。）
 
+> **Scoped 别名**：`npm install -g @aiti-ai/service-tunnels` 也可安装同一工具——壳包固定依赖
+> `"service-tunnels": "*"`，安装时自动拉取**当时最新**的 `service-tunnels`，API 与
+> `service-tunnels`/`sts` 两个命令完全等价（无 scope 的全局名 `service-tunnels` 始终是正身）。
+
 **虚拟主机语法**（本地/域名直达，`st.localhost` 默认后缀 + baseDomain + site.domain）：
 
 ```

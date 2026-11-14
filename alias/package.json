@@ -1,0 +1,49 @@
+{
+  "name": "@aiti-ai/service-tunnels",
+  "version": "0.3.81",
+  "description": "Official scoped alias for service-tunnels — installing this installs the latest service-tunnels. Re-exports the full API and provides the same service-tunnels/sts CLI bins.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "service-tunnels": "./bin.js",
+    "sts": "./bin.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bin.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "dependencies": {
+    "service-tunnels": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiti-ai/service-tunnels.git",
+    "directory": "alias"
+  },
+  "bugs": {
+    "url": "https://github.com/aiti-ai/service-tunnels/issues"
+  },
+  "homepage": "https://github.com/aiti-ai/service-tunnels#readme",
+  "keywords": [
+    "service-tunnels",
+    "tunnel",
+    "alias",
+    "ngrok",
+    "cloudflared",
+    "frp"
+  ]
+}
