@@ -94,5 +94,9 @@
   },
   "bundleDependencies": [
     "@aiti-ai/ddns"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aiti-ai/service-tunnels.git"
+  }
 }
