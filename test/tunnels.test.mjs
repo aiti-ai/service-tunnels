@@ -640,7 +640,7 @@ test("bore: builds `bore local` argv + synthesizes url from 'listening at host:p
   }
 });
 
-test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { timeout: 120_000 }, async () => {
+test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { timeout: 120_000, skip: SSH_LOCAL_AVAILABLE ? false : "needs sshd with key auth for user@localhost (absent on CI runners)" }, async () => {
   // 真实本机 ssh(-R 到 user@localhost)验证 URL 合成 + 真实转发。固定端口避免
   // 并发 freePort 竞态导致 -R 绑定失败。
   const { TunnelManager } = await loadSubject();
@@ -667,7 +667,7 @@ test("ssh: real localhost tunnel synthesizes http://<host>:<remotePort>", { time
   }
 });
 
-test("ssh: real connection refused does NOT report a URL; stop revokes it", { timeout: 240_000 }, async () => {
+test("ssh: real connection refused does NOT report a URL; stop revokes it", { timeout: 240_000, skip: SSH_LOCAL_AVAILABLE ? false : "needs sshd with key auth for user@localhost (absent on CI runners)" }, async () => {
   // 真实 ssh 测试:1) 不可达(127.0.0.1 关闭端口 → Connection refused 立即退出)
   // → 无 URL + error;2) 可达(localhost)→ 合成 URL;3) stop 后退出非零 → 撤销 URL。
   // Windows OpenSSH 客户端启动/退出开销大(到 refused 端口需 ~3s 才退出),
