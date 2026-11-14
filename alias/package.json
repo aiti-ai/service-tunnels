@@ -1,6 +1,6 @@
 {
   "name": "@aiti-ai/service-tunnels",
-  "version": "0.3.81",
+  "version": "0.3.82",
   "description": "Official scoped alias for service-tunnels \u2014 installing this installs the latest service-tunnels. Re-exports the full API and provides the same service-tunnels/sts CLI bins.",
   "type": "module",
   "license": "MIT",

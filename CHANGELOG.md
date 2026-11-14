@@ -1,8 +1,12 @@
+## 0.3.82 (2026-11-14)
+
+- **chore: CHANGELOG 措辞修正**——0.3.81 条目中提及的内部 registry 域名字样替换为通用表述（发布内容隐私卫生，代码无变化）。
+
 ## 0.3.81 (2026-11-14)
 
 > 版本号跳过 0.3.77/0.3.80（这两个版本与 0.3.76 曾误发到 npmjs 官方源且内含内部文档信息，已于 2026-11-14 unpublish 烧号；本版为迁入 aiti-ai 公开仓后的首个官方源发布）。
 
-- **feat(alias): 新增官方 scoped 别名包 `@aiti-ai/service-tunnels`**——`alias/` 壳子包：唯一依赖 `"service-tunnels": "*"`（安装时解析当时最新稳定版），全量 re-export 主包 API + `service-tunnels`/`sts` bin 垫片；与主包同版本号（`scripts/sync-alias-version.mjs` 同步）；publish-npm.yml 打包校验（版本对齐 + `*` 依赖契约，兼容 npm 10/11 的 `pack --json` 差异；主包校验按 `bundleDependencies` 动态白名单，不再误报内置依赖泄漏）并同步发布。仅发 npmjs 官方源——发布显式带 `--registry https://registry.npmjs.org`（不设 publishConfig 钉死）；私源 npm.alot.pw 上同名包是 pi-web 扩展（不同制品），勿混淆。
+- **feat(alias): 新增官方 scoped 别名包 `@aiti-ai/service-tunnels`**——`alias/` 壳子包：唯一依赖 `"service-tunnels": "*"`（安装时解析当时最新稳定版），全量 re-export 主包 API + `service-tunnels`/`sts` bin 垫片；与主包同版本号（`scripts/sync-alias-version.mjs` 同步）；publish-npm.yml 打包校验（版本对齐 + `*` 依赖契约，兼容 npm 10/11 的 `pack --json` 差异；主包校验按 `bundleDependencies` 动态白名单，不再误报内置依赖泄漏）并同步发布。仅发 npmjs 官方源——发布显式带 `--registry https://registry.npmjs.org`（不设 publishConfig 钉死）；注意：某些内部私有 registry 上存在同名包（pi-web 扩展，不同制品），勿混淆。
 - **feat(deps): ddns 依赖迁入 @aiti-ai 命名空间**——`@aiti-ti/ddns` → `@aiti-ai/ddns ^0.2.0`（bundle）、`@aiti-ti/ddns-mocks` → `@aiti-ai/ddns-mocks ^0.1.0`（dev），全部 import/文档同步改名。
 - **chore: 公开仓清洗**——git 历史整体改写（git filter-repo）：移除内部文档/镜像运维脚本/test/perf 基准，替换内部域名/路径/网段字符串；补充 MIT LICENSE；package-lock 全量转官方源。
 - 代码与 0.3.79/0.3.80 功能面一致（无新功能，发布链切换版）。
