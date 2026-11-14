@@ -1,6 +1,6 @@
 {
   "name": "service-tunnels",
-  "version": "0.3.80",
+  "version": "0.3.81",
   "description": "Service port discovery + wildcard-host proxy + tunnels (ngrok/frpc/ssh/cloudflared/localtunnel) + nginx/Authelia/Redis auth orchestration. Library + CLI.",
   "type": "module",
   "bin": {
@@ -85,14 +85,14 @@
     "esbuild": "^0.28.2",
     "justget": "^0.2.2",
     "typescript": "^5.8.3",
-    "@aiti-ti/ddns-mocks": "^0.1.0"
+    "@aiti-ai/ddns-mocks": "^0.1.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "@aiti-ti/ddns": "^0.2.0"
+    "@aiti-ai/ddns": "^0.2.0"
   },
   "bundleDependencies": [
-    "@aiti-ti/ddns"
+    "@aiti-ai/ddns"
   ]
 }

@@ -441,10 +441,162 @@ var justgetBrowser = (() => {
     if (algorithm === "md5") {
       throw new Error("MD5 \u4E0D\u88AB Web Crypto API \u652F\u6301\uFF0C\u8BF7\u7528 SHA-256 \u66FF\u4EE3");
     }
-    const webAlgo = algorithm === "sha1" ? "SHA-1" : algorithm === "sha256" ? "SHA-256" : "SHA-512";
-    const hashBuffer = await crypto.subtle.digest(webAlgo, data);
-    const hashArray = new Uint8Array(hashBuffer);
-    return Array.from(hashArray).map((b) => b.toString(16).padStart(2, "0")).join("");
+    try {
+      if (typeof crypto === "undefined" || !crypto.subtle || !crypto.subtle.digest) {
+        throw new Error("WebCrypto unavailable");
+      }
+      const webAlgo = algorithm === "sha1" ? "SHA-1" : algorithm === "sha256" ? "SHA-256" : "SHA-512";
+      const hashBuffer = await crypto.subtle.digest(webAlgo, data);
+      const hashArray = new Uint8Array(hashBuffer);
+      return hexFromBytes(hashArray);
+    } catch {
+      if (algorithm === "sha256")
+        return sha256Digest(data);
+      throw new Error("\u975E\u5B89\u5168\u4E0A\u4E0B\u6587\uFF1AWebCrypto \u4E0D\u53EF\u7528\uFF0C\u7EAF JS fallback \u4EC5\u652F\u6301 sha256\uFF1B\u8BF7\u6539\u7528 sha256");
+    }
+  }
+  function hexFromBytes(bytes) {
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  function sha256Digest(data) {
+    const K = new Uint32Array([
+      1116352408,
+      1899447441,
+      3049323471,
+      3921009573,
+      961987163,
+      1508970993,
+      2453635748,
+      2870763221,
+      3624381080,
+      310598401,
+      607225278,
+      1426881987,
+      1925078388,
+      2162078206,
+      2614888103,
+      3248222580,
+      3835390401,
+      4022224774,
+      264347078,
+      604807628,
+      770255983,
+      1249150122,
+      1555081692,
+      1996064986,
+      2554220882,
+      2821834349,
+      2952996808,
+      3210313671,
+      3336571891,
+      3584528711,
+      113926993,
+      338241895,
+      666307205,
+      773529912,
+      1294757372,
+      1396182291,
+      1695183700,
+      1986661051,
+      2177026350,
+      2456956037,
+      2730485921,
+      2820302411,
+      3259730800,
+      3345764771,
+      3516065817,
+      3600352804,
+      4094571909,
+      275423344,
+      430227734,
+      506948616,
+      659060556,
+      883997877,
+      958139571,
+      1322822218,
+      1537002063,
+      1747873779,
+      1955562222,
+      2024104815,
+      2227730452,
+      2361852424,
+      2428436474,
+      2756734187,
+      3204031479,
+      3329325298
+    ]);
+    const len = data.length;
+    const totalLen = ((len + 8 >> 6) + 1) * 64;
+    const msg = new Uint8Array(totalLen);
+    msg.set(data);
+    msg[len] = 128;
+    const bitLength = len * 8;
+    const lenHi = Math.floor(bitLength / 4294967296);
+    const lenLo = bitLength % 4294967296;
+    const be64 = (n, offset) => {
+      msg[offset] = n >>> 24 & 255;
+      msg[offset + 1] = n >>> 16 & 255;
+      msg[offset + 2] = n >>> 8 & 255;
+      msg[offset + 3] = n & 255;
+    };
+    be64(lenHi, totalLen - 8);
+    be64(lenLo, totalLen - 4);
+    const H = new Uint32Array([
+      1779033703,
+      3144134277,
+      1013904242,
+      2773480762,
+      1359893119,
+      2600822924,
+      528734635,
+      1541459225
+    ]);
+    const w = new Uint32Array(64);
+    const rotr = (x, n) => x >>> n | x << 32 - n;
+    for (let off = 0; off < totalLen; off += 64) {
+      for (let i = 0; i < 16; i++) {
+        const o = off + i * 4;
+        w[i] = msg[o] << 24 | msg[o + 1] << 16 | msg[o + 2] << 8 | msg[o + 3];
+      }
+      for (let i = 16; i < 64; i++) {
+        const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ w[i - 15] >>> 3;
+        const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ w[i - 2] >>> 10;
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1 | 0;
+      }
+      let a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (let i = 0; i < 64; i++) {
+        const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = e & f ^ ~e & g;
+        const temp1 = h + S1 + ch + K[i] + w[i] | 0;
+        const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = a & b ^ a & c ^ b & c;
+        const temp2 = S0 + maj | 0;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1 | 0;
+        d = c;
+        c = b;
+        b = a;
+        a = temp1 + temp2 | 0;
+      }
+      H[0] = H[0] + a | 0;
+      H[1] = H[1] + b | 0;
+      H[2] = H[2] + c | 0;
+      H[3] = H[3] + d | 0;
+      H[4] = H[4] + e | 0;
+      H[5] = H[5] + f | 0;
+      H[6] = H[6] + g | 0;
+      H[7] = H[7] + h | 0;
+    }
+    const out = new Uint8Array(32);
+    for (let i = 0; i < 8; i++) {
+      out[i * 4] = H[i] >>> 24 & 255;
+      out[i * 4 + 1] = H[i] >>> 16 & 255;
+      out[i * 4 + 2] = H[i] >>> 8 & 255;
+      out[i * 4 + 3] = H[i] & 255;
+    }
+    return hexFromBytes(out);
   }
   function generateShortHash(input, length = 8) {
     let hash = 2166136261;

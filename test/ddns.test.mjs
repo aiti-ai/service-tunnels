@@ -40,7 +40,7 @@ test("readDdnsConfigs/writeDdnsConfigs round-trip (0600, same file the ddns pack
 
 test("updateDdnsRecord: delegates to ddns engine — zone provider create/unchanged/update", async () => {
   const { updateDdnsRecord } = await loadSubject();
-  const { startCloudflareMock } = await import("@aiti-ti/ddns-mocks");
+  const { startCloudflareMock } = await import("@aiti-ai/ddns-mocks");
   const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
   const zoneId = [...mock.state.zones.values()][0].id;
   try {
@@ -73,7 +73,7 @@ test("updateDdnsRecord: delegates to ddns engine — zone provider create/unchan
 
 test("runDdnsOnce + startDdnsLoop forward to the ddns engine", async () => {
   const { runDdnsOnce, startDdnsLoop } = await loadSubject();
-  const { startDuckdnsMock } = await import("@aiti-ti/ddns-mocks");
+  const { startDuckdnsMock } = await import("@aiti-ai/ddns-mocks");
   const mock = await startDuckdnsMock({ token: "duck" });
   try {
     const results = await runDdnsOnce([
@@ -97,7 +97,7 @@ test("runDdnsOnce + startDdnsLoop forward to the ddns engine", async () => {
 
 test("updateBeacon: dimension-2 — CNAME beacon follows a tunnel URL", async () => {
   const { updateBeacon, beaconValue } = await loadSubject();
-  const { startCloudflareMock } = await import("@aiti-ti/ddns-mocks");
+  const { startCloudflareMock } = await import("@aiti-ai/ddns-mocks");
   const mock = await startCloudflareMock({ token: "tk", zones: { "example.com": [] } });
   const zoneId = [...mock.state.zones.values()][0].id;
   try {

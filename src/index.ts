@@ -795,7 +795,7 @@ async function registerExposeDdns(
   info: { kind: "portmap" | "tunnel" | "ipv6"; externalIp?: string; externalPort?: number; url?: string },
 ): Promise<{ name: string; actions: Array<{ type: "A" | "AAAA" | "CNAME" | "TXT"; name: string; value: string; ok: boolean; error?: string }> } | null> {
   const { readRegistryConfig, resolveEntry, urlHost } = await import("./ddns-registry.ts");
-  const { setBeacon, upsertRecord, resolvePublicIp } = await import("@aiti-ti/ddns");
+  const { setBeacon, upsertRecord, resolvePublicIp } = await import("@aiti-ai/ddns");
   const cfg = readRegistryConfig(dirs.configDir);
   const entry: RegistrationEntry = {
     name: ddns.profile ?? ddns.providerProfile ?? "expose",

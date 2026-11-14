@@ -1,3 +1,11 @@
+## 0.3.81 (2026-11-14)
+
+> 版本号跳过 0.3.77/0.3.80（这两个版本与 0.3.76 曾误发到 npmjs 官方源且内含内部文档信息，已于 2026-11-14 unpublish 烧号；本版为迁入 aiti-ai 公开仓后的首个官方源发布）。
+
+- **feat(deps): ddns 依赖迁入 @aiti-ai 命名空间**——`@aiti-ti/ddns` → `@aiti-ai/ddns ^0.2.0`（bundle）、`@aiti-ti/ddns-mocks` → `@aiti-ai/ddns-mocks ^0.1.0`（dev），全部 import/文档同步改名。
+- **chore: 公开仓清洗**——git 历史整体改写（git filter-repo）：移除内部文档/镜像运维脚本/test/perf 基准，替换内部域名/路径/网段字符串；补充 MIT LICENSE；package-lock 全量转官方源。
+- 代码与 0.3.79/0.3.80 功能面一致（无新功能，发布链切换版）。
+
 ## 0.3.79 (2026-11-11)
 
 > 版本号跳过 0.3.77/0.3.78（expose/ipv6 线已从另一 checkout 发布，本条目只含 port.list 跨平台化）。

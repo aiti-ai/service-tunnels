@@ -24,7 +24,7 @@
  *  carry provider/zone/record inline (no profiles) for ad-hoc use.
  */
 
-import { setBeacon, upsertRecord, resolvePublicIp } from "@aiti-ti/ddns";
+import { setBeacon, upsertRecord, resolvePublicIp } from "@aiti-ai/ddns";
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DdnsEntry } from "./ddns.ts";
