@@ -1,0 +1,9 @@
+{
+  "nssm": {
+    "version": "2.24",
+    "url": "http://nssm.cc/release/nssm-2.24.zip",
+    "note": "zip archive; extract win64/nssm.exe to bin/nssm.exe (cached copy shipped in bin/)",
+    "sha256": "f689ee9af94b00e9e3f0bb072b34caaf207f32dcb4f5782fc9ca351df9a06c97",
+    "cached": "bin/nssm.exe"
+  }
+}

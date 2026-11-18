@@ -6,15 +6,18 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const src = join(root, "src", "vendor");
-const dist = join(root, "dist", "vendor");
+// Each vendored dir carries its own package.json {"type":"commonjs"} so the CJS
+// contents load correctly inside this ESM package after tsc.
+const vendored = [["src/vendor", "dist/vendor"], ["src/upgrade/vendor", "dist/upgrade/vendor"]];
 
-if (!existsSync(src)) {
-  console.log("copy-vendor: no src/vendor, nothing to do");
-  process.exit(0);
+for (const [src, dist] of vendored) {
+  const srcAbs = join(root, src);
+  const distAbs = join(root, dist);
+  if (!existsSync(srcAbs)) {
+    console.log(`copy-vendor: no ${src}, nothing to do`);
+    continue;
+  }
+  mkdirSync(distAbs, { recursive: true });
+  cpSync(srcAbs, distAbs, { recursive: true });
+  console.log(`copy-vendor: ${src} -> ${dist}`);
 }
-mkdirSync(dist, { recursive: true });
-// Keep package.json: {"type":"commonjs"} marks the vendored dir as CJS
-// inside this ESM package — without it dist/*.js would load as ESM.
-cpSync(src, dist, { recursive: true });
-console.log("copy-vendor: src/vendor -> dist/vendor");

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upgrade Assistant</title>
+<style>
+:root{
+  --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#30363d;
+  --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922;
+  --err:#f85149; --run:#d2a8ff; --mono:'SF Mono',Consolas,'Courier New',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;padding:12px}
+.mono{font-family:var(--mono)}
+header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;flex-wrap:wrap}
+header h1{font-size:16px;font-weight:600}
+.badge{padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;border:1px solid}
+.badge.IDLE,.badge.ARMED{color:var(--dim);border-color:var(--dim)}
+.badge.RUN{color:var(--accent);border-color:var(--accent);background:rgba(88,166,255,.08)}
+.badge.OK{color:var(--ok);border-color:var(--ok);background:rgba(63,185,80,.08)}
+.badge.ERR{color:var(--err);border-color:var(--err);background:rgba(248,81,73,.08)}
+.badge.ROLLBACK{color:var(--warn);border-color:var(--warn)}
+.spacer{flex:1}
+.uptime{color:var(--dim);font-size:12px}
+button{cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--fg);padding:6px 14px;border-radius:6px;font-size:13px}
+button:hover{border-color:var(--accent)}
+button.primary{background:#1f6feb;border-color:#1f6feb}
+button.danger{color:var(--err);border-color:var(--err)}
+button:disabled{opacity:.4;cursor:not-allowed}
+.grid{display:grid;grid-template-columns:280px 1fr;gap:12px;margin-top:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.card h2{font-size:12px;font-weight:600;color:var(--dim);padding:8px 12px;border-bottom:1px solid var(--line);letter-spacing:.08em}
+.card .body{padding:10px 12px}
+.urls{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.url{display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;font-size:12px}
+.url .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex-shrink:0}
+.url a{color:var(--accent);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.copy{padding:2px 8px;font-size:11px}
+.steps{list-style:none}
+.steps li{display:flex;align-items:flex-start;gap:10px;padding:7px 0;position:relative}
+.steps li::before{content:'';position:absolute;left:11px;top:26px;bottom:-6px;width:2px;background:var(--line)}
+.steps li:last-child::before{display:none}
+.st-ic{width:22px;height:22px;border-radius:50%;border:2px solid var(--line);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;z-index:1;background:var(--panel)}
+.steps li.done .st-ic{border-color:var(--ok);color:var(--ok)}
+.steps li.run .st-ic{border-color:var(--run);color:var(--run);animation:pulse 1.2s infinite}
+.steps li.fail .st-ic{border-color:var(--err);color:var(--err)}
+.steps li.skip .st-ic{border-color:var(--dim);color:var(--dim)}
+@keyframes pulse{50%{box-shadow:0 0 0 5px rgba(210,168,255,.15)}}
+.st-name{font-size:13px;font-weight:600}
+.steps li:not(.done):not(.run):not(.fail) .st-name{color:var(--dim)}
+.st-sub{font-size:11px;color:var(--dim);font-family:var(--mono)}
+.steps li.run .st-sub{color:var(--run)}
+.steps li.fail .st-sub{color:var(--err)}
+.console{background:#010409;font-family:var(--mono);font-size:12px;line-height:1.55;padding:10px 12px;height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.console-in{display:flex;gap:8px;padding:8px 10px;border-top:1px solid var(--line);align-items:center}
+.console-in input{flex:1;background:#010409;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:6px 10px;font-family:var(--mono);font-size:12px}
+.console-in input:focus{outline:none;border-color:var(--accent)}
+.follow{font-size:11px;color:var(--dim);cursor:pointer;user-select:none}
+.pbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-top:12px;font-size:13px}
+.pbar .kv{color:var(--dim)} .pbar .kv b{color:var(--fg);font-weight:600;font-family:var(--mono)}
+.health{width:9px;height:9px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+.health.stop{background:var(--err);animation:none}
+.actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.logs{margin-top:12px;max-height:180px;overflow-y:auto;font-family:var(--mono);font-size:12px}
+.logs .row{display:flex;gap:10px;padding:3px 12px;border-bottom:1px solid rgba(48,54,61,.5)}
+.logs .t{color:var(--dim);flex-shrink:0}
+.logs .lv-err{color:var(--err)} .logs .lv-warn{color:var(--warn)} .logs .lv-ok{color:var(--ok)}
+.vbar{margin-top:12px;padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--dim)}
+.banner{display:none;margin-top:12px;padding:12px 16px;border-radius:8px;font-size:14px;font-weight:600;align-items:center;gap:12px}
+.banner.show{display:flex}
+.banner.ok{background:rgba(63,185,80,.12);border:1px solid var(--ok);color:var(--ok)}
+.banner.err{background:rgba(248,81,73,.12);border:1px solid var(--err);color:var(--err)}
+.banner.rb{background:rgba(210,153,34,.12);border:1px solid var(--warn);color:var(--warn)}
+.banner .cd{font-family:var(--mono);font-size:18px}
+.dead{display:none;margin-top:12px;padding:20px;text-align:center;border:1px dashed var(--line);border-radius:8px;color:var(--dim)}
+.dead.show{display:block}
+@media(max-width:720px){.grid{grid-template-columns:1fr}.console{height:220px}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>&#128295; Upgrade Assistant</h1>
+  <span class="badge ARMED" id="phaseBadge">ARMED</span>
+  <span class="uptime mono" id="uptime">up 00:00</span>
+  <span class="spacer"></span>
+  <span class="mono" style="font-size:11px;color:var(--dim)" id="meta">&#9989; token</span>
+  <button class="danger" id="btnStop">&#9211; Stop assistant</button>
+</header>
+
+<div class="urls" id="urls"></div>
+
+<div class="grid">
+  <div class="card">
+    <h2>PROGRESS &middot; NINE STEPS</h2>
+    <div class="body"><ul class="steps" id="steps"></ul></div>
+    <div class="vbar" id="vbar">verify: idle</div>
+  </div>
+  <div class="card">
+    <h2>PARENT CONSOLE <span id="bufInfo" style="float:right;font-weight:400">ring 500</span> <span class="follow" id="follow">&#9679; follow</span></h2>
+    <div class="console" id="console"></div>
+    <div class="console-in">
+      <input id="stdin" placeholder="send to parent stdin (pty interactive prompts)&hellip;">
+      <button id="btnSend">Send</button>
+    </div>
+  </div>
+</div>
+
+<div class="banner ok" id="bannerOk">&#9989; Upgrade done <b id="okVer"></b> &mdash; refresh the target page to see the new version <span class="spacer"></span><span class="cd" id="cd">--</span>s to self-stop</div>
+<div class="banner rb" id="bannerRb">&#9888; Upgrade failed &mdash; rolled back automatically, parent restored</div>
+<div class="banner err" id="bannerErr">&#10060; FINAL STATE FAILED &mdash; rollback did not succeed, manual intervention required</div>
+
+<div class="pbar">
+  <span class="health stop" id="health"></span>
+  <span class="kv">parent <b id="pname">-</b></span>
+  <span class="kv">version <b id="pver">-</b></span>
+  <span class="kv">pid <b id="ppid">-</b></span>
+  <span class="kv">port <b id="pport">-</b></span>
+  <span class="kv">form <b id="pmode">-</b></span>
+  <span class="kv">monitor <b id="pmon">off</b></span>
+</div>
+
+<div class="actions">
+  <button class="primary" id="btnUp">&#9654; Trigger upgrade</button>
+  <button id="btnRb">&#8617; Rollback</button>
+  <button id="btnRe">&#10227; Restart parent</button>
+</div>
+
+<div class="card logs-card">
+  <h2>ASSISTANT EVENTS (events.jsonl)</h2>
+  <div class="logs" id="logs"></div>
+</div>
+
+<div class="dead" id="dead">
+  &#128268; Assistant has stopped (SSE closed)<br><br>
+  <span class="mono" style="font-size:12px" id="reportPath"></span><br><br>
+  Refresh your browser to reach the <b>new version</b> of the parent
+</div>
+
+<script>
+"use strict";
+// token: SHOW_ACCESS link carries ?tk=; park it in sessionStorage and scrub the address bar
+const qs = new URLSearchParams(location.search);
+let TK = qs.get("tk") || sessionStorage.getItem("ua_tk") || "";
+if (qs.get("tk")) { sessionStorage.setItem("ua_tk", TK); history.replaceState(null, "", location.pathname); }
+
+const STEPS = ["PREPARE","SWAP_ASS","SHOW_ACCESS","STOP_PARENT","UPGRADE","RESTART_PARENT","VERIFY","DONE","STOP_ASS"];
+const SUB = {
+  PREPARE:"config read - self-host copied to run-<ts>",
+  SWAP_ASS:"random port - tunnels expose",
+  SHOW_ACCESS:"access URLs shown",
+  STOP_PARENT:"stop parent (service plugin / byPort)",
+  UPGRADE:"preCommands - SWAP - env rewrite (downtime)",
+  RESTART_PARENT:"start parent (argv+env restored)",
+  VERIFY:"poll health + expect match",
+  DONE:"closing page + self-stop countdown",
+  STOP_ASS:"report persisted - exit",
+};
+const state = {}; STEPS.forEach(s => state[s] = "idle");
+let follow = true, sseFail = 0, status = null;
+
+const $ = id => document.getElementById(id);
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+// minimal SGR -> span rendering (colors/bold only, no libraries)
+function ansi(text){
+  let out = esc(text).replace(/\x1b\[([0-9;]*)m/g, (m, p) => {
+    const codes = p.split(";").map(Number);
+    let cls = "";
+    for (const c of codes){
+      if (c===0) cls=""; else if (c===1) cls+=" b";
+      else if (c>=30&&c<=37) cls+=" fg"+(c-30);
+      else if (c>=90&&c<=97) cls+=" fg"+(c-90);
+    }
+    if (!cls) return "</span>";
+    return `<span class="${cls.trim().replace(/ /g,' b')||'x'}">`;
+  });
+  // close any dangling spans crudely: acceptable for a console view
+  return out;
+}
+function renderSteps(){
+  $("steps").innerHTML = STEPS.map((s,i)=>{
+    const st = state[s];
+    const ic = st==="done"?"&#10003;":st==="run"?"&#9673;":st==="fail"?"&#10007;":st==="skip"?"&ndash;":"&#9675;";
+    const cls = st==="done"?"done":st==="run"?"run":st==="fail"?"fail":st==="skip"?"skip":"";
+    return `<li class="${cls}"><span class="st-ic">${ic}</span><div><div class="st-name">${i+1}. ${s}</div><div class="st-sub">${SUB[s]}</div></div></li>`;
+  }).join("");
+}
+function badge(){
+  const cur = STEPS.find(s=>state[s]==="run");
+  const b = $("phaseBadge");
+  const failed = state.UPGRADE==="fail" || state.ROLLBACK_FAIL;
+  if (status && status.phase==="FAILED"){ b.textContent="FAILED"; b.className="badge ERR"; return; }
+  if (status && (status.finalState==="ROLLBACK")){ b.textContent="ROLLBACK"; b.className="badge ROLLBACK"; return; }
+  if (status && status.finalState==="DONE" && !cur){ b.textContent="DONE"; b.className="badge OK"; return; }
+  b.textContent = cur || (status&&status.phase) || "ARMED";
+  b.className = "badge " + (cur?"RUN":"ARMED");
+}
+function log(lv,msg,extra){
+  const t = new Date().toTimeString().slice(0,8);
+  $("logs").insertAdjacentHTML("beforeend",
+    `<div class="row"><span class="t">${t}</span><span class="lv-${lv}">${esc(msg)}${extra?` <span style="color:var(--dim)">${esc(extra)}</span>`:""}</span></div>`);
+  const el = $("logs"); el.scrollTop = el.scrollHeight;
+}
+function con(src,text){
+  const c = $("console");
+  const prefix = src && src!=="parent" ? `<span style="color:var(--dim)">[${esc(src)}] </span>` : "";
+  c.insertAdjacentHTML("beforeend", `<div>${prefix}${ansi(text)}</div>`);
+  while (c.childElementCount > 500) c.removeChild(c.firstChild);
+  if (follow) c.scrollTop = c.scrollHeight;
+}
+function setStep(s,st){ state[s]=st; renderSteps(); badge();
+  if (st==="run") log("warn","&#8594; "+s+" started");
+  if (st==="done") log("ok","&#10003; "+s+" done");
+  if (st==="fail"){ log("err","&#10007; "+s+" failed"); con("assistant","["+s+"] FAILED"); }
+}
+async function api(path, body){
+  const res = await fetch(path, {method:"POST", headers:{"X-Assistant-Token":TK,"Content-Type":"application/json"},
+    body: body?JSON.stringify(body):undefined});
+  const j = await res.json().catch(()=>({}));
+  if (!res.ok) log("err", `${path} -> ${res.status} ${j.error||""}`);
+  else log("ok", `${path} -> ${res.status}`);
+  return j;
+}
+async function refreshStatus(){
+  try {
+    status = await (await fetch("/status")).json();
+    renderStatus();
+  } catch(_){ /* assistant gone -> SSE will die too */ }
+}
+function renderStatus(){
+  const p = status.parent||{};
+  $("pname").textContent = p.name||"-";
+  $("pver").textContent = p.version?("v"+p.version):"-";
+  $("ppid").textContent = p.pid||"-";
+  $("pport").textContent = ":"+(p.port||"-");
+  $("pmode").textContent = p.mode||"-";
+  $("pmon").textContent = p.monitor||"off";
+  $("health").className = "health"+(p.healthy?"":" stop");
+  $("btnUp").disabled = status.running;
+  $("btnRb").disabled = status.running;
+  $("btnRe").disabled = status.running;
+  $("btnStop").innerHTML = status.running ? "&#9889; Abort &amp; rollback" : "&#9211; Stop assistant";
+  // urls card
+  const urls = status.urls||[];
+  $("urls").innerHTML = urls.length ? urls.map(u=>
+    `<div class="url"><span class="dot"></span><span style="color:var(--dim)">${esc(u.kind||"url")}</span><a href="${esc(u.url)}">${esc(u.url)}</a><button class="copy" onclick="navigator.clipboard.writeText('${esc(u.url)}')">copy</button></div>`
+  ).join("") : "";
+  if (status.phase==="DONE" && status.finalState==="DONE"){
+    $("bannerOk").classList.add("show");
+    $("okVer").textContent = "v"+status.target;
+    tickCd();
+  }
+  if (status.finalState==="ROLLBACK"){ $("bannerRb").classList.add("show"); }
+  if (status.phase==="FAILED"){ $("bannerErr").classList.add("show"); }
+  badge();
+}
+let cdTimer=null;
+function tickCd(){
+  if (cdTimer) clearInterval(cdTimer);
+  cdTimer = setInterval(()=>{
+    if (!status||!status.selfStopAt) return;
+    const left = Math.max(0, Math.ceil((status.selfStopAt - Date.now())/1000));
+    $("cd").textContent = left;
+    if (left<=0) clearInterval(cdTimer);
+  },500);
+}
+// ---- SSE ----
+function connect(){
+  const es = new EventSource("/events?tk="+encodeURIComponent(TK));
+  es.addEventListener("replay", e=>{
+    const snap = JSON.parse(e.data);
+    for (const [s,st] of Object.entries(snap.state||{})) state[s]=st;
+    for (const l of snap.logs||[]) log(l.level, l.msg, l.extra && (l.extra.detail||""));
+    for (const c of snap.console||[]) con(c.src, c.text);
+    renderSteps(); badge(); refreshStatus();
+    sseFail = 0;
+  });
+  es.addEventListener("phase", e=>{
+    const d = JSON.parse(e.data);
+    state[d.phase]=d.status;
+    if (d.status==="run") log("warn","&#8594; "+d.phase+" started"+(d.detail?` <span style="color:var(--dim)">${esc(d.detail)}</span>`:""));
+    if (d.status==="done"){ log("ok","&#10003; "+d.phase+" done"+(d.detail?` <span style="color:var(--dim)">${esc(d.detail)}</span>`:"")); con("assistant","["+d.phase+"] done"+(d.detail?" - "+d.detail:"")); }
+    if (d.status==="fail"){ log("err","&#10007; "+d.phase+" failed: "+d.detail); con("assistant","["+d.phase+"] FAILED - "+d.detail); }
+    renderSteps(); badge();
+    if (d.phase==="DONE"||d.phase==="ROLLBACK") refreshStatus();
+  });
+  es.addEventListener("log", e=>{
+    const d = JSON.parse(e.data);
+    log(d.level==="ok"?"ok":d.level==="err"?"err":d.level==="warn"?"warn":"warn", d.msg);
+  });
+  es.addEventListener("console", e=>{
+    const d = JSON.parse(e.data);
+    con(d.src, d.text);
+  });
+  es.addEventListener("verify", e=>{
+    const d = JSON.parse(e.data);
+    $("vbar").textContent = `${d.label} #${d.n}: code=${d.code} ${d.ms}ms extracted=${d.extracted===null?"-":JSON.stringify(d.extracted)} ${d.ok?"&#10003; match":"waiting"} (expect ${d.expect})`;
+    $("vbar").style.color = d.ok ? "var(--ok)" : "var(--dim)";
+  });
+  es.onerror = ()=>{
+    sseFail++;
+    if (sseFail>=3){
+      es.close();
+      $("dead").classList.add("show");
+      if (status && status.historyDir) $("reportPath").textContent = "reports: "+status.historyDir+"/";
+    }
+  };
+}
+// ---- actions ----
+$("btnUp").onclick = ()=>api("/upgrade");
+$("btnRb").onclick = ()=>{ if(confirm("Roll back now?")) api("/rollback"); };
+$("btnRe").onclick = ()=>api("/restart");
+$("btnStop").onclick = ()=>{
+  const msg = status && status.running
+    ? "Abort the running upgrade, roll back and stop the assistant?"
+    : "Stop the assistant now?";
+  if (confirm(msg)) api("/shutdown");
+};
+$("btnSend").onclick = ()=>{
+  const v = $("stdin").value;
+  if (!v) return;
+  con("you", "&#10095; "+v);
+  $("stdin").value = "";
+  api("/parent/input", {data: v+"\n"});
+};
+$("stdin").addEventListener("keydown", e=>{ if(e.key==="Enter") $("btnSend").onclick(); });
+$("follow").onclick = ()=>{ follow=!follow; $("follow").innerHTML = follow?"&#9679; follow":"&#9744; follow"; };
+window.addEventListener("visibilitychange", ()=>{ if(!document.hidden) refreshStatus(); });
+renderSteps(); badge();
+refreshStatus().then(connect);
+</script>
+</body>
+</html>

@@ -10,8 +10,9 @@ import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 import { validateTunnelConfig } from "./validation.ts";
 import { translate, resolveLang, type Lang } from "./i18n.ts";
+import { upgradeRun, upgradeStatus, serviceAction, upgradeVersion } from "./upgrade/facade.ts";
 import { readFileSync } from "fs";
-import { join } from "path";
+import { basename, join } from "path";
 
 function usage(lang: Lang = "en"): void {
   console.log(`service-tunnels <command>
@@ -48,6 +49,12 @@ function usage(lang: Lang = "en"): void {
             [--with-systemd] [--force]
   authonly start [--port <p>] [--base-path <p>] [--site <s>] [--listen <ip>] [--policy <p>]
            | stop | status [--site <s>]
+  upgrade run --config <upgrade.json> [--yes] [--manager <id>] [--no-expose] [--expose <mode>] [--port <p>]
+       [--max-runtime <t>] [--resume|--abort] [--cleanup-config]   # upgrade assistant (self-isolating; --yes is the production gate)
+  upgrade status [--json]                       # live run / lock / last report
+  service install|uninstall|start|stop|restart|status|logs|enable|disable --config <upgrade.json>
+       [--manager <id>] [--tail <n>]            # service-form verbs via the manager plugin chain
+  upgrade version                              # vendored assistant core version
   ui [--port <p>] [--no-browser]
   stop-all
   status [--json]
@@ -65,6 +72,18 @@ interface CliArgs {
   configDir?: string;
   cacheDir?: string;
   json: boolean;
+  /** st upgrade run: temp upgrade.json (launch.json style). */
+  upgradeConfig?: string;
+  /** st upgrade run: production confirmation gate (hard requirement, plan §10.3). */
+  yes?: boolean;
+  manager?: string;
+  noExpose?: boolean;
+  exposeMode?: string;
+  maxRuntime?: string;
+  resumeFlag?: boolean;
+  abortFlag?: boolean;
+  cleanupConfig?: boolean;
+  tail?: number;
   refresh: boolean;
   foreground: boolean;
   lang?: string;
@@ -468,6 +487,36 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--lang":
         args.lang = argv[++i];
         break;
+      case "--config":
+        args.upgradeConfig = argv[++i]!;
+        break;
+      case "--yes":
+        args.yes = true;
+        break;
+      case "--manager":
+        args.manager = argv[++i]!;
+        break;
+      case "--no-expose":
+        args.noExpose = true;
+        break;
+      case "--expose":
+        args.exposeMode = argv[++i]!;
+        break;
+      case "--max-runtime":
+        args.maxRuntime = argv[++i]!;
+        break;
+      case "--resume":
+        args.resumeFlag = true;
+        break;
+      case "--abort":
+        args.abortFlag = true;
+        break;
+      case "--cleanup-config":
+        args.cleanupConfig = true;
+        break;
+      case "--tail":
+        args.tail = Number(argv[++i]!);
+        break;
       default:
         if (a!.startsWith("-")) {
           console.error(translate(resolveLang(undefined, process.env), "cli.unknownArg", { arg: a ?? "" }));
@@ -740,7 +789,69 @@ async function main(): Promise<void> {
           jsonOut({ stopped: await st.daemon.stop() });
           break;
         }
-        case "status": {
+        case "upgrade": {
+      const op = cmd[1] ?? "run";
+      if (op === "version") {
+        jsonOut({ version: upgradeVersion() });
+        return;
+      }
+      if (op === "run") {
+        if (!args.upgradeConfig) {
+          console.error("upgrade run --config <upgrade.json> [--yes] [--manager <id>] [--no-expose] [--port <p>] [--max-runtime <t>] [--resume|--abort] [--cleanup-config]");
+          process.exit(2);
+        }
+        // Production gate (plan §10.3): an upgrade touches services and the target
+        // tree - the explicit --yes is the hard requirement (batch F lesson).
+        if (!args.yes) {
+          console.error("upgrade run touches services and the target tree - confirm with --yes");
+          process.exit(2);
+        }
+        const argv = ["--config", args.upgradeConfig];
+        if (args.manager) argv.push("--manager", args.manager);
+        if (args.noExpose) argv.push("--no-expose");
+        if (args.exposeMode) argv.push("--expose-mode", args.exposeMode);
+        if (args.maxRuntime) argv.push("--max-runtime", args.maxRuntime);
+        if (args.port) argv.push("--port", String(args.port));
+        if (args.resumeFlag) argv.push("--resume");
+        if (args.abortFlag) argv.push("--abort");
+        if (args.cleanupConfig) argv.push("--cleanup-config");
+        // M3: hand the boot process's own CLI entry to the child so its expose step
+        // self-calls st (daemon-mediated) instead of guessing from PATH.
+        const stEntry = process.argv[1] && basename(process.argv[1]) === "cli.js" ? process.argv[1] : undefined;
+        await upgradeRun(argv, { stEntry });
+        // the boot process handed off to the isolated copy: it runs detached and
+        // reports via its status page / `st upgrade status` / history reports
+        return;
+      }
+      if (op === "status") {
+        jsonOut(await upgradeStatus());
+        return;
+      }
+      console.error(`upgrade ${op} not supported (run|status)`);
+      process.exit(2);
+    }
+
+    case "service": {
+      const op = cmd[1] ?? "";
+      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable"];
+      if (!verbs.includes(op)) {
+        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable --config <upgrade.json> [--manager <id>] [--tail <n>]`);
+        process.exit(2);
+      }
+      if (!args.upgradeConfig) {
+        console.error(`service ${op} --config <upgrade.json> (the config's "service" block selects the manager)`);
+        process.exit(2);
+      }
+      const r = await serviceAction(op, args.upgradeConfig, {
+        manager: args.manager,
+        tail: args.tail,
+        onLine: (s) => process.stdout.write(`${s}\n`),
+      });
+      jsonOut(r);
+      return;
+    }
+
+    case "status": {
           jsonOut(st.daemon.status());
           break;
         }
@@ -1745,6 +1856,68 @@ async function main(): Promise<void> {
       rmSync(cachePaths(st.dirs.cacheDir).stateFile, { force: true });
       jsonOut({ stopped, cleaned: true });
       break;
+    }
+
+    case "upgrade": {
+      const op = cmd[1] ?? "run";
+      if (op === "version") {
+        jsonOut({ version: upgradeVersion() });
+        return;
+      }
+      if (op === "run") {
+        if (!args.upgradeConfig) {
+          console.error("upgrade run --config <upgrade.json> [--yes] [--manager <id>] [--no-expose] [--port <p>] [--max-runtime <t>] [--resume|--abort] [--cleanup-config]");
+          process.exit(2);
+        }
+        // Production gate (plan §10.3): an upgrade touches services and the target
+        // tree - the explicit --yes is the hard requirement (batch F lesson).
+        if (!args.yes) {
+          console.error("upgrade run touches services and the target tree - confirm with --yes");
+          process.exit(2);
+        }
+        const argv = ["--config", args.upgradeConfig];
+        if (args.manager) argv.push("--manager", args.manager);
+        if (args.noExpose) argv.push("--no-expose");
+        if (args.exposeMode) argv.push("--expose-mode", args.exposeMode);
+        if (args.maxRuntime) argv.push("--max-runtime", args.maxRuntime);
+        if (args.port) argv.push("--port", String(args.port));
+        if (args.resumeFlag) argv.push("--resume");
+        if (args.abortFlag) argv.push("--abort");
+        if (args.cleanupConfig) argv.push("--cleanup-config");
+        // M3: hand the boot process's own CLI entry to the child so its expose step
+        // self-calls st (daemon-mediated) instead of guessing from PATH.
+        const stEntry = process.argv[1] && basename(process.argv[1]) === "cli.js" ? process.argv[1] : undefined;
+        await upgradeRun(argv, { stEntry });
+        // the boot process handed off to the isolated copy: it runs detached and
+        // reports via its status page / `st upgrade status` / history reports
+        return;
+      }
+      if (op === "status") {
+        jsonOut(await upgradeStatus());
+        return;
+      }
+      console.error(`upgrade ${op} not supported (run|status)`);
+      process.exit(2);
+    }
+
+    case "service": {
+      const op = cmd[1] ?? "";
+      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable"];
+      if (!verbs.includes(op)) {
+        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable --config <upgrade.json> [--manager <id>] [--tail <n>]`);
+        process.exit(2);
+      }
+      if (!args.upgradeConfig) {
+        console.error(`service ${op} --config <upgrade.json> (the config's "service" block selects the manager)`);
+        process.exit(2);
+      }
+      const r = await serviceAction(op, args.upgradeConfig, {
+        manager: args.manager,
+        tail: args.tail,
+        onLine: (s) => process.stdout.write(`${s}\n`),
+      });
+      jsonOut(r);
+      return;
     }
 
     case "status": {
