@@ -37,7 +37,7 @@ export async function upgradeRun(
 export async function serviceAction(
   verb: string,
   configPath: string,
-  opts?: { manager?: string; tail?: number; onLine?: (s: string) => void },
+  opts?: { manager?: string; tail?: number; restartPipeline?: boolean; onLine?: (s: string) => void },
 ): Promise<unknown> {
   return vendorService().serviceAction(verb, path.resolve(configPath), opts);
 }

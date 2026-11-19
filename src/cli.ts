@@ -83,6 +83,7 @@ interface CliArgs {
   resumeFlag?: boolean;
   abortFlag?: boolean;
   cleanupConfig?: boolean;
+  restartPipeline?: boolean;
   tail?: number;
   refresh: boolean;
   foreground: boolean;
@@ -514,6 +515,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--cleanup-config":
         args.cleanupConfig = true;
         break;
+      case "--restart-pipeline":
+        args.restartPipeline = true;
+        break;
       case "--tail":
         args.tail = Number(argv[++i]!);
         break;
@@ -845,6 +849,7 @@ async function main(): Promise<void> {
       const r = await serviceAction(op, args.upgradeConfig, {
         manager: args.manager,
         tail: args.tail,
+        restartPipeline: args.restartPipeline,
         onLine: (s) => process.stdout.write(`${s}\n`),
       });
       jsonOut(r);
@@ -1914,6 +1919,7 @@ async function main(): Promise<void> {
       const r = await serviceAction(op, args.upgradeConfig, {
         manager: args.manager,
         tail: args.tail,
+        restartPipeline: args.restartPipeline,
         onLine: (s) => process.stdout.write(`${s}\n`),
       });
       jsonOut(r);
