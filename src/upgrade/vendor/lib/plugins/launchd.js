@@ -50,6 +50,12 @@ function createLaunchdPlugin(ctx) {
     detect,
 
     async install(spec) {
+      // launchd cannot exec bare names (no PATH): resolve to absolute first
+      if (spec.cmd && !path.isAbsolute(spec.cmd)) {
+        const w = await runCapture("which", [spec.cmd], { timeoutMs: 4000 });
+        const first = (w.stdout || "").trim().split("\n")[0];
+        if (first) spec = { ...spec, cmd: first };
+      }
       const dir = AGENTS_DIR();
       fs.mkdirSync(dir, { recursive: true });
       const logOut = path.join(dir, `${spec.name}.out.log`);
@@ -85,9 +91,22 @@ function createLaunchdPlugin(ctx) {
       return true;
     },
 
+    // legacy start/stop do NOT re-read the plist from disk: a restart must
+    // bootout (unload the loaded definition) and bootstrap the current file,
+    // waiting for the label to be released (bootout returns before release)
     async restart(name) {
-      await this.stop(name);
-      return this.start(name);
+      const uid = (await runCapture("id", ["-u"], { timeoutMs: 4000 })).stdout.trim();
+      const file = plistPath(name);
+      await runCapture("launchctl", ["bootout", `gui/${uid}/${name}`], { timeoutMs: 10000 });
+      for (let i = 0; i < 12; i++) {
+        const r = await runCapture("launchctl", ["print", `gui/${uid}/${name}`], { timeoutMs: 8000 });
+        if (r.code !== 0) break; // label released
+        await sleepImpl(300);
+      }
+      let b = await runCapture("launchctl", ["bootstrap", `gui/${uid}`, file], { timeoutMs: 10000 });
+      if (b.code !== 0) b = await runCapture("launchctl", ["load", "-w", file], { timeoutMs: 10000 });
+      if (b.code !== 0) throw new Error(`launchctl bootstrap failed: ${(b.stderr || "").trim()}`);
+      return true;
     },
 
     // S3: env changes are written into the plist EnvironmentVariables dict. launchctl

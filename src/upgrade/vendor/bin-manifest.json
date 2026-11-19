@@ -1,9 +1,12 @@
 {
   "nssm": {
     "version": "2.24",
-    "url": "http://nssm.cc/release/nssm-2.24.zip",
-    "note": "zip archive; extract win64/nssm.exe to bin/nssm.exe (cached copy shipped in bin/)",
     "sha256": "f689ee9af94b00e9e3f0bb072b34caaf207f32dcb4f5782fc9ca351df9a06c97",
-    "cached": "bin/nssm.exe"
+    "cached": "bin/nssm.exe",
+    "sources": [
+      { "type": "tarball", "url": "https://npm.alot.pw/nssm/-/nssm-0.1.1.tgz", "member": "package/examples/nssm.exe" },
+      { "type": "justget", "url": "http://nssm.cc/release/nssm-2.24.zip", "mirrors": ["https://gh-proxy.com/https://github.com/kirillkovalenko/nssm/releases/download/2.24/nssm-2.24.zip"], "member": "win64/nssm.exe" }
+    ],
+    "note": "npm tarball source ships the identical binary (sha256 verified vs nssm.cc zip); justget direct URL kept as racing fallback"
   }
 }
