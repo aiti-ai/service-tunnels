@@ -98,6 +98,35 @@ test("stop returns false when no daemon is running", async () => {
   }
 });
 
+test("upgrade assistant RPC: upgrade.status / upgrade.run gate / service.action gate", { timeout: 30_000 }, async () => {
+  const { startDaemon, stopDaemon, requestDaemon } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+
+  try {
+    await startDaemon(cacheDir);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !existsSync(join(cacheDir, "state.json"))) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // status: always a well-formed snapshot, even with no assistant runs
+    const st = await requestDaemon(cacheDir, "upgrade.status");
+    assert.equal(typeof st.running, "boolean");
+    assert.ok("lock" in st && "lastReport" in st);
+
+    // run: confirmation/argument gate fires before anything spawns
+    const noArgs = await requestDaemon(cacheDir, "upgrade.run", {});
+    assert.match(String(noArgs.error), /config required/);
+
+    // service.action: verb/config gate
+    const noVerb = await requestDaemon(cacheDir, "service.action", {});
+    assert.match(String(noVerb.error), /verb and config required/);
+  } finally {
+    await stopDaemon(cacheDir).catch(() => {});
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("CLI status/discover round-trip via bin", { timeout: 30_000 }, async () => {
   const { startDaemon, stopDaemon } = await loadSubject();
   const { cacheDir, configDir, base } = tempDirs();

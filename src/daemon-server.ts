@@ -11,8 +11,10 @@
  * NOT a library entry point.
  */
 import { createServer, type Socket } from "net";
-import { existsSync, unlinkSync, readdirSync, writeFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { join } from "path";
+import { spawn } from "child_process";
+import { homedir } from "os";
 import { randomBytes } from "crypto";
 import type { Server as HttpServer } from "http";
 import { InternalRegistry } from "./internal.ts";
@@ -111,6 +113,26 @@ for (const entry of readState(stateFile).internal) {
 }
 
 type Handler = (params: unknown) => unknown | Promise<unknown>;
+
+// ── Upgrade assistant（vendored core，copy-vendor 产物）────────────────────────
+// upgrade.run 以分离子进程跑 vendored core（自宿主隔离语义不变：副本接管编排）；
+// daemon 自身绝不 in-process 跑编排（core 的 handoff 会 process.exit）。
+import { createRequire as upgradeCreateRequire } from "module";
+import upgradePath from "path";
+import { fileURLToPath as upgradeFileURLToPath } from "node:url";
+const upgradeRequire = upgradeCreateRequire(import.meta.url);
+const upgradeVendorRoot = upgradePath.join(upgradePath.dirname(upgradeFileURLToPath(import.meta.url)), "upgrade", "vendor");
+type UpgradeCoreModule = { main: (argv: string[], opts?: object) => Promise<void>; VERSION: string };
+type UpgradeServiceModule = {
+  serviceAction: (verb: string, configPath: string, opts?: object) => Promise<unknown>;
+  pipelineStatus: (runId?: string) => unknown;
+};
+function upgradeCoreModule(): UpgradeCoreModule | null {
+  try { return upgradeRequire(upgradePath.join(upgradeVendorRoot, "core.js")) as UpgradeCoreModule; } catch { return null; }
+}
+function upgradeServiceModule(): UpgradeServiceModule | null {
+  try { return upgradeRequire(upgradePath.join(upgradeVendorRoot, "service.js")) as UpgradeServiceModule; } catch { return null; }
+}
 
 const ssh = new SshManager({ cacheDir });
 
@@ -865,6 +887,55 @@ const methods = new Map<string, Handler>([
       await killRoleProcesses("SIGTERM", 300, process.env.SERVICE_TUNNELS_MARKER ?? "", process.pid, `nginx-${process.pid}`);
       setTimeout(() => process.exit(0), 100);
       return { ok: true };
+    },
+  ],
+  // ── Upgrade assistant RPC（§11.2：ai web 面板 / 外部 agent 的第三消费面）──────
+  [
+    "upgrade.run",
+    (params) => {
+      const core = upgradeCoreModule();
+      if (!core) return { error: "upgrade assistant core unavailable (dist/upgrade/vendor missing)" };
+      const p = (params ?? {}) as { config?: string; manager?: string; noExpose?: boolean };
+      if (!p.config) return { error: "config required" };
+      const argv = [upgradePath.join(upgradeVendorRoot, "core.js"), "--config", String(p.config), "--yes"];
+      if (p.manager) argv.push("--manager", String(p.manager));
+      if (p.noExpose !== false) argv.push("--no-expose");
+      // detached: the vendored core self-hosts a copy and exits on handoff —
+      // never run the orchestration in-process (it would kill the daemon).
+      const child = spawn(process.execPath, argv, { detached: true, stdio: "ignore" });
+      child.unref();
+      return { handedOff: true, pid: child.pid };
+    },
+  ],
+  [
+    "upgrade.status",
+    () => {
+      const base = join(homedir(), ".svc-assistant");
+      let lock: Record<string, unknown> | null = null;
+      try { lock = JSON.parse(readFileSync(join(base, "lock.json"), "utf8")) as Record<string, unknown>; } catch { lock = null; }
+      let lastReport: Record<string, unknown> | null = null;
+      try {
+        const files = readdirSync(join(base, "history")).filter((f) => f.endsWith(".json")).sort().reverse();
+        if (files[0]) lastReport = JSON.parse(readFileSync(join(base, "history", files[0]), "utf8")) as Record<string, unknown>;
+      } catch { /* no history yet */ }
+      const running = lock?.pid
+        ? (() => { try { process.kill(Number(lock?.pid), 0); return true; } catch { return false; } })()
+        : false;
+      return { running, lock, lastReport };
+    },
+  ],
+  [
+    "service.action",
+    async (params) => {
+      const svc = upgradeServiceModule();
+      if (!svc) return { error: "upgrade assistant service module unavailable" };
+      const p = (params ?? {}) as { verb?: string; config?: string; env?: Record<string, string>; manager?: string; tail?: number };
+      if (!p.verb || !p.config) return { error: "verb and config required" };
+      try {
+        return await svc.serviceAction(String(p.verb), String(p.config), { env: p.env, manager: p.manager, tail: p.tail });
+      } catch (err) {
+        return { error: String(err instanceof Error ? err.message : err) };
+      }
     },
   ],
 ]);
