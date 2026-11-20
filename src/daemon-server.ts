@@ -925,6 +925,35 @@ const methods = new Map<string, Handler>([
     },
   ],
   [
+    "upgrade.stop",
+    async () => {
+      // abort the live assistant through its own management API (same surface
+      // the standalone status page uses) - shutdown triggers the rollback path
+      const base = join(homedir(), ".svc-assistant");
+      let lock: Record<string, unknown> | null = null;
+      try { lock = JSON.parse(readFileSync(join(base, "lock.json"), "utf8")) as Record<string, unknown>; } catch { lock = null; }
+      if (!lock?.port) return { stopped: false, error: "no active assistant run" };
+      const token = (() => {
+        try { return readFileSync(join(String(lock?.runDir ?? ""), ".assistant-token"), "utf8").trim(); } catch { return ""; }
+      })();
+      if (!token) return { stopped: false, error: "assistant token missing (stale lock?)" };
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 8000);
+        const res = await fetch(`http://127.0.0.1:${Number(lock?.port)}/shutdown`, {
+          method: "POST",
+          headers: { "x-assistant-token": token },
+          signal: ctl.signal,
+        });
+        clearTimeout(t);
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        return { stopped: res.ok, mode: body.mode ?? null, status: res.status };
+      } catch (err) {
+        return { stopped: false, error: String(err instanceof Error ? err.message : err) };
+      }
+    },
+  ],
+  [
     "service.action",
     async (params) => {
       const svc = upgradeServiceModule();

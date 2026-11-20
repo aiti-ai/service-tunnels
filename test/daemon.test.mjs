@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { createServer } from "node:http";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -121,6 +122,98 @@ test("upgrade assistant RPC: upgrade.status / upgrade.run gate / service.action 
     // service.action: verb/config gate
     const noVerb = await requestDaemon(cacheDir, "service.action", {});
     assert.match(String(noVerb.error), /verb and config required/);
+
+    // stop gate: no lock -> explicit refusal
+    const noStop = await requestDaemon(cacheDir, "upgrade.stop");
+    assert.equal(noStop.stopped, false);
+    assert.match(String(noStop.error), /no active assistant run/);
+  } finally {
+    await stopDaemon(cacheDir).catch(() => {});
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("upgrade.stop posts /shutdown to the live assistant (token gated)", { timeout: 30_000 }, async () => {
+  const { startDaemon, stopDaemon, requestDaemon } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+
+  // sandbox HOME so the daemon's upgrade.stop reads a controlled lock.json
+  // (HOME+USERPROFILE both - the red line for sandboxed homes)
+  const realHome = process.env.HOME;
+  const realProfile = process.env.USERPROFILE;
+  const home = join(base, "home");
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+
+  // fake assistant: the management API surface the status page drives
+  const TOKEN = "tok-rpc-stop-test";
+  let seenToken = null;
+  const fakeAssist = createServer((req, res) => {
+    seenToken = req.headers["x-assistant-token"] ?? null;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ mode: "stopped" }));
+  });
+  await new Promise((r) => fakeAssist.listen(0, "127.0.0.1", r));
+  const port = fakeAssist.address().port;
+
+  const runDir = join(home, ".svc-assistant", "run-test");
+  mkdirSync(join(runDir), { recursive: true });
+  writeFileSync(join(home, ".svc-assistant", "lock.json"), JSON.stringify({ pid: process.pid, port, runDir }));
+  writeFileSync(join(runDir, ".assistant-token"), TOKEN);
+
+  try {
+    await startDaemon(cacheDir);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !existsSync(join(cacheDir, "state.json"))) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const r = await requestDaemon(cacheDir, "upgrade.stop");
+    assert.equal(r.stopped, true, JSON.stringify(r));
+    assert.equal(r.mode, "stopped");
+    assert.equal(seenToken, TOKEN, "token must ride the x-assistant-token header");
+  } finally {
+    fakeAssist.close();
+    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+    if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
+    await stopDaemon(cacheDir).catch(() => {});
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("service.action: real status verb through the daemon (manual byPort)", { timeout: 30_000 }, async () => {
+  const { startDaemon, stopDaemon, requestDaemon } = await loadSubject();
+  const { cacheDir, base } = tempDirs();
+
+  // mock listener the manual plugin's byPort status probe can find
+  const mock = createServer(() => {});
+  await new Promise((r) => mock.listen(0, "127.0.0.1", r));
+  const port = mock.address().port;
+
+  const cfgPath = join(base, "svc-rpc-status.json");
+  writeFileSync(cfgPath, JSON.stringify({
+    parent: { port },
+    service: { manager: "manual", name: "t-rpc-status" },
+    // serviceAction validates the full config shape - the upgrade block is
+    // unused for the status verb but must validate (target + verify probe)
+    upgrade: { target: "1.0.0", verify: { url: `http://127.0.0.1:${port}/`, type: "status" } },
+  }));
+
+  try {
+    await startDaemon(cacheDir);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !existsSync(join(cacheDir, "state.json"))) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const up = await requestDaemon(cacheDir, "service.action", { verb: "status", config: cfgPath });
+    assert.equal(up.verb, "status");
+    assert.equal(up.manager, "manual");
+    assert.equal(up.status, "running", JSON.stringify(up));
+
+    await new Promise((r) => mock.close(r));
+    const down = await requestDaemon(cacheDir, "service.action", { verb: "status", config: cfgPath });
+    assert.equal(down.status, "stopped", JSON.stringify(down));
   } finally {
     await stopDaemon(cacheDir).catch(() => {});
     rmSync(base, { recursive: true, force: true });
