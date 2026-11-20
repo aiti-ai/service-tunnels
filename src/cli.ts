@@ -18,7 +18,7 @@ import { basename, join } from "path";
 function usage(lang: Lang = "en"): void {
   console.log(`service-tunnels <command>
 
-  daemon start [--foreground] | stop | status | logs
+  daemon start [--foreground] | stop | status | logs | call <method> [--params <json>]
   discover [--pid <pid>] [--json] [--refresh]
   internal list [--json]
   tools list | resolve <name> | download <name> | path <name>
@@ -75,6 +75,8 @@ interface CliArgs {
   json: boolean;
   /** st upgrade run: temp upgrade.json (launch.json style). */
   upgradeConfig?: string;
+  /** st daemon call: RPC params as a JSON string. */
+  params?: string;
   /** st upgrade run: production confirmation gate (hard requirement, plan §10.3). */
   yes?: boolean;
   manager?: string;
@@ -495,6 +497,9 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--config":
         args.upgradeConfig = argv[++i]!;
         break;
+      case "--params":
+        args.params = argv[++i]!;
+        break;
       case "--yes":
         args.yes = true;
         break;
@@ -804,6 +809,26 @@ async function main(): Promise<void> {
         }
         case "stop": {
           jsonOut({ stopped: await st.daemon.stop() });
+          break;
+        }
+        case "call": {
+          // generic RPC bridge for embedders (ai web panel drives upgrade.*/service.*)
+          // without importing the daemon module: st daemon call upgrade.status
+          const method = cmd[2] ?? "";
+          if (!method) {
+            console.error("daemon call <method> [--params <json>]");
+            process.exit(2);
+          }
+          let params: unknown;
+          if (args.params !== undefined) {
+            try {
+              params = JSON.parse(args.params);
+            } catch (e) {
+              console.error(`--params must be valid JSON: ${(e as Error).message}`);
+              process.exit(2);
+            }
+          }
+          jsonOut(await st.daemon.request(method, params));
           break;
         }
         case "upgrade": {

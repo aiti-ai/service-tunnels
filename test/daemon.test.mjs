@@ -220,6 +220,45 @@ test("service.action: real status verb through the daemon (manual byPort)", { ti
   }
 });
 
+test("CLI daemon call bridges RPC methods for embedders", { timeout: 30_000 }, async () => {
+  const { startDaemon, stopDaemon } = await loadSubject();
+  const { cacheDir, configDir, base } = tempDirs();
+  const bin = join(import.meta.dirname, "..", "src", "cli.ts");
+  const run = (args) =>
+    new Promise((resolve) => {
+      import("node:child_process").then(({ execFile }) => {
+        execFile(process.execPath, [bin, ...args, "--config-dir", configDir, "--cache-dir", cacheDir], (err, stdout) => {
+          resolve({ err, stdout: String(stdout) });
+        });
+      });
+    });
+
+  try {
+    await startDaemon(cacheDir);
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !existsSync(join(cacheDir, "state.json"))) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    const out = await run(["daemon", "call", "upgrade.status"]);
+    assert.equal(out.err, null, out.stdout);
+    const j = JSON.parse(out.stdout);
+    assert.equal(typeof j.running, "boolean", out.stdout);
+
+    // params ride through as JSON
+    const gated = await run(["daemon", "call", "upgrade.run", "--params", "{}"]);
+    assert.equal(gated.err, null);
+    assert.match(String(JSON.parse(gated.stdout).error), /config required/);
+
+    // unknown daemon -> null (caller falls back to its own paths)
+    const dead = await run(["daemon", "call", "ping"]);
+    assert.equal(dead.err, null);
+  } finally {
+    await stopDaemon(cacheDir).catch(() => {});
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("CLI status/discover round-trip via bin", { timeout: 30_000 }, async () => {
   const { startDaemon, stopDaemon } = await loadSubject();
   const { cacheDir, configDir, base } = tempDirs();
