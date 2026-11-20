@@ -960,6 +960,8 @@ const methods = new Map<string, Handler>([
       if (!svc) return { error: "upgrade assistant service module unavailable" };
       const p = (params ?? {}) as { verb?: string; config?: string; env?: Record<string, string>; manager?: string; tail?: number };
       if (!p.verb || !p.config) return { error: "verb and config required" };
+      // failures stay result-shaped ({error}) so `st daemon call` users see the
+      // reason; embedders treat error-bearing results as not-ok and fall back
       try {
         return await svc.serviceAction(String(p.verb), String(p.config), { env: p.env, manager: p.manager, tail: p.tail });
       } catch (err) {
