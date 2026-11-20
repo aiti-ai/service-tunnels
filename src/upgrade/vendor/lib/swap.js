@@ -13,10 +13,16 @@ function resolveMode(mode) {
 }
 
 // Read what "current" points at now (null when absent).
+// Relative link targets resolve against the LINK's directory (symlink semantics) -
+// the raw readlink text resolves against the process cwd (the assistant run dir),
+// which made rollbacks look for <runDir>/v1.0.0 and fail.
 function currentTarget(currentDir) {
   try {
     const st = fs.lstatSync(currentDir);
-    if (st.isSymbolicLink()) return fs.readlinkSync(currentDir);
+    if (st.isSymbolicLink()) {
+      const raw = fs.readlinkSync(currentDir);
+      return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(path.dirname(currentDir), raw);
+    }
     if (st.isDirectory()) return currentDir; // plain copy mode: current is a real dir
     return null;
   } catch (_) {

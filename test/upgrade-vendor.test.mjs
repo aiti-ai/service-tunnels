@@ -13,7 +13,7 @@ const vendor = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "sr
 
 const { loadConfig, stripJsonComments } = require(path.join(vendor, "lib", "config.js"));
 const { resolveJsonPath, parseDuration } = require(path.join(vendor, "lib", "util.js"));
-const { switchPointer } = require(path.join(vendor, "lib", "swap.js"));
+const { switchPointer, currentTarget } = require(path.join(vendor, "lib", "swap.js"));
 const { writeLock, readLock, clearLock } = require(path.join(vendor, "lib", "state-files.js"));
 
 test("stripJsonComments keeps strings intact", () => {
@@ -171,6 +171,30 @@ test("verify rejects 503 slow-start bodies (jsonPath also requires 2xx)", { time
     assert.equal(orch.orch.lastVerify.code, 200);
   } finally {
     try { oldParent.kill("SIGKILL"); } catch { /* already gone */ }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("currentTarget resolves relative link targets against the link's dir (rollback path)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ua-swap-rel-"));
+  const v1 = path.join(dir, "releases", "v1.0.0");
+  const v2 = path.join(dir, "releases", "v2.0.0");
+  const current = path.join(dir, "releases", "current");
+  fs.mkdirSync(v1, { recursive: true });
+  fs.mkdirSync(v2, { recursive: true });
+  fs.writeFileSync(path.join(v1, "version.txt"), "1.0.0");
+  fs.writeFileSync(path.join(v2, "version.txt"), "2.0.0");
+  // the drill layout: RELATIVE link (ln -s v1.0.0 releases/current)
+  fs.symlinkSync("v1.0.0", current, "dir");
+  try {
+    const recordedOld = currentTarget(current); // orchestrate captures BEFORE the swap
+    assert.equal(recordedOld, v1, "relative target must resolve against the link's dir");
+    // rollback-style restore: pointer -> target(v2) -> back to the pre-swap capture
+    switchPointer(current, v2, "auto");
+    assert.equal(fs.readFileSync(path.join(fs.realpathSync(current), "version.txt"), "utf8"), "2.0.0");
+    switchPointer(current, recordedOld, "auto");
+    assert.equal(fs.readFileSync(path.join(fs.realpathSync(current), "version.txt"), "utf8"), "1.0.0");
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
