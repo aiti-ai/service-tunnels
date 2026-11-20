@@ -64,7 +64,7 @@ async function restartPipeline(configPath, opts = {}) {
   const name = cfg.service.name;
   const port = cfg.parent.port;
 
-  const runId = new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+$/, "");
+  const runId = opts.runId || new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+$/, "");
   const runDir = path.join(SERVICE_RUNS_DIR(), runId);
   fs.mkdirSync(runDir, { recursive: true });
   const ev = (step, status, detail) => {
@@ -153,6 +153,15 @@ async function serviceAction(verb, configPath, opts = {}) {
       return { verb, manager: manager.id, status: await manager.status(cfg.service.name, spec) };
     case "logs":
       return { verb, manager: manager.id, logs: await manager.logs(cfg.service.name, opts.tail || 50, spec) };
+    case "updateenv":
+      // S3 env change: manager-native rewrite (systemd Environment= / nssm
+      // AppEnvironmentExtra / plist) — takes effect on the next restart; the
+      // caller decides whether to restart immediately (forced-ask in the panel)
+      if (!opts.env || typeof opts.env !== "object") throw new Error("updateenv needs --env JSON");
+      {
+        const r = await manager.updateEnv(cfg.service.name, opts.env, spec);
+        return { verb, manager: manager.id, ...r, restartRequired: true };
+      }
     case "enable": {
       if (typeof manager.enable !== "function") {
         // systemd-family: enable via the unit; CLI packages: their own enable verb
@@ -181,4 +190,30 @@ async function serviceAction(verb, configPath, opts = {}) {
   }
 }
 
-module.exports = { serviceAction, restartPipeline, ASSISTANT_ROOT };
+/** Read a pipeline run's events (latest when runId omitted) for progress polling. */
+function pipelineStatus(runId) {
+  const runsDir = SERVICE_RUNS_DIR();
+  let dir = null;
+  try {
+    if (runId) {
+      dir = path.join(runsDir, runId);
+      fs.accessSync(dir);
+    } else {
+      const entries = fs.readdirSync(runsDir).sort().reverse();
+      dir = entries[0] ? path.join(runsDir, entries[0]) : null;
+    }
+  } catch (_) {
+    return null;
+  }
+  if (!dir) return null;
+  let events = [];
+  try {
+    events = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8")
+      .split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+  } catch (_) { /* no events yet */ }
+  let report = null;
+  try { report = JSON.parse(fs.readFileSync(path.join(dir, "report.json"), "utf8")); } catch (_) { /* running */ }
+  return { runId: path.basename(dir), runDir: dir, events, report, running: !report };
+}
+
+module.exports = { serviceAction, restartPipeline, pipelineStatus, ASSISTANT_ROOT };

@@ -10,8 +10,9 @@ import { readEnvToolPaths } from "./tools.ts";
 import { TUNNEL_PARAM_SCHEMAS, tunnelParamSchema, applyParamSets, coerceParam, type TunnelType, type ParamSpec } from "./tunnels.ts";
 import { validateTunnelConfig } from "./validation.ts";
 import { translate, resolveLang, type Lang } from "./i18n.ts";
-import { upgradeRun, upgradeStatus, serviceAction, upgradeVersion } from "./upgrade/facade.ts";
+import { upgradeRun, upgradeStatus, serviceAction, upgradeVersion, servicePipelineRun, servicePipelineStatus } from "./upgrade/facade.ts";
 import { readFileSync } from "fs";
+import * as nodePath from "path";
 import { basename, join } from "path";
 
 function usage(lang: Lang = "en"): void {
@@ -84,6 +85,9 @@ interface CliArgs {
   abortFlag?: boolean;
   cleanupConfig?: boolean;
   restartPipeline?: boolean;
+  asyncFlag?: boolean;
+  runId?: string;
+  envJson?: string;
   tail?: number;
   refresh: boolean;
   foreground: boolean;
@@ -521,6 +525,15 @@ function parseArgs(argv: string[]): { cmd: string[]; args: CliArgs } {
       case "--tail":
         args.tail = Number(argv[++i]!);
         break;
+      case "--async":
+        args.asyncFlag = true;
+        break;
+      case "--run-id":
+        args.runId = argv[++i]!;
+        break;
+      case "--env":
+        args.envJson = argv[++i]!;
+        break;
       default:
         if (a!.startsWith("-")) {
           console.error(translate(resolveLang(undefined, process.env), "cli.unknownArg", { arg: a ?? "" }));
@@ -837,19 +850,47 @@ async function main(): Promise<void> {
 
     case "service": {
       const op = cmd[1] ?? "";
-      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable"];
+      // internal: detached pipeline runner (spawned by `service restart --async`)
+      if (op === "__pipeline-run") {
+        if (!args.upgradeConfig) {
+          console.error("service __pipeline-run --config <file> [--run-id <id>]");
+          process.exit(2);
+        }
+        const r = await servicePipelineRun(args.upgradeConfig, { runId: args.runId });
+        jsonOut(r);
+        process.exit(r.final === "DONE" ? 0 : 1);
+      }
+      if (op === "pipeline") {
+        // progress poll: events of the latest (or given) restart pipeline run
+        jsonOut(servicePipelineStatus(cmd[2]));
+        return;
+      }
+      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable", "updateenv"];
       if (!verbs.includes(op)) {
-        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable --config <upgrade.json> [--manager <id>] [--tail <n>]`);
+        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable|updateenv --config <upgrade.json> [--manager <id>] [--tail <n>] [--restart-pipeline] [--async] [--env <json>]`);
         process.exit(2);
       }
       if (!args.upgradeConfig) {
         console.error(`service ${op} --config <upgrade.json> (the config's "service" block selects the manager)`);
         process.exit(2);
       }
+      // async restart: hand the recover pipeline to a detached child; progress is
+      // pollable via `st service pipeline [runId]` (events.jsonl)
+      if (op === "restart" && args.restartPipeline && args.asyncFlag) {
+        const runId = new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+$/, "");
+        const runDir = nodePath.join(process.env.HOME || process.env.USERPROFILE || "", ".svc-assistant", "service-runs", runId);
+        const { spawn } = await import("node:child_process");
+        const child = spawn(process.execPath, [process.argv[1]!, "service", "__pipeline-run",
+          "--config", args.upgradeConfig, "--run-id", runId], { detached: true, stdio: "ignore" });
+        child.unref();
+        jsonOut({ handedOff: true, runId, runDir });
+        return;
+      }
       const r = await serviceAction(op, args.upgradeConfig, {
         manager: args.manager,
         tail: args.tail,
         restartPipeline: args.restartPipeline,
+        env: args.envJson ? JSON.parse(args.envJson) as Record<string, string> : undefined,
         onLine: (s) => process.stdout.write(`${s}\n`),
       });
       jsonOut(r);
@@ -1907,19 +1948,47 @@ async function main(): Promise<void> {
 
     case "service": {
       const op = cmd[1] ?? "";
-      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable"];
+      // internal: detached pipeline runner (spawned by `service restart --async`)
+      if (op === "__pipeline-run") {
+        if (!args.upgradeConfig) {
+          console.error("service __pipeline-run --config <file> [--run-id <id>]");
+          process.exit(2);
+        }
+        const r = await servicePipelineRun(args.upgradeConfig, { runId: args.runId });
+        jsonOut(r);
+        process.exit(r.final === "DONE" ? 0 : 1);
+      }
+      if (op === "pipeline") {
+        // progress poll: events of the latest (or given) restart pipeline run
+        jsonOut(servicePipelineStatus(cmd[2]));
+        return;
+      }
+      const verbs = ["install", "uninstall", "start", "stop", "restart", "status", "logs", "enable", "disable", "updateenv"];
       if (!verbs.includes(op)) {
-        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable --config <upgrade.json> [--manager <id>] [--tail <n>]`);
+        console.error(`service install|uninstall|start|stop|restart|status|logs|enable|disable|updateenv --config <upgrade.json> [--manager <id>] [--tail <n>] [--restart-pipeline] [--async] [--env <json>]`);
         process.exit(2);
       }
       if (!args.upgradeConfig) {
         console.error(`service ${op} --config <upgrade.json> (the config's "service" block selects the manager)`);
         process.exit(2);
       }
+      // async restart: hand the recover pipeline to a detached child; progress is
+      // pollable via `st service pipeline [runId]` (events.jsonl)
+      if (op === "restart" && args.restartPipeline && args.asyncFlag) {
+        const runId = new Date().toISOString().replace(/[-:T]/g, "").replace(/\..+$/, "");
+        const runDir = nodePath.join(process.env.HOME || process.env.USERPROFILE || "", ".svc-assistant", "service-runs", runId);
+        const { spawn } = await import("node:child_process");
+        const child = spawn(process.execPath, [process.argv[1]!, "service", "__pipeline-run",
+          "--config", args.upgradeConfig, "--run-id", runId], { detached: true, stdio: "ignore" });
+        child.unref();
+        jsonOut({ handedOff: true, runId, runDir });
+        return;
+      }
       const r = await serviceAction(op, args.upgradeConfig, {
         manager: args.manager,
         tail: args.tail,
         restartPipeline: args.restartPipeline,
+        env: args.envJson ? JSON.parse(args.envJson) as Record<string, string> : undefined,
         onLine: (s) => process.stdout.write(`${s}\n`),
       });
       jsonOut(r);

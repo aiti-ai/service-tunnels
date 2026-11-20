@@ -308,7 +308,12 @@ function connect(){
   };
 }
 // ---- actions ----
-$("btnUp").onclick = ()=>api("/upgrade");
+$("btnUp").onclick = ()=>{
+  // Production gate double-confirm (plan section 10.3): an upgrade stops services
+  // and rebuilds the target tree - never one accidental click.
+  if (!confirm("Trigger the upgrade? Services will be stopped and the target rebuilt (recover: rollback button / standalone status page).")) return;
+  api("/upgrade");
+};
 $("btnRb").onclick = ()=>{ if(confirm("Roll back now?")) api("/rollback"); };
 $("btnRe").onclick = ()=>api("/restart");
 $("btnStop").onclick = ()=>{

@@ -13,6 +13,8 @@ const requireCjs = createRequire(import.meta.url);
 type VendorCore = { main: (argv: string[], opts?: { stEntry?: string }) => Promise<void>; VERSION: string };
 type VendorService = {
   serviceAction: (verb: string, configPath: string, opts?: object) => Promise<unknown>;
+  restartPipeline: (configPath: string, opts?: { runId?: string }) => Promise<{ final: string; runDir: string }>;
+  pipelineStatus: (runId?: string) => unknown;
 };
 
 function vendorCore(): VendorCore {
@@ -34,10 +36,21 @@ export async function upgradeRun(
 }
 
 /** `st service <verb>`: service-form verbs via the matrix-calibrated manager chain. */
+export async function servicePipelineRun(
+  configPath: string,
+  opts?: { runId?: string },
+): Promise<{ final: string; runDir: string }> {
+  return vendorService().restartPipeline(path.resolve(configPath), opts);
+}
+
+export function servicePipelineStatus(runId?: string): unknown {
+  return vendorService().pipelineStatus(runId);
+}
+
 export async function serviceAction(
   verb: string,
   configPath: string,
-  opts?: { manager?: string; tail?: number; restartPipeline?: boolean; onLine?: (s: string) => void },
+  opts?: { manager?: string; tail?: number; restartPipeline?: boolean; env?: Record<string, string>; onLine?: (s: string) => void },
 ): Promise<unknown> {
   return vendorService().serviceAction(verb, path.resolve(configPath), opts);
 }
