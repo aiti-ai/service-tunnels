@@ -157,10 +157,12 @@ function createOrchestrator(deps) {
           const { resolveJsonPath } = require("./util");
           const j = JSON.parse(body);
           extracted = resolveJsonPath(j, v.jsonPath);
-          ok = String(extracted) === String(v.expect);
+          // 2xx required: slow-start endpoints answer 503 with a body that may
+          // already carry the expected field - that is NOT a healthy service
+          ok = res.status >= 200 && res.status < 300 && String(extracted) === String(v.expect);
         } else if (v.type === "textContains") {
           extracted = body.includes(v.expect) ? v.expect : null;
-          ok = body.includes(v.expect);
+          ok = res.status >= 200 && res.status < 300 && body.includes(v.expect);
         }
       } catch (e) {
         code = code || 0;
